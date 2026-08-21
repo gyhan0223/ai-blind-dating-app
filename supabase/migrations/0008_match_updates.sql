@@ -19,12 +19,20 @@ begin
        or new.created_at is distinct from old.created_at then
       raise exception 'immutable match columns';
     end if;
-    if new.status is distinct from old.status and new.status not in ('closed') then
+    if new.status is distinct from old.status
+       and not (
+         new.status = 'closed'
+         -- 차단 트리거 경유: 실제 차단 쌍일 때만 blocked 전이 허용
+         or (new.status = 'blocked' and public.is_blocked_pair(new.user_a, new.user_b))
+       ) then
       raise exception 'participants can only close a match';
     end if;
     if new.meetup_state is distinct from old.meetup_state
        and not (
-         (old.meetup_state = 'mutual_interest' and new.meetup_state in ('scheduled', 'completed'))
+         -- 상호 yes 가 실제로 성립했을 때만 mutual_interest 로 전이 가능
+         (old.meetup_state = 'none' and new.meetup_state = 'mutual_interest'
+          and public.meetup_mutual_yes(new.id))
+         or (old.meetup_state = 'mutual_interest' and new.meetup_state in ('scheduled', 'completed'))
          or (old.meetup_state = 'scheduled' and new.meetup_state = 'completed')
        ) then
       raise exception 'invalid meetup_state transition';
