@@ -18,7 +18,7 @@ import { colors, spacing } from '@/theme/tokens';
  */
 export default function AppearanceStep() {
   const { session, refreshAppUser } = useSession();
-  const pairs = useMemo(buildTestPairs, []);
+  const pairs = useMemo(() => buildTestPairs(), []);
   const [round, setRound] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

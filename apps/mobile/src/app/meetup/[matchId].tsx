@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { Button, Card, ChipGroup, InlineNotice, Screen, Text } from '@/components/ui';
 import { REGIONS, regionLabel } from '@/constants/options';
@@ -34,13 +34,14 @@ export default function MeetupScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (data) {
-      setIntentChoice(data.myIntent);
-      setDates(data.myDates);
-      setRegion(data.myRegion);
-    }
-  }, [data]);
+  // 서버 상태로 폼 초기화 (렌더 중 1회)
+  const [hydratedFor, setHydratedFor] = useState<string | null>(null);
+  if (data && hydratedFor !== data.matchId) {
+    setHydratedFor(data.matchId);
+    setIntentChoice(data.myIntent);
+    setDates(data.myDates);
+    setRegion(data.myRegion);
+  }
 
   const save = async () => {
     if (!matchId || !intentChoice) return;

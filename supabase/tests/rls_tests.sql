@@ -189,7 +189,8 @@ declare
   ua uuid := '11111111-1111-1111-1111-111111111111';
   ub uuid := '22222222-2222-2222-2222-222222222222';
 begin
-  select id into m_ab from public.matches limit 1;
+  select id into m_ab from public.matches
+  where user_a = least(ua, ub) and user_b = greatest(ua, ub);
   insert into public.meetup_intentions (match_id, user_id, intent) values (m_ab, ua, 'yes');
 end;
 $$;
@@ -216,7 +217,8 @@ declare
   ub uuid := '22222222-2222-2222-2222-222222222222';
 begin
   -- 상호 yes → meetup_state 갱신 확인
-  select meetup_state into st from public.matches limit 1;
+  select meetup_state into st from public.matches
+  where user_a = least(ua, ub) and user_b = greatest(ua, ub);
   if st <> 'mutual_interest' then raise exception 'FAIL meetup_state not updated: %', st; end if;
 
   -- 차단 → 매치 종료

@@ -53,9 +53,12 @@ export default function ChatRoom() {
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const chatStartedTracked = useRef(false);
 
-  useEffect(() => {
-    if (initialMessages) setMessages(initialMessages);
-  }, [initialMessages]);
+  // 초기 로드 동기화 (렌더 중 1회 — https://react.dev/learn/you-might-not-need-an-effect)
+  const [hydratedFrom, setHydratedFrom] = useState<ChatMessage[] | null>(null);
+  if (initialMessages && hydratedFrom !== initialMessages) {
+    setHydratedFrom(initialMessages);
+    setMessages(initialMessages);
+  }
 
   // 실시간 수신 + 읽음 처리
   useEffect(() => {
