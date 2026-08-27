@@ -22,7 +22,7 @@ export default function Gate() {
   }
 
   if (!session) return <Redirect href="/auth/welcome" />;
-  if (appUser?.status === 'suspended') return <Redirect href="/auth/suspended" />;
+  if (appUser && appUser.status !== 'active') return <Redirect href="/auth/suspended" />;
   if (!appUser?.onboarding_completed) {
     return <Redirect href={nextOnboardingRoute(appUser?.onboarding_step ?? 'welcome') as never} />;
   }

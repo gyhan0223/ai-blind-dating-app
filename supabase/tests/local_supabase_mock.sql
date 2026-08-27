@@ -21,9 +21,11 @@ $$;
 create schema if not exists auth;
 
 create table if not exists auth.users (
-  id         uuid primary key default gen_random_uuid(),
-  email      text unique,
-  created_at timestamptz not null default now()
+  id                 uuid primary key default gen_random_uuid(),
+  email              text unique,
+  phone              text unique,
+  phone_confirmed_at timestamptz,
+  created_at         timestamptz not null default now()
 );
 
 -- JWT claim 기반 uid/role (테스트에서 set_config 로 주입)

@@ -8,7 +8,7 @@ import { supabase } from './supabase';
 
 export type AppUser = {
   id: string;
-  status: 'active' | 'suspended' | 'deleted';
+  status: 'active' | 'suspended' | 'banned' | 'deleted';
   onboarding_step: string;
   onboarding_completed: boolean;
   age_verified: boolean;

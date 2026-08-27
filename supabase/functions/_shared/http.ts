@@ -26,8 +26,10 @@ export function serviceClient(): SupabaseClient {
   );
 }
 
-/** Authorization 헤더의 사용자 JWT 를 검증하고 userId 를 돌려준다. */
-export async function requireUser(req: Request): Promise<{ userId: string } | Response> {
+/** Authorization 헤더의 사용자 JWT 를 검증하고 userId(+토큰)를 돌려준다. */
+export async function requireUser(
+  req: Request,
+): Promise<{ userId: string; token: string } | Response> {
   const authHeader = req.headers.get('Authorization') ?? '';
   const token = authHeader.replace(/^Bearer\s+/i, '');
   if (!token) return json({ error: 'unauthorized' }, 401);
@@ -39,5 +41,5 @@ export async function requireUser(req: Request): Promise<{ userId: string } | Re
   );
   const { data, error } = await anon.auth.getUser(token);
   if (error || !data.user) return json({ error: 'unauthorized' }, 401);
-  return { userId: data.user.id };
+  return { userId: data.user.id, token };
 }

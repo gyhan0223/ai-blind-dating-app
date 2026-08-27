@@ -37,6 +37,22 @@ export default function MeScreen() {
     ]);
   };
 
+  const confirmDelete = () => {
+    Alert.alert('정말 탈퇴할까요?', '추천과 매칭이 중단돼요. 같은 번호로 다시 로그인하면 복구할 수 있어요.', [
+      { text: '취소', style: 'cancel' },
+      {
+        text: '탈퇴하기',
+        style: 'destructive',
+        onPress: async () => {
+          // 콘텐츠/인증/identity 보존 정책은 서버(delete-account Edge Function)가 분리 처리
+          await supabase.functions.invoke('delete-account', { body: { action: 'delete' } });
+          await signOut();
+          router.replace('/auth/welcome');
+        },
+      },
+    ]);
+  };
+
   return (
     <Screen>
       <Text variant="title" style={{ marginBottom: spacing.lg }}>내 정보</Text>
@@ -99,13 +115,14 @@ export default function MeScreen() {
         </Text>
         <Divider />
         <Text variant="caption" color={colors.sub}>
-          계정 삭제를 원하시면 로그인한 이메일로 요청해 주세요.{'\n'}
-          탈퇴 시 얼굴 이미지와 개인 정보는 모두 삭제돼요.
+          탈퇴하면 추천과 매칭이 즉시 중단돼요.{'\n'}
+          중복 가입 방지를 위해 본인확인 기록은 정책에 따라 보관될 수 있어요.
         </Text>
       </Card>
 
-      <View style={{ marginTop: spacing.xl }}>
+      <View style={{ marginTop: spacing.xl, gap: spacing.sm }}>
         <Button kind="secondary" title="로그아웃" onPress={confirmSignOut} />
+        <Button kind="ghost" title="회원 탈퇴" onPress={confirmDelete} />
       </View>
     </Screen>
   );

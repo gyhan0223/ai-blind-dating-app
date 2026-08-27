@@ -26,4 +26,9 @@ if [[ "${WITH_RLS_TESTS:-1}" == "1" && -f rls_tests.sql ]]; then
   $PSQL -d "$DB_NAME" -f rls_tests.sql
 fi
 
+if [[ "${WITH_IDENTITY_TESTS:-1}" == "1" && -f identity_tests.sql ]]; then
+  echo "running identity tests"
+  $PSQL -d "$DB_NAME" -f identity_tests.sql
+fi
+
 echo "OK: schema check passed on $DB_NAME"

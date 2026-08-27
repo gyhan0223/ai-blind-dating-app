@@ -128,6 +128,40 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- 본인확인 identity 시드
+--  * 데모 12명: placeholder identity (실제 본인확인을 거치지 않은 시드 전용 해시)
+--  * banned fixture: Mock Provider 가 010-0000-0098/0099 에 부여하는
+--    identityKey "banned-test-user" 와 동일한 해시 → 차단 우회 방지 시나리오 테스트용.
+--    (개발 기본 secret 기준 — production 은 IDENTITY_HASH_SECRET 을 반드시 교체)
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  u record;
+  banned_uid uuid := 'c3000000-0000-4000-8000-000000000099';
+  dev_secret text := 'dev-only-identity-secret-do-not-use-in-prod';
+begin
+  for u in select id from public.users where is_demo = true and status = 'active' loop
+    insert into public.user_identities (user_id, identity_key_hash, identity_verified_at, adult_verified_at)
+    values (u.id, 'seed:' || md5(u.id::text), now(), now())
+    on conflict (user_id) do nothing;
+  end loop;
+
+  -- 차단된 사용자 fixture (전화번호를 바꿔도 같은 identity 로 재가입 불가해야 한다)
+  insert into auth.users (id, email, phone, phone_confirmed_at)
+  values (banned_uid, 'banned-fixture@bonsim.dev', '821000000099', now())
+  on conflict (id) do nothing;
+  insert into public.users (id, email, phone, phone_verified_at)
+  values (banned_uid, 'banned-fixture@bonsim.dev', '+821000000099', now())
+  on conflict (id) do nothing;
+  update public.users set status = 'banned', is_demo = true where id = banned_uid;
+
+  insert into public.user_identities (user_id, identity_key_hash, identity_verified_at, banned)
+  values (banned_uid, encode(hmac('identity:banned-test-user', dev_secret, 'sha256'), 'hex'), now(), true)
+  on conflict (user_id) do update set banned = true;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- 지훈(m1) ↔ 서연(f1): 서로에게 추천 → 상호 좋아요 → (트리거) 매치 + 대화방
 -- ---------------------------------------------------------------------------
 do $$
