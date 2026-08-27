@@ -65,7 +65,9 @@ export default function Login() {
       setError(
         err.status === 429
           ? '요청이 너무 잦아요. 잠시 후 다시 시도해 주세요.'
-          : '인증번호를 보내지 못했어요. 번호를 확인해 주세요.',
+          : __DEV__
+            ? `인증번호를 보내지 못했어요.\n[dev] ${err.message}` // 개발 모드에서만 원인 표시
+            : '인증번호를 보내지 못했어요. 번호를 확인해 주세요.',
       );
       return;
     }
