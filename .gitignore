@@ -8,4 +8,11 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 .env*.local
+.env
 .DS_Store
+
+# Expo
+apps/mobile/.expo/
+apps/mobile/example/
+apps/mobile/dist/
+apps/mobile/web-build/
