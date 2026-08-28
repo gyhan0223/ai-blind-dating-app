@@ -44,17 +44,21 @@ export function Screen({
   scroll = true,
   padded = true,
   style,
+  scrollRef,
 }: {
   children: React.ReactNode;
   scroll?: boolean;
   padded?: boolean;
   style?: ViewStyle;
+  /** 페이지 전환 시 맨 위로 스크롤하는 등 외부에서 스크롤을 제어할 때 사용 */
+  scrollRef?: React.Ref<ScrollView>;
 }) {
   const inner = padded ? styles.padded : undefined;
   if (scroll) {
     return (
       <SafeAreaView style={styles.screen} edges={['top', 'left', 'right']}>
         <ScrollView
+          ref={scrollRef}
           style={styles.flex}
           contentContainerStyle={[inner, { paddingBottom: spacing.xxl }, style]}
           keyboardShouldPersistTaps="handled"
