@@ -44,6 +44,23 @@ function DealbreakerToggle({
   );
 }
 
+/** "상관없어요" 선택지 — 해당 항목을 비워 두면 활성화되고, 누르면 항목을 초기화한다 */
+function AnyOption({
+  active,
+  onPress,
+  label = '상관없어요',
+}: {
+  active: boolean;
+  onPress: () => void;
+  label?: string;
+}) {
+  return (
+    <View style={{ marginBottom: spacing.md }}>
+      <ChipGroup options={[{ value: 'any', label }]} value={active ? 'any' : null} onChange={onPress} />
+    </View>
+  );
+}
+
 const IMPORTANCE_AXES = [
   { key: 'appearance_importance', title: '외적인 끌림' },
   { key: 'personality_importance', title: '성격 궁합' },
@@ -172,6 +189,14 @@ export default function PreferencesStep() {
 
       <Card>
         <Text variant="heading" style={{ marginBottom: spacing.md }}>나이</Text>
+        <AnyOption
+          active={!ageMin && !ageMax}
+          onPress={() => {
+            setAgeMin('');
+            setAgeMax('');
+            setAgeStrict(false);
+          }}
+        />
         <View style={{ flexDirection: 'row', gap: spacing.md }}>
           <View style={{ flex: 1 }}>
             <Field label="최소" placeholder="예: 27" keyboardType="number-pad" maxLength={2} value={ageMin} onChangeText={setAgeMin} />
@@ -187,6 +212,13 @@ export default function PreferencesStep() {
 
       <Card>
         <Text variant="heading" style={{ marginBottom: spacing.md }}>키 (cm)</Text>
+        <AnyOption
+          active={!heightMin && !heightMax}
+          onPress={() => {
+            setHeightMin('');
+            setHeightMax('');
+          }}
+        />
         <View style={{ flexDirection: 'row', gap: spacing.md }}>
           <View style={{ flex: 1 }}>
             <Field label="최소" placeholder="선택" keyboardType="number-pad" maxLength={3} value={heightMin} onChangeText={setHeightMin} />
@@ -201,6 +233,14 @@ export default function PreferencesStep() {
 
       <Card>
         <Text variant="heading" style={{ marginBottom: spacing.md }}>만나고 싶은 지역</Text>
+        <AnyOption
+          active={regions.length === 0}
+          label="상관없어요 (전국)"
+          onPress={() => {
+            setRegions([]);
+            setRegionStrict(false);
+          }}
+        />
         <ChipGroup
           multiple
           options={REGIONS.map((r) => ({ value: r.value as string, label: r.label }))}
@@ -229,6 +269,9 @@ export default function PreferencesStep() {
 
       <Card>
         <Text variant="heading" style={{ marginBottom: spacing.sm }}>미래에 대한 조건</Text>
+        <Text variant="caption" color={colors.sub}>
+          체크하지 않으면 상관없이 소개받아요.
+        </Text>
         <DealbreakerToggle checked={marriageStrict} onToggle={() => setMarriageStrict(!marriageStrict)} label="결혼 생각이 전혀 없는 분은 제외할래요" />
         <DealbreakerToggle checked={childrenStrict} onToggle={() => setChildrenStrict(!childrenStrict)} label="자녀 계획이 나와 크게 다른 분은 제외할래요" />
       </Card>
@@ -237,6 +280,7 @@ export default function PreferencesStep() {
 
       <Card>
         <Text variant="heading" style={{ marginBottom: spacing.md }}>끌리는 성격 (선택)</Text>
+        <AnyOption active={keywords.length === 0} onPress={() => setKeywords([])} />
         <ChipGroup
           multiple
           options={PERSONALITY_KEYWORDS.map((o) => ({ value: o.value as string, label: o.label }))}
