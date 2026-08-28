@@ -58,6 +58,8 @@ export interface ImportanceWeights {
 export interface PreferenceInput {
   ageMin?: number | null;
   ageMax?: number | null;
+  /** 연상/동갑/연하 선호 — Dealbreaker 가 아닌 soft preference */
+  ageDirection?: 'any' | 'older' | 'same' | 'younger';
   heightMin?: number | null;
   heightMax?: number | null;
   regions: string[];

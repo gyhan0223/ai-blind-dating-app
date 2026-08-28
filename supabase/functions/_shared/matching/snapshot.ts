@@ -116,6 +116,7 @@ export async function loadSnapshots(db: SupabaseClient, userIds: string[]): Prom
       preferences: {
         ageMin: prefs?.age_min ?? null,
         ageMax: prefs?.age_max ?? null,
+        ageDirection: prefs?.age_direction ?? 'any',
         heightMin: prefs?.height_min ?? null,
         heightMax: prefs?.height_max ?? null,
         regions: prefs?.regions ?? [],

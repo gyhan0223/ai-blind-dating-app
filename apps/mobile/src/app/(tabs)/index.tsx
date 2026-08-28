@@ -8,7 +8,9 @@ import { track } from '@/lib/analytics';
 import {
   decideRecommendation,
   fetchTodayRecommendations,
+  SKIP_REASONS,
   type Recommendation,
+  type SkipReason,
 } from '@/lib/recommendations';
 import { colors, spacing } from '@/theme/tokens';
 
@@ -21,6 +23,7 @@ export default function TodayScreen() {
   });
   const [busy, setBusy] = useState(false);
   const [matchedNickname, setMatchedNickname] = useState<string | null>(null);
+  const [askingSkipReason, setAskingSkipReason] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const viewedIds = useRef(new Set<string>());
 
@@ -34,12 +37,17 @@ export default function TodayScreen() {
     }
   }, [pending]);
 
-  const decide = async (rec: Recommendation, decision: 'accepted' | 'skipped') => {
+  const decide = async (
+    rec: Recommendation,
+    decision: 'accepted' | 'skipped',
+    skipReason?: SkipReason | null,
+  ) => {
     setBusy(true);
     setError(null);
     try {
-      const { matched } = await decideRecommendation(rec, decision);
+      const { matched } = await decideRecommendation(rec, decision, skipReason);
       if (matched) setMatchedNickname(rec.card.nickname);
+      setAskingSkipReason(false);
       await queryClient.invalidateQueries({ queryKey: ['today-recommendations'] });
       await queryClient.invalidateQueries({ queryKey: ['conversations'] });
     } catch {
@@ -92,15 +100,51 @@ export default function TodayScreen() {
               <InlineNotice tone="danger" text={error} />
             </View>
           )}
-          <View style={{ marginTop: spacing.lg, gap: spacing.sm }}>
-            <Button title="알아가고 싶어요" onPress={() => decide(pending, 'accepted')} loading={busy} />
-            <Button
-              kind="secondary"
-              title="이번에는 넘길게요"
-              onPress={() => decide(pending, 'skipped')}
-              disabled={busy}
-            />
-          </View>
+          {!askingSkipReason ? (
+            <View style={{ marginTop: spacing.lg, gap: spacing.sm }}>
+              <Button title="알아가고 싶어요" onPress={() => decide(pending, 'accepted')} loading={busy} />
+              <Button
+                kind="secondary"
+                title="이번에는 넘길게요"
+                onPress={() => setAskingSkipReason(true)}
+                disabled={busy}
+              />
+            </View>
+          ) : (
+            <View style={{ marginTop: spacing.lg }}>
+              <Card>
+                <Text variant="heading" style={{ marginBottom: spacing.sm }}>
+                  어떤 점이 아쉬웠나요?
+                </Text>
+                <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.md }}>
+                  더 잘 맞는 분을 소개하는 데만 사용돼요. 상대에게는 전달되지 않아요.
+                </Text>
+                <View style={{ gap: spacing.sm }}>
+                  {SKIP_REASONS.map((r) => (
+                    <Button
+                      key={r.value}
+                      kind="secondary"
+                      title={r.label}
+                      onPress={() => decide(pending, 'skipped', r.value)}
+                      disabled={busy}
+                    />
+                  ))}
+                  <Button
+                    kind="ghost"
+                    title="답하지 않고 넘기기"
+                    onPress={() => decide(pending, 'skipped', null)}
+                    disabled={busy}
+                  />
+                  <Button
+                    kind="ghost"
+                    title="돌아가기"
+                    onPress={() => setAskingSkipReason(false)}
+                    disabled={busy}
+                  />
+                </View>
+              </Card>
+            </View>
+          )}
         </>
       )}
 

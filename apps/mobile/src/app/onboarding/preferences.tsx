@@ -77,6 +77,7 @@ export default function PreferencesStep() {
   const { session, refreshAppUser } = useSession();
   const [ageMin, setAgeMin] = useState('');
   const [ageMax, setAgeMax] = useState('');
+  const [ageDirection, setAgeDirection] = useState<'any' | 'older' | 'same' | 'younger'>('any');
   const [ageStrict, setAgeStrict] = useState(false);
   const [heightMin, setHeightMin] = useState('');
   const [heightMax, setHeightMax] = useState('');
@@ -120,6 +121,7 @@ export default function PreferencesStep() {
       user_id: userId,
       age_min: ageMinNum,
       age_max: ageMaxNum,
+      age_direction: ageDirection,
       height_min: heightMinNum,
       height_max: heightMaxNum,
       regions,
@@ -189,14 +191,24 @@ export default function PreferencesStep() {
 
       <Card>
         <Text variant="heading" style={{ marginBottom: spacing.md }}>나이</Text>
-        <AnyOption
-          active={!ageMin && !ageMax}
-          onPress={() => {
-            setAgeMin('');
-            setAgeMax('');
-            setAgeStrict(false);
-          }}
-        />
+        <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.sm }}>
+          연상·연하는 어떠세요?
+        </Text>
+        <View style={{ marginBottom: spacing.md }}>
+          <ChipGroup
+            options={[
+              { value: 'any', label: '상관없어요' },
+              { value: 'older', label: '연상이 좋아요' },
+              { value: 'same', label: '동갑이 좋아요' },
+              { value: 'younger', label: '연하가 좋아요' },
+            ]}
+            value={ageDirection}
+            onChange={(v) => setAgeDirection(v as typeof ageDirection)}
+          />
+        </View>
+        <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.sm }}>
+          원하는 나이 범위 (비워 두면 상관없어요)
+        </Text>
         <View style={{ flexDirection: 'row', gap: spacing.md }}>
           <View style={{ flex: 1 }}>
             <Field label="최소" placeholder="예: 27" keyboardType="number-pad" maxLength={2} value={ageMin} onChangeText={setAgeMin} />
