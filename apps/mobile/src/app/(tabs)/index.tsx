@@ -3,14 +3,14 @@ import { router } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { RecommendationCard } from '@/components/RecommendationCard';
-import { Button, Card, InlineNotice, Screen, Text } from '@/components/ui';
+import { Button, Card, ChipGroup, InlineNotice, Screen, Text } from '@/components/ui';
 import { track } from '@/lib/analytics';
 import {
   decideRecommendation,
   fetchTodayRecommendations,
-  SKIP_REASONS,
+  SKIP_CATEGORIES,
   type Recommendation,
-  type SkipReason,
+  type SkipCategory,
 } from '@/lib/recommendations';
 import { colors, spacing } from '@/theme/tokens';
 
@@ -24,6 +24,7 @@ export default function TodayScreen() {
   const [busy, setBusy] = useState(false);
   const [matchedNickname, setMatchedNickname] = useState<string | null>(null);
   const [askingSkipReason, setAskingSkipReason] = useState(false);
+  const [skipCategory, setSkipCategory] = useState<SkipCategory | null>(null);
   const [error, setError] = useState<string | null>(null);
   const viewedIds = useRef(new Set<string>());
 
@@ -40,14 +41,16 @@ export default function TodayScreen() {
   const decide = async (
     rec: Recommendation,
     decision: 'accepted' | 'skipped',
-    skipReason?: SkipReason | null,
+    reasonCategory?: SkipCategory | null,
+    reasonDetail?: string | null,
   ) => {
     setBusy(true);
     setError(null);
     try {
-      const { matched } = await decideRecommendation(rec, decision, skipReason);
+      const { matched } = await decideRecommendation(rec, decision, reasonCategory, reasonDetail);
       if (matched) setMatchedNickname(rec.card.nickname);
       setAskingSkipReason(false);
+      setSkipCategory(null);
       await queryClient.invalidateQueries({ queryKey: ['today-recommendations'] });
       await queryClient.invalidateQueries({ queryKey: ['conversations'] });
     } catch {
@@ -55,6 +58,16 @@ export default function TodayScreen() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const pickCategory = (rec: Recommendation, value: SkipCategory) => {
+    const category = SKIP_CATEGORIES.find((c) => c.value === value);
+    if (!category?.details?.length) {
+      // 세부 사유가 없는 항목(지금은 여유가 없어요 등)은 바로 제출
+      decide(rec, 'skipped', value, null);
+      return;
+    }
+    setSkipCategory(value);
   };
 
   return (
@@ -119,29 +132,53 @@ export default function TodayScreen() {
                 <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.md }}>
                   더 잘 맞는 분을 소개하는 데만 사용돼요. 상대에게는 전달되지 않아요.
                 </Text>
-                <View style={{ gap: spacing.sm }}>
-                  {SKIP_REASONS.map((r) => (
-                    <Button
-                      key={r.value}
-                      kind="secondary"
-                      title={r.label}
-                      onPress={() => decide(pending, 'skipped', r.value)}
-                      disabled={busy}
+                {!skipCategory ? (
+                  <>
+                    <ChipGroup
+                      options={SKIP_CATEGORIES.map((c) => ({ value: c.value, label: c.label }))}
+                      value={null}
+                      onChange={(v) => !busy && pickCategory(pending, v as SkipCategory)}
                     />
-                  ))}
-                  <Button
-                    kind="ghost"
-                    title="답하지 않고 넘기기"
-                    onPress={() => decide(pending, 'skipped', null)}
-                    disabled={busy}
-                  />
-                  <Button
-                    kind="ghost"
-                    title="돌아가기"
-                    onPress={() => setAskingSkipReason(false)}
-                    disabled={busy}
-                  />
-                </View>
+                    <View style={{ gap: spacing.sm, marginTop: spacing.md }}>
+                      <Button
+                        kind="ghost"
+                        title="답하지 않고 넘기기"
+                        onPress={() => decide(pending, 'skipped', null, null)}
+                        disabled={busy}
+                      />
+                      <Button
+                        kind="ghost"
+                        title="돌아가기"
+                        onPress={() => setAskingSkipReason(false)}
+                        disabled={busy}
+                      />
+                    </View>
+                  </>
+                ) : (
+                  <>
+                    <Text variant="caption" color={colors.inkSoft} style={{ marginBottom: spacing.sm }}>
+                      {SKIP_CATEGORIES.find((c) => c.value === skipCategory)?.label} — 어떤 점이요?
+                    </Text>
+                    <ChipGroup
+                      options={
+                        SKIP_CATEGORIES.find((c) => c.value === skipCategory)?.details?.map((d) => ({
+                          value: d.value,
+                          label: d.label,
+                        })) ?? []
+                      }
+                      value={null}
+                      onChange={(v) => !busy && decide(pending, 'skipped', skipCategory, v)}
+                    />
+                    <View style={{ gap: spacing.sm, marginTop: spacing.md }}>
+                      <Button
+                        kind="ghost"
+                        title="뒤로"
+                        onPress={() => setSkipCategory(null)}
+                        disabled={busy}
+                      />
+                    </View>
+                  </>
+                )}
               </Card>
             </View>
           )}

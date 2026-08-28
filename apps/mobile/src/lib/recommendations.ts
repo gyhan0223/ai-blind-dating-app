@@ -39,13 +39,75 @@ export async function fetchTodayRecommendations(): Promise<{
   };
 }
 
-/** 스킵 사유 — 지금은 수집만 하고 추후 추천 가중치/탐색 정책에 반영한다 */
-export type SkipReason = 'conditions' | 'style' | 'distance' | 'not_now' | 'other';
+/**
+ * 스킵 사유 — 2단계 선택 (아쉬웠던 항목 → 구체 사유).
+ * 지금은 수집만 하고 추후 추천 가중치/탐색 정책에 반영한다.
+ * details 가 없는 항목은 선택 즉시 제출된다.
+ */
+export type SkipCategory =
+  | 'age'
+  | 'region'
+  | 'height'
+  | 'job'
+  | 'smoking_drinking'
+  | 'style'
+  | 'not_now'
+  | 'other';
 
-export const SKIP_REASONS: { value: SkipReason; label: string }[] = [
-  { value: 'conditions', label: '조건이 안 맞아요' },
-  { value: 'style', label: '끌리는 느낌이 아니에요' },
-  { value: 'distance', label: '거리가 멀어요' },
+export const SKIP_CATEGORIES: {
+  value: SkipCategory;
+  label: string;
+  details?: { value: string; label: string }[];
+}[] = [
+  {
+    value: 'age',
+    label: '나이',
+    details: [
+      { value: 'too_old', label: '나이가 너무 많아요' },
+      { value: 'too_young', label: '나이가 너무 어려요' },
+    ],
+  },
+  {
+    value: 'region',
+    label: '지역',
+    details: [
+      { value: 'too_far', label: '거리가 너무 멀어요' },
+      { value: 'different_area', label: '생활권이 달라요' },
+    ],
+  },
+  {
+    value: 'height',
+    label: '키',
+    details: [
+      { value: 'too_tall', label: '키가 너무 커요' },
+      { value: 'too_short', label: '키가 더 컸으면 해요' },
+    ],
+  },
+  {
+    value: 'job',
+    label: '직업',
+    details: [
+      { value: 'not_preferred', label: '선호하는 직업군이 아니에요' },
+      { value: 'lifestyle_mismatch', label: '생활 패턴이 다를 것 같아요' },
+    ],
+  },
+  {
+    value: 'smoking_drinking',
+    label: '흡연·음주',
+    details: [
+      { value: 'smoking', label: '흡연이 마음에 걸려요' },
+      { value: 'drinking', label: '음주가 마음에 걸려요' },
+    ],
+  },
+  {
+    value: 'style',
+    label: '느낌·취향',
+    details: [
+      { value: 'hobbies', label: '취미가 안 맞아요' },
+      { value: 'personality', label: '성격 키워드가 안 끌려요' },
+      { value: 'no_pull', label: '전체적으로 끌리지 않아요' },
+    ],
+  },
   { value: 'not_now', label: '지금은 여유가 없어요' },
   { value: 'other', label: '그 외' },
 ];
@@ -58,7 +120,8 @@ export const SKIP_REASONS: { value: SkipReason; label: string }[] = [
 export async function decideRecommendation(
   rec: Recommendation,
   decision: 'accepted' | 'skipped',
-  skipReason?: SkipReason | null,
+  skipCategory?: SkipCategory | null,
+  skipDetail?: string | null,
 ): Promise<{ matched: boolean }> {
   const { data: auth } = await supabase.auth.getUser();
   const userId = auth.user?.id;
@@ -69,7 +132,8 @@ export async function decideRecommendation(
     .update({
       status: decision,
       decided_at: new Date().toISOString(),
-      skip_reason: decision === 'skipped' ? (skipReason ?? null) : null,
+      skip_reason: decision === 'skipped' ? (skipCategory ?? null) : null,
+      skip_reason_detail: decision === 'skipped' ? (skipDetail ?? null) : null,
     })
     .eq('id', rec.id);
   if (updateErr) throw new Error('처리하지 못했습니다.');
@@ -78,7 +142,8 @@ export async function decideRecommendation(
     track('recommendation_skipped', {
       recommendation_id: rec.id,
       strategy: rec.strategy,
-      reason: skipReason ?? null,
+      reason: skipCategory ?? null,
+      reason_detail: skipDetail ?? null,
     });
     return { matched: false };
   }
