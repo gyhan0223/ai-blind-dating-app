@@ -60,17 +60,12 @@ export default function IdentityStep() {
     setStage('code');
   };
 
-  const confirm = async () => {
-    setLoading(true);
-    setError(null);
-    const { data, error: err } = await supabase.functions.invoke('verify-identity', {
-      body: { action: 'confirm', requestId, code: code.trim(), ...payload },
-    });
-    setLoading(false);
-    if (err) {
-      setError('인증에 실패했어요. 잠시 후 다시 시도해 주세요.');
-      return;
-    }
+  /** confirm 응답 공통 처리 — 신규/기존 계정/차단/미성년 분기 */
+  const handleConfirmOutcome = async (data: {
+    verified?: boolean;
+    result?: string;
+    maskedPhone?: string | null;
+  } | null) => {
     if (data?.verified) {
       await advanceOnboarding('face');
       await refreshAppUser();
@@ -92,6 +87,62 @@ export default function IdentityStep() {
       default:
         setError('인증에 실패했어요. 인증번호를 다시 확인해 주세요.');
     }
+  };
+
+  const confirm = async () => {
+    setLoading(true);
+    setError(null);
+    const { data, error: err } = await supabase.functions.invoke('verify-identity', {
+      body: { action: 'confirm', requestId, code: code.trim(), ...payload },
+    });
+    setLoading(false);
+    if (err) {
+      setError('인증에 실패했어요. 잠시 후 다시 시도해 주세요.');
+      return;
+    }
+    await handleConfirmOutcome(data);
+  };
+
+  /**
+   * 개발 전용 — 인증번호 입력 없이 요청→확인을 한 번에 진행한다.
+   * 비워둔 항목은 기본값으로 채운다 (Mock Provider 는 어떤 6자리 코드든 통과).
+   * identityKey 분기(신규/복구/차단)는 서버가 실제와 동일하게 판단하므로
+   * fixture 번호 시나리오도 이 버튼으로 그대로 테스트할 수 있다.
+   */
+  const devPass = async () => {
+    const dName = name.trim() || '테스트사용자';
+    const dBirth = birth.length === 8 ? birth : '19960515';
+    const dCarrier = carrier ?? 'skt';
+    // recover 등 후속 호출이 같은 payload 를 쓰도록 상태도 채워 둔다
+    setName(dName);
+    setBirth(dBirth);
+    setCarrier(dCarrier);
+    setCode('123456');
+    const p = {
+      name: dName,
+      birthDate: `${dBirth.slice(0, 4)}-${dBirth.slice(4, 6)}-${dBirth.slice(6, 8)}`,
+      carrier: dCarrier,
+    };
+    setLoading(true);
+    setError(null);
+    const { data: reqData, error: reqErr } = await supabase.functions.invoke('verify-identity', {
+      body: { action: 'request', ...p },
+    });
+    if (reqErr || !reqData?.requestId) {
+      setLoading(false);
+      setError('인증 요청에 실패했어요. verify-identity 함수가 배포되어 있는지 확인해 주세요.');
+      return;
+    }
+    setRequestId(reqData.requestId);
+    const { data, error: err } = await supabase.functions.invoke('verify-identity', {
+      body: { action: 'confirm', requestId: reqData.requestId, code: '123456', ...p },
+    });
+    setLoading(false);
+    if (err) {
+      setError('인증에 실패했어요. 잠시 후 다시 시도해 주세요.');
+      return;
+    }
+    await handleConfirmOutcome(data);
   };
 
   const recover = async () => {
@@ -168,6 +219,16 @@ export default function IdentityStep() {
             loading={loading}
             disabled={!name.trim() || birth.length !== 8 || !carrier}
           />
+          {__DEV__ && (
+            <View style={{ marginTop: spacing.sm }}>
+              <Button
+                kind="secondary"
+                title="테스트로 통과하기 (개발용)"
+                onPress={devPass}
+                loading={loading}
+              />
+            </View>
+          )}
         </>
       )}
 

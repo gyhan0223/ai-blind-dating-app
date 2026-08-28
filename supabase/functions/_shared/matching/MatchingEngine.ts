@@ -243,6 +243,16 @@ function preferenceFitAdjustment(viewer: UserSnapshot, candidate: UserSnapshot, 
     const inRange = (p.ageMin == null || candAge >= p.ageMin) && (p.ageMax == null || candAge <= p.ageMax);
     adjustment += inRange ? 0.03 : -0.05;
   }
+  if (p.ageDirection && p.ageDirection !== 'any') {
+    const myAge = approximateAge(viewer.profile.birthYear, nowYear);
+    const fits =
+      p.ageDirection === 'older'
+        ? candAge > myAge
+        : p.ageDirection === 'younger'
+          ? candAge < myAge
+          : candAge === myAge;
+    adjustment += fits ? 0.03 : -0.03;
+  }
   if (p.heightMin != null || p.heightMax != null) {
     const inRange =
       (p.heightMin == null || cand.heightCm >= p.heightMin) &&

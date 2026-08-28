@@ -35,6 +35,7 @@ psql "$DATABASE_URL" -f supabase/seed/seed.sql
 # Edge Functions 배포
 supabase functions deploy verify-identity
 supabase functions deploy delete-account
+supabase functions deploy dev-login       # 개발 전용 — production 배포 전 삭제!
 supabase functions deploy complete-face-verification
 supabase functions deploy daily-recommendation
 supabase functions deploy icebreaker
@@ -70,7 +71,16 @@ npx expo start           # iOS 시뮬레이터: i / Android: a
 - 테스트 여성: `demo-f1@bonsim.dev` (서연) — 지훈과 매치·대화가 시드되어 있음
 - 비밀번호: `bonsim-dev-password`
 
-본인확인(Mock) fixture — Test OTP 로 로그인한 번호에 따라 identityKey 가 결정됩니다:
+**테스트 로그인 (SMS 설정 없이 통과)**: 개발 모드(`npx expo start`)에서는 전화번호 입력
+화면에 "테스트로 시작하기" 버튼이 표시됩니다. `dev-login` Edge Function 이 입력한 번호가
+연결된 개발 계정을 만들어 로그인시켜 주므로, Phone provider / Test OTP 설정 없이도
+본인확인·온보딩 플로우를 그대로 테스트할 수 있어요. 기본은 010-0000-XXXX 대역만 허용
+(다른 번호는 `supabase secrets set ALLOW_DEV_LOGIN=1`).
+release 빌드에는 버튼이 없으며, **production 배포 전 dev-login 함수는 반드시 삭제**하거나
+`supabase secrets set DISABLE_DEV_LOGIN=1` 로 끕니다.
+
+본인확인(Mock) fixture — 로그인한 번호에 따라 identityKey 가 결정됩니다
+(Test OTP 로그인, 테스트 로그인 버튼 모두 동일):
 
 | 로그인 번호 | identityKey | 용도 |
 |---|---|---|

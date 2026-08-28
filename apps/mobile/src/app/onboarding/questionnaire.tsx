@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
-import React, { useMemo, useState } from 'react';
-import { View } from 'react-native';
+import React, { useMemo, useRef, useState } from 'react';
+import { ScrollView, View } from 'react-native';
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, Card, InlineNotice, LikertScale, Screen, Text } from '@/components/ui';
 import { QUESTIONS } from '@/constants/questions';
@@ -30,10 +30,16 @@ export default function QuestionnaireStep() {
   const currentQuestions = pages[page] ?? [];
   const pageComplete = currentQuestions.every((q) => answers[q.id] != null);
   const isLastPage = page === pages.length - 1;
+  const scrollRef = useRef<ScrollView>(null);
+
+  const goToPage = (p: number) => {
+    setPage(p);
+    scrollRef.current?.scrollTo({ y: 0, animated: true });
+  };
 
   const next = async () => {
     if (!isLastPage) {
-      setPage(page + 1);
+      goToPage(page + 1);
       return;
     }
     const userId = session?.user.id;
@@ -58,7 +64,7 @@ export default function QuestionnaireStep() {
   };
 
   return (
-    <Screen>
+    <Screen scrollRef={scrollRef}>
       <OnboardingHeader
         step="questionnaire"
         title="나에 대한 질문"
@@ -92,7 +98,7 @@ export default function QuestionnaireStep() {
           loading={busy}
           disabled={!pageComplete}
         />
-        {page > 0 && <Button kind="ghost" title="이전" onPress={() => setPage(page - 1)} />}
+        {page > 0 && <Button kind="ghost" title="이전" onPress={() => goToPage(page - 1)} />}
       </View>
       <Text variant="caption" color={colors.faint} style={{ marginTop: spacing.md, textAlign: 'center' }}>
         답변은 매칭에만 사용되며 상대에게 그대로 공개되지 않아요.

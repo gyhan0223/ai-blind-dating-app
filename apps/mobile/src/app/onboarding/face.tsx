@@ -1,7 +1,7 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router } from 'expo-router';
-import React, { useRef, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { AppState, Linking, Platform, StyleSheet, View } from 'react-native';
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, InlineNotice, Screen, Text } from '@/components/ui';
 import { advanceOnboarding } from '@/lib/onboarding';
@@ -32,6 +32,39 @@ export default function FaceStep() {
   const userId = session?.user.id;
   const current = FACE_POSES[poseIndex];
   const allCaptured = poseIndex >= FACE_POSES.length;
+
+  // 권한 팝업을 한 번 거부하면 OS 가 같은 팝업을 다시 띄우지 않으므로(canAskAgain=false)
+  // 그때는 설정 앱으로 안내해야 한다.
+  const needsSettings = !!permission && !permission.granted && !permission.canAskAgain;
+
+  // 설정 앱에서 권한을 켜고 돌아왔을 때 상태를 갱신한다.
+  // (canAskAgain=false 상태에서는 requestPermission 이 팝업 없이 현재 상태만 돌려준다)
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && permission && !permission.granted && !permission.canAskAgain) {
+        requestPermission();
+      }
+    });
+    return () => sub.remove();
+  }, [permission, requestPermission]);
+
+  const askPermission = async () => {
+    setError(null);
+    if (needsSettings && Platform.OS !== 'web') {
+      await Linking.openSettings();
+      return;
+    }
+    const res = await requestPermission();
+    if (!res.granted) {
+      if (Platform.OS === 'web') {
+        setError('브라우저 주소창 왼쪽의 사이트 설정에서 카메라를 허용한 뒤 새로고침해 주세요.');
+      } else if (!res.canAskAgain) {
+        setError('카메라 권한이 꺼져 있어요. 설정에서 허용해 주세요.');
+      } else {
+        setError('카메라 권한이 거부되었어요. 다시 시도해 주세요.');
+      }
+    }
+  };
 
   const finish = async (finalPaths: Record<FacePose, string>) => {
     await completeFaceVerification(finalPaths);
@@ -90,9 +123,19 @@ export default function FaceStep() {
 
       {!permission?.granted ? (
         <View style={{ gap: spacing.md }}>
-          <InlineNotice text="본인 확인을 위해 카메라 권한이 필요해요." />
-          <Button title="카메라 허용하기" onPress={requestPermission} />
-          {DEV_LOGIN_ENABLED && (
+          <InlineNotice
+            text={
+              needsSettings && Platform.OS !== 'web'
+                ? '카메라 권한이 꺼져 있어요. 설정에서 허용하면 촬영을 진행할 수 있어요.'
+                : '본인 확인을 위해 카메라 권한이 필요해요.'
+            }
+          />
+          {error && <InlineNotice tone="danger" text={error} />}
+          <Button
+            title={needsSettings && Platform.OS !== 'web' ? '설정에서 카메라 허용하기' : '카메라 허용하기'}
+            onPress={askPermission}
+          />
+          {(__DEV__ || DEV_LOGIN_ENABLED) && (
             <Button kind="secondary" title="개발 모드: 촬영 건너뛰기" onPress={devSkip} loading={busy} />
           )}
         </View>
@@ -112,7 +155,7 @@ export default function FaceStep() {
             </Text>
             {error && <InlineNotice tone="danger" text={error} />}
             <Button title="촬영" onPress={capture} loading={busy} />
-            {DEV_LOGIN_ENABLED && (
+            {(__DEV__ || DEV_LOGIN_ENABLED) && (
               <Button kind="ghost" title="개발 모드: 촬영 건너뛰기" onPress={devSkip} disabled={busy} />
             )}
           </View>

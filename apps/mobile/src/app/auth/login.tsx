@@ -100,6 +100,45 @@ export default function Login() {
     setError(null);
   };
 
+  /**
+   * 개발 전용 — SMS 설정 없이 통과. dev-login Edge Function 이 입력한 번호가 붙은
+   * 개발 계정을 만들어 주고, 그 계정으로 로그인한다. 이후 본인확인/온보딩은 실제와 동일.
+   * release 빌드(__DEV__ = false)에는 버튼 자체가 없다.
+   */
+  const devLogin = async () => {
+    if (!e164) {
+      setError('올바른 휴대전화 번호를 입력해 주세요.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    const { data, error: fnErr } = await supabase.functions.invoke('dev-login', {
+      body: { phone: e164 },
+    });
+    if (fnErr || !data?.email) {
+      setLoading(false);
+      let detail = fnErr?.message ?? '';
+      try {
+        // FunctionsHttpError 면 서버가 보낸 안내 메시지를 꺼내 보여준다
+        const ctx = await (fnErr as { context?: Response })?.context?.json();
+        if (ctx?.message || ctx?.error) detail = ctx.message ?? ctx.error;
+      } catch {}
+      setError(`테스트 로그인에 실패했어요.\n[dev] ${detail || 'dev-login 함수가 배포되어 있는지 확인해 주세요.'}`);
+      return;
+    }
+    const { error: signErr } = await supabase.auth.signInWithPassword({
+      email: data.email,
+      password: data.password,
+    });
+    setLoading(false);
+    if (signErr) {
+      setError(`테스트 로그인에 실패했어요.\n[dev] ${signErr.message}`);
+      return;
+    }
+    track('signup_started');
+    router.replace('/');
+  };
+
   const fmtTimer = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
@@ -143,6 +182,17 @@ export default function Login() {
       {stage === 'phone' ? (
         <>
           <Button title="인증번호 받기" onPress={requestCode} loading={loading} disabled={!e164} />
+          {__DEV__ && (
+            <View style={{ marginTop: spacing.sm }}>
+              <Button
+                kind="secondary"
+                title="테스트로 시작하기 (개발용 · SMS 없이 통과)"
+                onPress={devLogin}
+                loading={loading}
+                disabled={!e164}
+              />
+            </View>
+          )}
           <Text
             variant="caption"
             color={colors.sub}
