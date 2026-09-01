@@ -6,11 +6,15 @@ import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
 import { supabase } from '@/lib/supabase';
 import { colors, spacing } from '@/theme/tokens';
 
-/** 시드된 테스트 계정 (supabase/seed/seed.sql) — 개발 모드 전용 */
-const DEV_ACCOUNTS = [
-  { label: '테스트 남성 (지훈)', email: 'demo-m1@bonsim.dev' },
-  { label: '테스트 여성 (서연)', email: 'demo-f1@bonsim.dev' },
-];
+/** 시드된 테스트 계정 (supabase/seed/seed.sql) — 개발 모드 전용.
+ *  리터럴 __DEV__ 조건이라 release 번들(Hermes bytecode 포함)에서는 상수 접기로
+ *  계정 문자열 자체가 제거된다 (Hermes 는 미사용 모듈 상수를 DCE 하지 않으므로 필요). */
+const DEV_ACCOUNTS = __DEV__
+  ? [
+      { label: '테스트 남성 (지훈)', email: 'demo-m1@bonsim.dev' },
+      { label: '테스트 여성 (서연)', email: 'demo-f1@bonsim.dev' },
+    ]
+  : [];
 
 // seed.sql 의 개발용 비밀번호 — production DB 에는 시드 계정 자체가 없어야 한다.
 // 리터럴 __DEV__ 조건이라 release 번들에서는 문자열이 상수 접기로 제거된다.

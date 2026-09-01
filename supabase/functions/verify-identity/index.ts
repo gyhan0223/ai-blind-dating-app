@@ -21,7 +21,7 @@
  *
  * 개인정보: raw identityKey / DI / 본인확인 응답 전문은 저장·로그하지 않는다.
  */
-import { requireIdentitySecret } from '../_shared/env/env.ts';
+import { requireIdentityProviderKind, requireIdentitySecret } from '../_shared/env/env.ts';
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
 import {
   getIdentityProvider,
@@ -44,6 +44,16 @@ import {
  * secret 값 자체는 로그/오류 어디에도 출력하지 않는다.
  */
 const IDENTITY_SECRET = requireIdentitySecret();
+
+/**
+ * 본인확인 Provider 도 cold start 에서 확정한다 (Issue #3 보완 — fail-closed):
+ *   development / staging → IDENTITY_PROVIDER 미설정이면 Mock (개발 fixture)
+ *   production            → 실제 provider 이름 필수. 미설정·mock·미구현 이름이면
+ *                           여기서 throw 되어 함수가 요청을 받지 않는다.
+ * Mock 은 verificationId 미검증 + 아무 6자리 코드 통과 구조이므로,
+ * 이 가드가 production 에서 그 경로 자체를 제거한다.
+ */
+const provider = getIdentityProvider(requireIdentityProviderKind());
 
 async function logDeviceEvent(
   db: ReturnType<typeof serviceClient>,
@@ -73,7 +83,6 @@ Deno.serve(async (req) => {
     ? authPhoneRaw.startsWith('+') ? authPhoneRaw : `+${authPhoneRaw}`
     : null;
 
-  const provider = getIdentityProvider();
   const input: IdentityRequestInput = {
     name: String(body.name ?? ''),
     birthDate: String(body.birthDate ?? ''),

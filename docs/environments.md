@@ -53,6 +53,8 @@ Issue #3 기준 환경 모델. 핵심 원칙은 두 가지다.
 | `APP_ENV` | `development` | `staging` | `production` | 아니오 | 누락 시 production 취급 (fail-closed) |
 | `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | (CLI 자동 주입) | (자동 주입) | (자동 주입) | **service role 은 secret** | 클라이언트에 절대 노출 금지 |
 | `IDENTITY_HASH_SECRET` | 생략 가능 (dev fixture secret 사용) | **필수** — 32자+ 고유 값 | **필수** — 32자+ 고유 값 (staging 과 다른 값) | **예** | 미설정/개발 기본값/짧은 값 → verify-identity 기동 실패 |
+| `IDENTITY_PROVIDER` | 생략 가능 (`mock` 기본값) | 생략 가능 (`mock`) 또는 실제 provider | **필수** — 실제 provider 이름 (`mock` 금지) | 아니오 | 미설정/`mock`/미구현 이름 → verify-identity 기동 실패 |
+| `FACE_VERIFICATION_PROVIDER` | 생략 가능 (`mock` 기본값) | 생략 가능 (`mock`) 또는 실제 provider | **필수** — 실제 provider 이름 (`mock` 금지) | 아니오 | 미설정/`mock`/미구현 이름 → complete-face-verification 기동 실패 |
 | `ALLOW_DEV_LOGIN` | `1` (dev-login 쓸 때) | 필요 시 `1` | **설정 금지** — 설정돼도 403 | 아니오 | dev-login opt-in |
 | `DEV_LOGIN_PASSWORD` | 생략 가능 (seed 기본값) | 고유 값 권장 | 해당 없음 (dev-login 미배포) | 예 | dev-login 계정 비밀번호 |
 | `DEV_LOGIN_ALLOW_ANY_PHONE` | 필요 시 `1` | 필요 시 `1` | 해당 없음 | 아니오 | 테스트 대역 외 번호 허용 |
@@ -78,6 +80,22 @@ APP_ENV ∈ { development, staging }   AND   ALLOW_DEV_LOGIN=1
 - 1차 원칙: production 에는 dev-login 을 **배포 자체를 하지 않는다**
   (`supabase/scripts/deploy-production.sh` allowlist 에서 제외).
 - 허용 환경에서도 기본은 010-0000-XXXX 테스트 대역만.
+
+## Mock provider 정책 (fail-closed)
+
+본인확인(`verify-identity`)과 얼굴 인증(`complete-face-verification`)은 현재 Mock provider
+로 동작한다. Mock 은 **verificationId 를 검증하지 않고 아무 6자리 코드나 통과시키며,
+라이브니스 없이 모의 특징 벡터로 승인**하므로 production 에서 절대 실행되면 안 된다.
+
+- **production**: `IDENTITY_PROVIDER` / `FACE_VERIFICATION_PROVIDER` 에 실제 provider 이름이
+  **필수**다. 미설정·`mock`·아직 구현되지 않은 이름이면 해당 함수가 **cold start 에서 기동을
+  거부**한다 (fail-closed). 따라서 실제 provider(PASS/NICE/PortOne, 라이브니스 SDK 등)가
+  연동되기 전까지 production 에서는 이 두 함수가 의도적으로 동작하지 않으며, 직접 API 를
+  호출해도 `identity_verified` / `face_verified` 를 true 로 만들 수 없다.
+- **development / staging**: 미설정 시 `mock` 기본값 (개발 편의 유지).
+- 실제 provider 연동 시 `IdentityVerificationProvider.ts` 의 `getIdentityProvider` switch 와
+  `complete-face-verification` 의 kind 분기에 구현을 등록한다 — 미구현 이름이 mock 으로
+  조용히 대체되는 경로는 없다.
 
 ## Test OTP 정책 (코드로 강제 불가 — Dashboard 설정)
 
@@ -115,8 +133,15 @@ supabase secrets set APP_ENV=staging IDENTITY_HASH_SECRET=<고유 32자+> --proj
 supabase functions deploy <함수들> --project-ref <staging-ref>   # 필요 시 dev-login 포함 + ALLOW_DEV_LOGIN=1
 
 # production (별도 프로젝트) — 반드시 allowlist 스크립트 사용
-supabase secrets set APP_ENV=production IDENTITY_HASH_SECRET=<staging 과 다른 고유 32자+> --project-ref <prod-ref>
-bash supabase/scripts/deploy-production.sh <prod-ref>            # dev-login 은 배포되지 않음
+supabase secrets set IDENTITY_HASH_SECRET=<staging 과 다른 고유 32자+> --project-ref <prod-ref>
+supabase secrets set IDENTITY_PROVIDER=<실제 provider> FACE_VERIFICATION_PROVIDER=<실제 provider> --project-ref <prod-ref>
+bash supabase/scripts/deploy-production.sh <prod-ref>
+# 스크립트가 수행하는 것:
+#   1) dev-login 이 이미 배포되어 있으면 배포 중단
+#   2) 필수 secret(IDENTITY_HASH_SECRET, *_PROVIDER) 존재 확인 — 없으면 실패
+#      개발용 secret(ALLOW_DEV_LOGIN, DEV_LOGIN_*) 존재 시 실패
+#   3) APP_ENV=production 직접 설정 (CLI 로 값 검증이 불가하므로 설정으로 확정)
+#   4) allowlist 함수만 배포 (dev-login 제외)
 ```
 
 `supabase functions deploy` 를 **인자 없이 실행하면 dev-login 을 포함한 전체 함수가 배포되므로

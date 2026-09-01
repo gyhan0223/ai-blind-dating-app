@@ -8,6 +8,7 @@ import {
   isDevLoginAllowed,
   resolveAppEnv,
   resolveIdentitySecret,
+  resolveProviderKind,
 } from './envCore.ts';
 
 export type { AppEnv };
@@ -24,6 +25,32 @@ export function devLoginAllowed(): boolean {
     allowDevLogin: Deno.env.get('ALLOW_DEV_LOGIN'),
     disableDevLogin: Deno.env.get('DISABLE_DEV_LOGIN'),
   });
+}
+
+/**
+ * provider 환경변수를 검증해 kind 를 돌려준다. module init(cold start)에서 호출해
+ * production 에서 provider 미설정/mock 이면 함수가 아예 뜨지 않게 한다 (fail-closed).
+ */
+function requireProviderKind(envVarName: string): string {
+  const appEnv = getAppEnv();
+  const result = resolveProviderKind(appEnv, Deno.env.get(envVarName));
+  if (!result.ok) {
+    throw new Error(
+      `[env] ${envVarName} 설정 오류 (${result.reason}, APP_ENV=${appEnv}). ` +
+        'production 에서는 mock 이 아닌 실제 provider 를 명시해야 합니다. (docs/environments.md 참고)',
+    );
+  }
+  return result.kind;
+}
+
+/** 본인확인 provider kind — production 에서 미설정/mock 이면 cold start 실패 */
+export function requireIdentityProviderKind(): string {
+  return requireProviderKind('IDENTITY_PROVIDER');
+}
+
+/** 얼굴 인증(라이브니스/특징 벡터) provider kind — production 에서 미설정/mock 이면 cold start 실패 */
+export function requireFaceProviderKind(): string {
+  return requireProviderKind('FACE_VERIFICATION_PROVIDER');
 }
 
 /**

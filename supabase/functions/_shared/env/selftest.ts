@@ -14,6 +14,7 @@ import {
   isDevLoginAllowed,
   resolveAppEnv,
   resolveIdentitySecret,
+  resolveProviderKind,
 } from './envCore.ts';
 
 let passed = 0;
@@ -96,6 +97,58 @@ eq('secret: development 직접 지정(16자 이상) → 사용', sec('developmen
 eq('secret: development 짧은 지정 값 → 실패', sec('development', 'tiny'), {
   ok: false,
   reason: 'too_short',
+});
+
+// ── Provider 선택 (IDENTITY_PROVIDER / FACE_VERIFICATION_PROVIDER 공통) ──
+// production 에서는 mock/미설정이 절대 통과할 수 없다 (verify-identity ·
+// complete-face-verification 이 cold start 에서 이 결과로 기동을 거부한다)
+const prov = (appEnv: string | undefined, raw: string | undefined) =>
+  resolveProviderKind(resolveAppEnv(appEnv), raw);
+
+eq('provider: production 미설정 → 실패', prov('production', undefined), {
+  ok: false,
+  reason: 'missing',
+});
+eq('provider: production 빈 값 → 실패', prov('production', '  '), { ok: false, reason: 'missing' });
+eq('provider: production mock → 실패', prov('production', 'mock'), {
+  ok: false,
+  reason: 'mock_not_allowed',
+});
+eq('provider: production Mock 대소문자 무관 거부', prov('production', ' MOCK '), {
+  ok: false,
+  reason: 'mock_not_allowed',
+});
+eq('provider: APP_ENV 누락 + mock → production 취급 실패', prov(undefined, 'mock'), {
+  ok: false,
+  reason: 'mock_not_allowed',
+});
+eq('provider: APP_ENV 누락 + 미설정 → 실패', prov(undefined, undefined), {
+  ok: false,
+  reason: 'missing',
+});
+eq('provider: APP_ENV invalid + 미설정 → production 취급 실패', prov('prod', undefined), {
+  ok: false,
+  reason: 'missing',
+});
+eq('provider: production 실제 provider 이름 → 통과', prov('production', 'pass'), {
+  ok: true,
+  kind: 'pass',
+});
+eq('provider: development 미설정 → mock 기본값', prov('development', undefined), {
+  ok: true,
+  kind: 'mock',
+});
+eq('provider: development mock 명시 → mock', prov('development', 'mock'), {
+  ok: true,
+  kind: 'mock',
+});
+eq('provider: staging 미설정 → mock 기본값', prov('staging', undefined), {
+  ok: true,
+  kind: 'mock',
+});
+eq('provider: staging 실제 provider 지정 가능', prov('staging', 'pass'), {
+  ok: true,
+  kind: 'pass',
 });
 
 console.log(`env selftest: ${passed} passed, ${failed} failed`);

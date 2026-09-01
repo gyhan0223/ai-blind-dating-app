@@ -11,9 +11,12 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       (설정돼 있어도 release 빌드에선 무효지만, 아예 제거한다)
 - [ ] `EXPO_PUBLIC_SUPABASE_URL` / `EXPO_PUBLIC_SUPABASE_ANON_KEY` 가 **production 프로젝트** 값이다
       (localhost/staging 값 아님)
-- [ ] 클라이언트 번들에 서버 secret 이 없다 — export 결과에서 확인:
-      `npx expo export --platform web` 후 `dist/` 에서 `service_role`, `SERVICE_ROLE_KEY`,
-      `IDENTITY_HASH_SECRET`, `bonsim-dev-password`, `테스트로 시작하기`, `촬영 건너뛰기` grep → 0건
+- [ ] 클라이언트 번들에 서버 secret 이 없다 — **web + iOS + Android** export 결과에서 확인:
+      `npx expo export --platform web --platform ios --platform android --no-bytecode` 후
+      `dist/` 에서 `service_role`, `SERVICE_ROLE_KEY`, `IDENTITY_HASH_SECRET`,
+      `bonsim-dev-password`, `dev-login`, `테스트로 시작하기`, `촬영 건너뛰기` grep → 0건
+- [ ] 실제 스토어 제출용 release 빌드(EAS build)에서도 위 확인을 반복한다
+      (EAS 는 이 저장소 밖에서 수행 — 산출물의 JS 번들에 같은 grep 적용)
 
 ## Supabase (production 프로젝트)
 
@@ -24,6 +27,12 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] production secrets 에 `APP_ENV=production` 이 설정되어 있다
 - [ ] production secrets 에 `ALLOW_DEV_LOGIN` 이 **없다** (있어도 무효지만 제거)
 - [ ] `IDENTITY_HASH_SECRET` 이 설정되어 있다 — 32자 이상, 개발 기본값·staging 값과 다른 고유 값
+- [ ] `IDENTITY_PROVIDER` 가 **실제 provider** 로 설정되어 있다 (`mock` 아님 — mock 이면
+      verify-identity 가 기동 실패하는 것이 정상)
+- [ ] `FACE_VERIFICATION_PROVIDER` 가 **실제 provider** 로 설정되어 있다 (`mock` 아님 —
+      mock 이면 complete-face-verification 이 기동 실패하는 것이 정상)
+- [ ] production 에서 verify-identity 를 직접 호출해도 아무 6자리 코드로 통과되지 않는다
+- [ ] production 에서 complete-face-verification 을 직접 호출해도 `face_verified=true` 가 되지 않는다
 - [ ] Auth → Phone 에 **Test OTP / 테스트 전화번호 항목이 없다** (Dashboard 수동 확인 — 코드로 검증 불가)
 - [ ] 실제 SMS provider(Twilio 등)가 연결되어 있고 rate limit 을 확인했다
 - [ ] production DB 에 seed/fixture 가 **적용되어 있지 않다**:

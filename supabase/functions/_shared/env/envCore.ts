@@ -39,6 +39,36 @@ export function isDevLoginAllowed(env: DevLoginEnv): boolean {
   return env.allowDevLogin === '1';
 }
 
+// ---------------------------------------------------------------------------
+// Provider 선택 (본인확인 IDENTITY_PROVIDER / 얼굴 FACE_VERIFICATION_PROVIDER)
+// ---------------------------------------------------------------------------
+
+export type ProviderKindResult =
+  | { ok: true; kind: string }
+  | { ok: false; reason: 'missing' | 'mock_not_allowed' };
+
+/**
+ * provider 환경변수 해석 (fail-closed).
+ *   development / staging → 미설정이면 'mock' 기본값 (개발 편의)
+ *   production            → 반드시 실제 provider 이름을 명시해야 하며,
+ *                           미설정이거나 'mock' 이면 실패 → 함수 기동 거부.
+ * 반환된 kind 가 실제 구현된 provider 인지는 각 함수의 factory 가 추가 검증한다
+ * (구현되지 않은 이름 → 기동 실패. production 에서 mock 으로 조용히 대체되는 일 없음).
+ */
+export function resolveProviderKind(
+  appEnv: AppEnv,
+  raw: string | null | undefined,
+): ProviderKindResult {
+  const kind = (raw ?? '').trim().toLowerCase();
+  if (appEnv === 'production') {
+    if (!kind) return { ok: false, reason: 'missing' };
+    if (kind === 'mock') return { ok: false, reason: 'mock_not_allowed' };
+    return { ok: true, kind };
+  }
+  // development / staging — 명시 안 하면 mock
+  return { ok: true, kind: kind || 'mock' };
+}
+
 /** staging/production 에서 요구하는 IDENTITY_HASH_SECRET 최소 길이 (32B hex 권장 = 64자) */
 export const IDENTITY_SECRET_MIN_LENGTH = 32;
 

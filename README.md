@@ -145,6 +145,10 @@ cd apps/mobile && node --experimental-strip-types scripts/devtools-selftest.mjs
 
 # 타입체크 / 빌드
 cd apps/mobile && npx tsc --noEmit && npx expo export --platform web
+
+# release 번들 개발 기능 제거 확인 (web + iOS + Android — dist/ 에서 개발 문구/credential grep 0건)
+cd apps/mobile && npx expo export --platform web --platform ios --platform android --no-bytecode \
+  && ! grep -rqE "테스트로 시작하기|촬영 건너뛰기|bonsim-dev-password|dev-login|service_role" dist/
 cd apps/admin && npm run build
 ```
 

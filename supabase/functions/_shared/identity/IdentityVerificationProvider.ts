@@ -78,7 +78,19 @@ export class MockIdentityProvider implements IdentityVerificationProvider {
   }
 }
 
-export function getIdentityProvider(): IdentityVerificationProvider {
-  // 실서비스: IDENTITY_PROVIDER 환경변수로 Provider 를 선택하도록 확장
-  return new MockIdentityProvider();
+/**
+ * kind(IDENTITY_PROVIDER 환경변수 — _shared/env 가 fail-closed 로 해석) → Provider.
+ * production 에서는 env 해석 단계에서 mock/미설정이 이미 거부되므로 여기 도달하지 않고,
+ * 구현되지 않은 이름이면 조용히 mock 으로 대체하는 대신 즉시 실패한다 (cold start 에서 throw).
+ * 실서비스 Provider(PASS / NICE / KCB / PortOne 등)를 연동할 때 이 switch 에 등록한다.
+ */
+export function getIdentityProvider(kind: string): IdentityVerificationProvider {
+  switch (kind) {
+    case 'mock':
+      // Mock 은 verificationId 를 검증하지 않고 아무 6자리 코드나 통과시키므로
+      // development/staging 전용이다 (production 은 env 단계에서 차단됨).
+      return new MockIdentityProvider();
+    default:
+      throw new Error(`[identity] 구현되지 않은 IDENTITY_PROVIDER 입니다: ${kind}`);
+  }
 }
