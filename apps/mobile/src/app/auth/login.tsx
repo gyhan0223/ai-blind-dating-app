@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { Button, Field, InlineNotice, Screen, Text } from '@/components/ui';
 import { track } from '@/lib/analytics';
+import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
 import { autoHyphen, formatPhoneKR, normalizePhoneKR } from '@/lib/phone';
 import { supabase } from '@/lib/supabase';
 import { colors, spacing } from '@/theme/tokens';
@@ -103,7 +104,8 @@ export default function Login() {
   /**
    * 개발 전용 — SMS 설정 없이 통과. dev-login Edge Function 이 입력한 번호가 붙은
    * 개발 계정을 만들어 주고, 그 계정으로 로그인한다. 이후 본인확인/온보딩은 실제와 동일.
-   * release 빌드(__DEV__ = false)에는 버튼 자체가 없다.
+   * release 빌드(__DEV__ = false)에는 버튼 자체가 번들에서 제거되며,
+   * 서버(dev-login)도 production 에서는 무조건 403 이라 UI 와 무관하게 우회가 불가능하다.
    */
   const devLogin = async () => {
     if (!e164) {
@@ -182,7 +184,7 @@ export default function Login() {
       {stage === 'phone' ? (
         <>
           <Button title="인증번호 받기" onPress={requestCode} loading={loading} disabled={!e164} />
-          {__DEV__ && (
+          {__DEV__ && DEV_TOOLS_ENABLED && (
             <View style={{ marginTop: spacing.sm }}>
               <Button
                 kind="secondary"

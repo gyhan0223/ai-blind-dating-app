@@ -5,21 +5,29 @@
  * 클라이언트는 반환된 이메일+비밀번호로 로그인한다. 세션에 전화번호가 연결되므로
  * 이후 본인확인(identity fixture) · 온보딩 플로우는 실제 Phone Auth 와 동일하게 동작한다.
  *
- * 안전 장치:
- *  - 기본적으로 테스트 대역(010-0000-XXXX)만 허용.
- *    다른 번호까지 허용하려면: supabase secrets set ALLOW_DEV_LOGIN=1
- *  - production 배포 전 이 함수는 반드시 삭제하거나 ALLOW_DEV_LOGIN 해제 +
- *    DISABLE_DEV_LOGIN=1 로 완전히 끈다 (README 체크리스트 참고).
+ * 안전 장치 (Issue #3 — fail-closed allowlist):
+ *  - APP_ENV=development|staging 이면서 ALLOW_DEV_LOGIN=1 인 경우에만 동작한다.
+ *    · APP_ENV 가 production / 누락 / 알 수 없는 값 → ALLOW_DEV_LOGIN 값과 무관하게 무조건 403
+ *    · ALLOW_DEV_LOGIN 미설정 → development 여도 403 (explicit opt-in)
+ *  - production 에는 애초에 이 함수를 배포하지 않는다 (supabase/scripts/deploy-production.sh
+ *    allowlist 에서 제외). 실수로 배포되어도 위 서버 가드가 403 을 반환한다.
+ *  - 허용 환경에서도 기본은 테스트 대역(010-0000-XXXX)만.
+ *    다른 번호까지 필요하면 DEV_LOGIN_ALLOW_ANY_PHONE=1 을 추가로 설정한다.
+ *  - DISABLE_DEV_LOGIN=1 은 긴급 kill switch 로 계속 동작한다.
  */
+import { devLoginAllowed } from '../_shared/env/env.ts';
 import { corsHeaders, json, serviceClient } from '../_shared/http.ts';
 import { e164ToLocalKR, normalizePhoneKR } from '../_shared/identity/identityCore.ts';
 
-const DEV_PASSWORD = 'bonsim-dev-password'; // 시드 계정과 동일한 개발용 비밀번호
+// 시드 계정과 동일한 개발용 기본 비밀번호 — staging 에서는 DEV_LOGIN_PASSWORD 로 교체 권장.
+// production 에서는 이 함수 자체가 403 이므로 이 값이 로그인 우회에 사용될 수 없다.
+const DEV_PASSWORD = Deno.env.get('DEV_LOGIN_PASSWORD') ?? 'bonsim-dev-password';
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
-  if (Deno.env.get('DISABLE_DEV_LOGIN') === '1') {
+  // fail-closed: 명시적으로 허용된 환경이 아니면 어떤 입력이든 403
+  if (!devLoginAllowed()) {
     return json({ error: 'disabled' }, 403);
   }
 
@@ -28,13 +36,13 @@ Deno.serve(async (req) => {
   if (!phone) return json({ error: 'invalid_phone' }, 400);
 
   const local = e164ToLocalKR(phone);
-  const allowAny = Deno.env.get('ALLOW_DEV_LOGIN') === '1';
-  if (!/^0100000\d{4}$/.test(local) && !allowAny) {
+  const allowAnyPhone = Deno.env.get('DEV_LOGIN_ALLOW_ANY_PHONE') === '1';
+  if (!/^0100000\d{4}$/.test(local) && !allowAnyPhone) {
     return json(
       {
         error: 'dev_range_only',
         message:
-          '테스트 로그인은 010-0000-XXXX 대역만 허용돼요. 다른 번호를 쓰려면 supabase secrets set ALLOW_DEV_LOGIN=1',
+          '테스트 로그인은 010-0000-XXXX 대역만 허용돼요. 다른 번호를 쓰려면 supabase secrets set DEV_LOGIN_ALLOW_ANY_PHONE=1',
       },
       403,
     );

@@ -21,13 +21,13 @@
  *
  * 개인정보: raw identityKey / DI / 본인확인 응답 전문은 저장·로그하지 않는다.
  */
+import { requireIdentitySecret } from '../_shared/env/env.ts';
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
 import {
   getIdentityProvider,
   type IdentityRequestInput,
 } from '../_shared/identity/IdentityVerificationProvider.ts';
 import {
-  DEV_IDENTITY_HASH_SECRET,
   decideIdentityOutcome,
   hashIdentityKey,
   isAdult,
@@ -35,12 +35,15 @@ import {
   type ExistingIdentity,
 } from '../_shared/identity/identityCore.ts';
 
-function identitySecret(): string {
-  const s = Deno.env.get('IDENTITY_HASH_SECRET');
-  if (s && s.length >= 16) return s;
-  // 개발 기본값 — production 배포 전 반드시 IDENTITY_HASH_SECRET 설정 (README 참고)
-  return DEV_IDENTITY_HASH_SECRET;
-}
+/**
+ * cold start 시 secret 검증 (Issue #3 — fail-fast, 자동 fallback 금지):
+ *   development                → 미설정이면 개발 fixture secret 사용 (seed 해시와 일치)
+ *   staging / production       → IDENTITY_HASH_SECRET 미설정·개발 기본값·32자 미만이면
+ *                                여기서 throw 되어 함수가 아예 요청을 받지 않는다.
+ *   APP_ENV 누락/알 수 없는 값 → production 취급 (fail-closed)
+ * secret 값 자체는 로그/오류 어디에도 출력하지 않는다.
+ */
+const IDENTITY_SECRET = requireIdentitySecret();
 
 async function logDeviceEvent(
   db: ReturnType<typeof serviceClient>,
@@ -106,7 +109,7 @@ Deno.serve(async (req) => {
   }
 
   // raw identityKey 는 즉시 해시로 변환하고 더 이상 사용하지 않는다
-  const identityKeyHash = await hashIdentityKey(result.identityKey, identitySecret());
+  const identityKeyHash = await hashIdentityKey(result.identityKey, IDENTITY_SECRET);
 
   const { data: identityRow } = await db
     .from('user_identities')

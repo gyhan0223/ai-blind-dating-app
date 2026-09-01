@@ -30,24 +30,40 @@ supabase link --project-ref <your-project-ref>
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
+# ⚠️ local/staging 전용 — production DB 에는 절대 실행하지 않는다 (docs/environments.md)
 psql "$DATABASE_URL" -f supabase/seed/seed.sql
 
-# Edge Functions 배포
+# 서버 환경 설정 (Issue #3 — fail-closed: APP_ENV 누락 시 production 취급)
+#   local:  cp supabase/functions/.env.example supabase/functions/.env
+#   원격:   supabase secrets set APP_ENV=development ALLOW_DEV_LOGIN=1   # 개발용 프로젝트
+supabase secrets set APP_ENV=development
+supabase secrets set ALLOW_DEV_LOGIN=1    # dev-login opt-in (production 에선 1 이어도 403)
+
+# Edge Functions 배포 (개발/스테이징)
 supabase functions deploy verify-identity
 supabase functions deploy delete-account
-supabase functions deploy dev-login       # 개발 전용 — production 배포 전 삭제!
+supabase functions deploy dev-login       # 개발/스테이징 전용 — production 에는 배포 금지!
 supabase functions deploy complete-face-verification
 supabase functions deploy daily-recommendation
 supabase functions deploy icebreaker
 
-# 본인확인 identity_key_hash 용 HMAC secret (production 필수 — 미설정 시 개발용 기본값 사용)
+# 본인확인 identity_key_hash 용 HMAC secret
+#   development: 생략 가능 (개발 fixture secret 사용)
+#   staging/production: 32자+ 고유 값 필수 — 미설정/개발 기본값이면 verify-identity 기동 실패
 supabase secrets set IDENTITY_HASH_SECRET=<random-32B-hex>
+
+# ⚠️ production 배포는 allowlist 스크립트로만 (dev-login 제외 + secret 사전 확인):
+#   bash supabase/scripts/deploy-production.sh <prod-project-ref>
+# 환경 분리/변수 목록: docs/environments.md · 출시 전 점검: docs/release-checklist.md
 ```
 
 Supabase 대시보드에서 추가 확인:
 - **Auth → Phone**: Phone provider 활성화 + SMS 사업자(Twilio 등) 연결.
   개발 중에는 **Test OTPs** 에 `+821000000001 ~ +821000000099 → 123456` 처럼
   테스트 번호를 등록하면 실제 SMS 없이 로그인할 수 있어요.
+  ⚠️ Test OTP 는 local/staging 전용 — **production 프로젝트에는 Test OTP/테스트 번호를
+  절대 등록하지 않습니다** (Dashboard 설정이라 코드로 차단할 수 없음 —
+  `docs/release-checklist.md` 로 매 출시마다 수동 확인).
 - **Auth → Rate Limits**: SMS 발송 rate limit 확인 (OTP abuse 방지 — 기본값 유지 권장).
   클라이언트는 재전송 60초 타이머를 추가로 강제합니다.
 - **Auth → Email**: 이메일 OTP 는 일반 사용자 앱에서 제거됨 —
@@ -64,20 +80,28 @@ npx expo start           # iOS 시뮬레이터: i / Android: a
 ```
 
 일반 로그인은 **전화번호 SMS OTP** 입니다 (이메일 UI 없음).
-`EXPO_PUBLIC_DEV_LOGIN=1` 이면 웰컴 화면에 시드 계정 바로 로그인 버튼이 표시됩니다
+개발 빌드에서 `EXPO_PUBLIC_DEV_LOGIN=1` 이면(단일 가드 `DEV_TOOLS_ENABLED` —
+`src/lib/devTools.ts`) 웰컴 화면에 시드 계정 바로 로그인 버튼이 표시됩니다
 (시드 계정은 이메일+비밀번호 — 개발 전용으로 분리 유지).
+release 빌드(`__DEV__=false`)에서는 이 플래그가 1 이어도 개발 UI 가 절대 표시되지 않으며,
+번들에서 아예 제거됩니다.
 
 - 테스트 남성: `demo-m1@bonsim.dev` (지훈)
 - 테스트 여성: `demo-f1@bonsim.dev` (서연) — 지훈과 매치·대화가 시드되어 있음
 - 비밀번호: `bonsim-dev-password`
 
-**테스트 로그인 (SMS 설정 없이 통과)**: 개발 모드(`npx expo start`)에서는 전화번호 입력
-화면에 "테스트로 시작하기" 버튼이 표시됩니다. `dev-login` Edge Function 이 입력한 번호가
-연결된 개발 계정을 만들어 로그인시켜 주므로, Phone provider / Test OTP 설정 없이도
-본인확인·온보딩 플로우를 그대로 테스트할 수 있어요. 기본은 010-0000-XXXX 대역만 허용
-(다른 번호는 `supabase secrets set ALLOW_DEV_LOGIN=1`).
-release 빌드에는 버튼이 없으며, **production 배포 전 dev-login 함수는 반드시 삭제**하거나
-`supabase secrets set DISABLE_DEV_LOGIN=1` 로 끕니다.
+**테스트 로그인 (SMS 설정 없이 통과)**: 개발 모드(`npx expo start` + `EXPO_PUBLIC_DEV_LOGIN=1`)
+에서는 전화번호 입력 화면에 "테스트로 시작하기" 버튼이 표시됩니다. `dev-login` Edge Function 이
+입력한 번호가 연결된 개발 계정을 만들어 로그인시켜 주므로, Phone provider / Test OTP 설정 없이도
+본인확인·온보딩 플로우를 그대로 테스트할 수 있어요.
+
+dev-login 은 **fail-closed allowlist** 방식입니다 (Issue #3):
+서버에 `APP_ENV=development`(또는 `staging`) **그리고** `ALLOW_DEV_LOGIN=1` 이 모두
+설정된 경우에만 동작하고, `APP_ENV` 가 production/누락/알 수 없는 값이면
+`ALLOW_DEV_LOGIN=1` 이어도 무조건 403 입니다. 허용 환경에서도 기본은 010-0000-XXXX
+대역만 (다른 번호는 `supabase secrets set DEV_LOGIN_ALLOW_ANY_PHONE=1`).
+release 빌드에는 버튼이 없고, **production 에는 dev-login 을 배포하지 않습니다**
+(`supabase/scripts/deploy-production.sh` allowlist 에서 제외 — 상세: `docs/environments.md`).
 
 본인확인(Mock) fixture — 로그인한 번호에 따라 identityKey 가 결정됩니다
 (Test OTP 로그인, 테스트 로그인 버튼 모두 동일):
@@ -112,6 +136,12 @@ cd supabase/functions/_shared/matching && node --experimental-strip-types selfte
 
 # identity 로직 단위 테스트 (33건 — 전화번호 정규화 · 1인1계정 분기 · HMAC)
 cd supabase/functions/_shared/identity && node --experimental-strip-types selftest.ts
+
+# 서버 환경 guardrail 테스트 (Issue #3 — fail-closed dev-login / identity secret)
+cd supabase/functions/_shared/env && node --experimental-strip-types selftest.ts
+
+# 클라이언트 개발 도구 가드 테스트 (release 빌드에서 dev UI 비활성 보장)
+cd apps/mobile && node --experimental-strip-types scripts/devtools-selftest.mjs
 
 # 타입체크 / 빌드
 cd apps/mobile && npx tsc --noEmit && npx expo export --platform web

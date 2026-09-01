@@ -6,23 +6,28 @@ import { Platform } from 'react-native';
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
 
+/**
+ * 환경변수 누락 시 모든 환경에서 fail-fast (Issue #3).
+ * 예전의 localhost/dummy-key fallback 은 release 빌드가 잘못된 백엔드를 바라본 채
+ * 조용히 실행되는 위험이 있어 제거했다. 값 자체는 오류 메시지/로그에 출력하지 않는다.
+ */
 if (!supabaseUrl || !supabaseAnonKey) {
-  // 개발자가 .env 설정을 빠뜨렸을 때 빨리 알아차리도록 한다 (값 자체는 로그에 남기지 않음)
-  console.warn('[supabase] EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY 가 설정되지 않았습니다.');
+  throw new Error(
+    '[supabase] EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY 가 설정되지 않았습니다. ' +
+      'apps/mobile/.env 를 확인하세요 (.env.example 참고).',
+  );
 }
 
-export const supabase = createClient(
-  supabaseUrl ?? 'http://localhost:54321',
-  supabaseAnonKey ?? 'anon-key-not-set',
-  {
-    auth: {
-      storage: Platform.OS === 'web' ? undefined : AsyncStorage,
-      autoRefreshToken: true,
-      persistSession: true,
-      detectSessionInUrl: false,
-    },
-  },
-);
+// release 빌드가 로컬 개발 백엔드를 바라보는 설정 실수 차단
+if (!__DEV__ && /^https?:\/\/(localhost|127\.0\.0\.1|10\.0\.2\.2)([:/]|$)/.test(supabaseUrl)) {
+  throw new Error('[supabase] release 빌드에서 로컬 Supabase URL 은 사용할 수 없습니다.');
+}
 
-/** 개발 편의 기능(테스트 계정 바로 로그인 등) 노출 여부 */
-export const DEV_LOGIN_ENABLED = process.env.EXPO_PUBLIC_DEV_LOGIN === '1';
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    storage: Platform.OS === 'web' ? undefined : AsyncStorage,
+    autoRefreshToken: true,
+    persistSession: true,
+    detectSessionInUrl: false,
+  },
+});
