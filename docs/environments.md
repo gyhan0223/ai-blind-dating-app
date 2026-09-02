@@ -59,6 +59,10 @@ Issue #3 기준 환경 모델. 핵심 원칙은 두 가지다.
 | `DEV_LOGIN_PASSWORD` | 생략 가능 (seed 기본값) | 고유 값 권장 | 해당 없음 (dev-login 미배포) | 예 | dev-login 계정 비밀번호 |
 | `DEV_LOGIN_ALLOW_ANY_PHONE` | 필요 시 `1` | 필요 시 `1` | 해당 없음 | 아니오 | 테스트 대역 외 번호 허용 |
 | `DISABLE_DEV_LOGIN` | — | — | — | 아니오 | 긴급 kill switch (모든 환경에서 유효) |
+| `SOLAPI_API_KEY` | 생략 (Test OTP 사용) | **필수** (실발송 시) | **필수** | **예** | send-sms 전용. 누락 시 send-sms 가 모든 요청 거부 (fail-closed) |
+| `SOLAPI_API_SECRET` | 생략 | **필수** (실발송 시) | **필수** | **예** | send-sms 전용. 로그/응답에 절대 미노출 |
+| `SOLAPI_SENDER_NUMBER` | 생략 | **필수** (실발송 시) | **필수** | 아니오 | SOLAPI 에 등록·승인된 발신번호 (숫자만, 예: `01012345678`) |
+| `SEND_SMS_HOOK_SECRETS` | 생략 | **필수** (실발송 시) | **필수** — staging 과 다른 값 | **예** | Dashboard → Auth → Hooks → Send SMS 의 secret (`v1,whsec_...`). 회전 시 `\|` 로 복수 |
 
 ## Admin (Next.js) 서버 환경변수 (`apps/admin/.env.local`)
 
@@ -97,12 +101,71 @@ APP_ENV ∈ { development, staging }   AND   ALLOW_DEV_LOGIN=1
   `complete-face-verification` 의 kind 분기에 구현을 등록한다 — 미구현 이름이 mock 으로
   조용히 대체되는 경로는 없다.
 
+## SMS OTP 실발송 — Send SMS Hook + SOLAPI (Issue #4)
+
+Supabase Phone Auth 의 `signInWithOtp` / `verifyOtp` 흐름은 그대로 두고, Supabase 가 OTP 를 만든 뒤
+**Auth "Send SMS" HTTP Hook** 으로 `send-sms` Edge Function 을 호출하면 함수가 SOLAPI 로 실제 SMS 를 보낸다.
+
+```text
+앱 signInWithOtp(+8210…)
+  → Supabase Auth 가 OTP 생성 + 저장
+  → HTTP Hook POST https://<ref>.supabase.co/functions/v1/send-sms
+      헤더: webhook-id / webhook-timestamp / webhook-signature (Standard Webhooks 서명)
+      본문: { user: { phone }, sms: { otp } }
+  → send-sms: 서명 검증 → 번호/OTP 재검증 → SOLAPI send-many/detail (HMAC-SHA256 인증)
+  → 200 {} 이면 Supabase 가 클라이언트에 성공 응답, 오류면 signInWithOtp 가 실패
+앱 verifyOtp(+8210…, 123456) → Supabase 가 저장한 OTP 와 비교 (함수 무관)
+```
+
+보안 설계 (`supabase/functions/send-sms/`):
+
+- **JWT 인증 없음, 서명 검증 필수** — 훅은 JWT 발급 전에 호출되므로 `--no-verify-jwt` 로 배포한다.
+  대신 `SEND_SMS_HOOK_SECRETS` 로 Standard Webhooks 서명(`standardwebhooks` 라이브러리)을 검증하고,
+  실패하면 SOLAPI 를 호출하지 않고 401 을 돌려준다. 타임스탬프 ±5분 밖은 거부(replay 방지).
+- **fail-closed** — `SOLAPI_API_KEY` / `SOLAPI_API_SECRET` / `SOLAPI_SENDER_NUMBER` / `SEND_SMS_HOOK_SECRETS`
+  중 하나라도 없거나 형식이 틀리면 모든 요청에 500. 로그에는 변수 이름만 남긴다.
+- **서버 재검증** — `user.phone` 은 `+821012345678` / `821012345678` 어느 형식이든 `01012345678` 로 바꾸고
+  한국 휴대전화(`01[016789]` + 7~8자리)만 허용, OTP 는 6자리 숫자만 허용. 아니면 400 (SOLAPI 미호출).
+- **실패를 성공으로 숨기지 않음** — SOLAPI HTTP 오류·`failedMessageList`·타임아웃(3초, Supabase 훅 5초 제한 고려)은
+  전부 502. 응답/로그/오류 메시지에는 OTP·전체 전화번호·API secret 이 들어가지 않는다 (고정 코드 + SOLAPI statusCode 만).
+- **SOLAPI SDK 미사용** — Deno Web Crypto 로 `HMAC-SHA256 apiKey=…, date=…, salt=…, signature=…` 헤더를 직접 만든다.
+  발신/수신번호에는 `+`, `-`, 공백을 넣지 않는다.
+- 클라이언트(`apps/mobile`)는 변경 없음. SOLAPI 키/secret 은 `EXPO_PUBLIC_*` 에 절대 넣지 않는다.
+
+환경별 정책:
+
+| 환경 | SMS 발송 | 비고 |
+|---|---|---|
+| local | Dashboard/`config.toml` Test OTP (실발송 없음) | send-sms 미배포·secret 미설정이 기본. 로컬에서 실발송을 시험하려면 `supabase/functions/.env` 에 4개 변수 + `config.toml` `[auth.hook.send_sms]` 설정 |
+| staging | Test OTP **또는** SOLAPI 실발송 | 실발송 시 staging 전용 SOLAPI 키·hook secret 사용 |
+| production | **SOLAPI 실발송만** — Test OTP 없음 | Dashboard Send SMS Hook 활성 + 4개 secret 필수. `deploy-production.sh` 가 secret 존재를 확인하고 `--no-verify-jwt` 로 배포 |
+
+배포 / Dashboard 설정 순서 (staging·production 공통):
+
+```bash
+# 1) 서버 secret (값은 저장소에 절대 커밋하지 않는다)
+supabase secrets set SOLAPI_API_KEY=<key> SOLAPI_API_SECRET=<secret> SOLAPI_SENDER_NUMBER=<01012345678> --project-ref <ref>
+# 2) 함수 배포 — 반드시 --no-verify-jwt (훅은 JWT 없이 호출된다). production 은 deploy-production.sh 가 대신 수행
+supabase functions deploy send-sms --no-verify-jwt --project-ref <ref>
+# 3) Dashboard → Authentication → Hooks → "Send SMS" → Enable, HTTP 타입,
+#    URL: https://<ref>.supabase.co/functions/v1/send-sms → Generate secret → 표시된 v1,whsec_... 복사
+supabase secrets set SEND_SMS_HOOK_SECRETS='v1,whsec_...' --project-ref <ref>
+# 4) Dashboard → Authentication → Providers → Phone: Enable, SMS provider 항목은 사용하지 않음(훅이 대체)
+#    Rate Limits 에서 SMS 발송 한도 확인
+```
+
+secret 회전: Dashboard 에서 새 secret 을 만든 뒤 `SEND_SMS_HOOK_SECRETS='v1,whsec_new|v1,whsec_old'` 로 잠시
+둘 다 허용하고, 훅이 새 secret 으로 서명하는 것을 확인한 뒤 old 를 제거한다.
+
+검증: `cd supabase/functions/send-sms && node --experimental-strip-types selftest.ts` (SOLAPI 는 fetch mock,
+실제 호출 없음) · `deno test --allow-env supabase/functions/send-sms/hook_test.ts` (실제 standardwebhooks 서명 검증).
+
 ## Test OTP 정책 (코드로 강제 불가 — Dashboard 설정)
 
 Supabase Auth 의 Test OTP/테스트 전화번호는 **대시보드 설정이라 이 저장소의 코드만으로는
 차단을 강제하거나 검증할 수 없다.** 따라서 정책으로 관리한다:
 
-- **production**: Test OTP 항목 **없음**, 테스트 전화번호 **없음**, 실제 SMS provider 만 사용,
+- **production**: Test OTP 항목 **없음**, 테스트 전화번호 **없음**, Send SMS Hook(send-sms → SOLAPI)만 사용,
   SMS rate limit 확인. (release 마다 `docs/release-checklist.md` 로 수동 확인)
 - **staging/local**: 필요하면 Test OTP 사용 가능 (예: `+821000000001~0099 → 123456`).
 
@@ -135,13 +198,15 @@ supabase functions deploy <함수들> --project-ref <staging-ref>   # 필요 시
 # production (별도 프로젝트) — 반드시 allowlist 스크립트 사용
 supabase secrets set IDENTITY_HASH_SECRET=<staging 과 다른 고유 32자+> --project-ref <prod-ref>
 supabase secrets set IDENTITY_PROVIDER=<실제 provider> FACE_VERIFICATION_PROVIDER=<실제 provider> --project-ref <prod-ref>
+supabase secrets set SOLAPI_API_KEY=<key> SOLAPI_API_SECRET=<secret> SOLAPI_SENDER_NUMBER=<발신번호> \
+  SEND_SMS_HOOK_SECRETS='v1,whsec_...' --project-ref <prod-ref>     # Dashboard Send SMS Hook 의 secret
 bash supabase/scripts/deploy-production.sh <prod-ref>
 # 스크립트가 수행하는 것:
 #   1) dev-login 이 이미 배포되어 있으면 배포 중단
-#   2) 필수 secret(IDENTITY_HASH_SECRET, *_PROVIDER) 존재 확인 — 없으면 실패
+#   2) 필수 secret(IDENTITY_HASH_SECRET, *_PROVIDER, SOLAPI_*, SEND_SMS_HOOK_SECRETS) 존재 확인 — 없으면 실패
 #      개발용 secret(ALLOW_DEV_LOGIN, DEV_LOGIN_*) 존재 시 실패
 #   3) APP_ENV=production 직접 설정 (CLI 로 값 검증이 불가하므로 설정으로 확정)
-#   4) allowlist 함수만 배포 (dev-login 제외)
+#   4) allowlist 함수만 배포 (dev-login 제외, send-sms 는 --no-verify-jwt)
 ```
 
 `supabase functions deploy` 를 **인자 없이 실행하면 dev-login 을 포함한 전체 함수가 배포되므로

@@ -34,7 +34,16 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] production 에서 verify-identity 를 직접 호출해도 아무 6자리 코드로 통과되지 않는다
 - [ ] production 에서 complete-face-verification 을 직접 호출해도 `face_verified=true` 가 되지 않는다
 - [ ] Auth → Phone 에 **Test OTP / 테스트 전화번호 항목이 없다** (Dashboard 수동 확인 — 코드로 검증 불가)
-- [ ] 실제 SMS provider(Twilio 등)가 연결되어 있고 rate limit 을 확인했다
+- [ ] SMS OTP 실발송(SOLAPI) — `send-sms` 가 production 에 **`--no-verify-jwt` 로 배포**되어 있다
+      (`deploy-production.sh` 가 수행. `supabase functions list` 에서 send-sms 확인)
+- [ ] production secrets 에 `SOLAPI_API_KEY` / `SOLAPI_API_SECRET` / `SOLAPI_SENDER_NUMBER` /
+      `SEND_SMS_HOOK_SECRETS` 가 **모두** 있다 (하나라도 없으면 send-sms 가 500 → OTP 미발송)
+- [ ] `SOLAPI_SENDER_NUMBER` 가 SOLAPI 콘솔에서 **등록·승인된 발신번호**다 (숫자만)
+- [ ] Dashboard → Authentication → Hooks → **Send SMS Hook 이 Enabled** 이고 URL 이
+      `https://<prod-ref>.supabase.co/functions/v1/send-sms` 다 (staging URL 아님)
+- [ ] `SEND_SMS_HOOK_SECRETS` 가 위 Hook 의 현재 secret(`v1,whsec_...`)과 일치한다 — staging 과 다른 값
+      (Edge Function 로그에 `signature verification failed` 가 없다)
+- [ ] Auth → Rate Limits 의 SMS 발송 한도를 확인했다 (OTP 남용/비용 방지)
 - [ ] production DB 에 seed/fixture 가 **적용되어 있지 않다**:
       `is_demo=true` 사용자 0명, `%@bonsim.dev` 계정 0개
 - [ ] 배포는 `bash supabase/scripts/deploy-production.sh <prod-ref>` (allowlist)로만 수행했다
@@ -47,9 +56,14 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 ## Verification (실기기)
 
 - [ ] 실기기 release 빌드로 전화번호 SMS OTP 로그인 전체 플로우가 동작한다
+      (실제 한국 휴대전화에 `[본심] 인증번호는 ······입니다.` SMS 가 도착하고 verifyOtp 로 로그인된다)
+- [ ] 잘못된/만료된 OTP 가 거부된다 · 재전송 60초 타이머 · 과다 요청 시 429 안내가 표시된다
+- [ ] send-sms Edge Function 로그에 OTP·전체 전화번호·API secret 이 **없다** (고정 코드/statusCode 만)
 - [ ] 개발 fixture 번호(010-0000-XXXX)가 production 에서 **동작하지 않는다**
       (Test OTP 미등록 → 실제 SMS 발송 실패/미도달 확인)
 - [ ] 얼굴 인증을 건너뛸 수 있는 경로가 UI 어디에도 없다
 - [ ] 서버 selftest 통과:
       `cd supabase/functions/_shared/env && node --experimental-strip-types selftest.ts`
       `cd supabase/functions/_shared/identity && node --experimental-strip-types selftest.ts`
+      `cd supabase/functions/send-sms && node --experimental-strip-types selftest.ts`
+      `deno test --allow-env supabase/functions/send-sms/hook_test.ts`
