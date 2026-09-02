@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { View } from 'react-native';
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, ChipGroup, Field, InlineNotice, Screen, Text } from '@/components/ui';
+import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
 import { advanceOnboarding } from '@/lib/onboarding';
 import { formatPhoneKR } from '@/lib/phone';
 import { useSession } from '@/lib/session';
@@ -219,7 +220,7 @@ export default function IdentityStep() {
             loading={loading}
             disabled={!name.trim() || birth.length !== 8 || !carrier}
           />
-          {__DEV__ && (
+          {__DEV__ && DEV_TOOLS_ENABLED && (
             <View style={{ marginTop: spacing.sm }}>
               <Button
                 kind="secondary"

@@ -4,9 +4,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AppState, Linking, Platform, StyleSheet, View } from 'react-native';
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, InlineNotice, Screen, Text } from '@/components/ui';
+import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
 import { advanceOnboarding } from '@/lib/onboarding';
 import { useSession } from '@/lib/session';
-import { DEV_LOGIN_ENABLED } from '@/lib/supabase';
 import {
   completeFaceVerification,
   DEV_PLACEHOLDER_JPEG_BASE64,
@@ -135,7 +135,8 @@ export default function FaceStep() {
             title={needsSettings && Platform.OS !== 'web' ? '설정에서 카메라 허용하기' : '카메라 허용하기'}
             onPress={askPermission}
           />
-          {(__DEV__ || DEV_LOGIN_ENABLED) && (
+          {/* 리터럴 __DEV__ 가드 → release 번들에서는 EXPO_PUBLIC_DEV_LOGIN 값과 무관하게 제거된다 */}
+          {__DEV__ && DEV_TOOLS_ENABLED && (
             <Button kind="secondary" title="개발 모드: 촬영 건너뛰기" onPress={devSkip} loading={busy} />
           )}
         </View>
@@ -155,7 +156,7 @@ export default function FaceStep() {
             </Text>
             {error && <InlineNotice tone="danger" text={error} />}
             <Button title="촬영" onPress={capture} loading={busy} />
-            {(__DEV__ || DEV_LOGIN_ENABLED) && (
+            {__DEV__ && DEV_TOOLS_ENABLED && (
               <Button kind="ghost" title="개발 모드: 촬영 건너뛰기" onPress={devSkip} disabled={busy} />
             )}
           </View>

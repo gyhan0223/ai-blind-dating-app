@@ -8,11 +8,27 @@
  *
  * 사용자 얼굴 이미지는 이 함수 밖으로 절대 나가지 않는다.
  */
+import { requireFaceProviderKind } from '../_shared/env/env.ts';
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
 
 const POSES = ['front', 'left', 'right'] as const;
 
-/** 사용자별 결정적 모의 특징 벡터 (교체 예정) */
+/**
+ * 얼굴 인증 provider 를 cold start 에서 확정한다 (Issue #3 보완 — fail-closed):
+ *   development / staging → FACE_VERIFICATION_PROVIDER 미설정이면 mock
+ *                           (모의 라이브니스 통과 + 모의 특징 벡터)
+ *   production            → 실제 provider 필수. 미설정·mock 이면 requireFaceProviderKind 가,
+ *                           구현되지 않은 이름이면 아래 검사가 throw 하여 함수가 아예 뜨지 않는다.
+ * 즉 실제 라이브니스 provider 가 구현되기 전까지 production 에서는 이 함수를 직접 호출해도
+ * face_verifications approved / users.face_verified=true 를 만들 수 없다.
+ * 실서비스 provider 연동 시 여기서 kind 분기를 추가한다.
+ */
+const FACE_PROVIDER_KIND = requireFaceProviderKind();
+if (FACE_PROVIDER_KIND !== 'mock') {
+  throw new Error(`[face] 구현되지 않은 FACE_VERIFICATION_PROVIDER 입니다: ${FACE_PROVIDER_KIND}`);
+}
+
+/** 사용자별 결정적 모의 특징 벡터 (mock provider 전용 — production 은 위 가드로 차단) */
 async function mockFeatureVector(userId: string): Promise<number[]> {
   const bytes = new TextEncoder().encode(userId);
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
@@ -55,7 +71,7 @@ Deno.serve(async (req) => {
     left_path: paths.left,
     right_path: paths.right,
     liveness_passed: true,
-    provider: 'mock',
+    provider: FACE_PROVIDER_KIND,
     feature_vector: featureVector,
   });
   if (insertErr) return json({ error: 'db_error' }, 500);
