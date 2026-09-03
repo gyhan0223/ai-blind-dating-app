@@ -47,6 +47,13 @@ supabase functions deploy complete-face-verification
 supabase functions deploy daily-recommendation
 supabase functions deploy icebreaker
 
+# SMS OTP 실발송 (Issue #4) — Supabase Auth "Send SMS" HTTP Hook → SOLAPI.
+#   훅은 JWT 발급 전에 호출되므로 반드시 --no-verify-jwt 로 배포한다 (함수가 웹훅 서명을 검증).
+#   4개 secret 이 하나라도 없으면 함수가 모든 요청을 거부한다 (fail-closed). 값은 절대 커밋 금지.
+supabase secrets set SOLAPI_API_KEY=<key> SOLAPI_API_SECRET=<secret> SOLAPI_SENDER_NUMBER=<01012345678>
+supabase functions deploy send-sms --no-verify-jwt --project-ref <project-ref>
+supabase secrets set SEND_SMS_HOOK_SECRETS='v1,whsec_...'   # Dashboard → Auth → Hooks → Send SMS 의 secret
+
 # 본인확인 identity_key_hash 용 HMAC secret
 #   development: 생략 가능 (개발 fixture secret 사용)
 #   staging/production: 32자+ 고유 값 필수 — 미설정/개발 기본값이면 verify-identity 기동 실패
@@ -58,7 +65,11 @@ supabase secrets set IDENTITY_HASH_SECRET=<random-32B-hex>
 ```
 
 Supabase 대시보드에서 추가 확인:
-- **Auth → Phone**: Phone provider 활성화 + SMS 사업자(Twilio 등) 연결.
+- **Auth → Hooks → Send SMS**: Enable → HTTP → URL `https://<project-ref>.supabase.co/functions/v1/send-sms`
+  → Generate secret → 표시된 `v1,whsec_...` 를 `supabase secrets set SEND_SMS_HOOK_SECRETS=...` 로 등록.
+  이 훅이 켜지면 Supabase 가 만든 OTP 를 `send-sms` Edge Function 이 SOLAPI 로 실제 발송합니다
+  (앱의 `signInWithOtp` / `verifyOtp` 흐름은 그대로). 상세: `docs/environments.md`.
+- **Auth → Phone**: Phone provider 활성화 (SMS 사업자 항목은 훅이 대체하므로 비워 둠).
   개발 중에는 **Test OTPs** 에 `+821000000001 ~ +821000000099 → 123456` 처럼
   테스트 번호를 등록하면 실제 SMS 없이 로그인할 수 있어요.
   ⚠️ Test OTP 는 local/staging 전용 — **production 프로젝트에는 Test OTP/테스트 번호를
@@ -139,6 +150,12 @@ cd supabase/functions/_shared/identity && node --experimental-strip-types selfte
 
 # 서버 환경 guardrail 테스트 (Issue #3 — fail-closed dev-login / identity secret)
 cd supabase/functions/_shared/env && node --experimental-strip-types selftest.ts
+
+# SMS OTP 발송 훅 테스트 (Issue #4 — +82→010 변환 · 번호/OTP 검증 · SOLAPI HMAC 헤더 · 서명 실패/SOLAPI 오류 시
+# 성공 응답 없음. SOLAPI 는 fetch mock — 실제 호출 없음)
+cd supabase/functions/send-sms && node --experimental-strip-types selftest.ts
+# 실제 standardwebhooks 서명 검증 통합 테스트 (Deno 필요)
+deno test --allow-env supabase/functions/send-sms/hook_test.ts
 
 # 클라이언트 개발 도구 가드 테스트 (release 빌드에서 dev UI 비활성 보장)
 cd apps/mobile && node --experimental-strip-types scripts/devtools-selftest.mjs
@@ -242,7 +259,7 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
 
 | 기능 | 현재 | 교체 대상 |
 |---|---|---|
-| SMS OTP 발송 | Supabase Test OTP (실발송 없음) | Auth → Phone 에 SMS 사업자(Twilio/Vonage 등) 연결 |
+| SMS OTP 발송 | **SOLAPI 실발송 구현 완료** (`send-sms` Send SMS Hook — Dashboard 훅 활성화 + secret 설정 필요). 로컬은 Test OTP | 운영 프로젝트에 훅/secret 설정 (`docs/environments.md`) |
 | 본인 인증 | `MockIdentityProvider` (모든 6자리 코드 통과, identityKey 는 번호/이름 기반 결정적) | PASS / NICE / KCB / PortOne — 기관이 내려주는 DI 를 identityKey 로 사용 |
 | OTP rate limit | Supabase 기본 + 클라이언트 60초 재전송 타이머 | 대시보드 rate limit 조정 + captcha 연동 |
 | IDENTITY_HASH_SECRET | 개발 기본값 (시드 fixture 와 공유) | `supabase secrets set` 으로 운영 secret 발급 (교체 시 기존 해시 재계산 불가 주의) |
@@ -264,7 +281,7 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
 
 ## 다음 개발 우선순위
 
-1. 실제 본인인증(PASS/PortOne) 연동 + SMS 사업자 연결 (Phone Auth 구조는 구현 완료)
+1. 실제 본인인증(PASS/PortOne) 연동 (SMS 발송은 SOLAPI 훅으로 구현 완료 — 운영 프로젝트 설정 + 남용 방지 rate limit 튜닝 남음)
 2. 온디바이스 라이브니스 + 얼굴 임베딩 → 외모 취향 매칭 고도화
 3. ConversationSignals 를 MatchingEngine 가중치에 반영 (만남 후 피드백 학습 포함)
 4. 추천 탐색 정책(Exploit/Explore/Diversity) 본격 구현 + 추천 풀 공정성 모니터링
