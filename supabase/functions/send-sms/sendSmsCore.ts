@@ -9,7 +9,14 @@
  *   - fail-closed: 필수 환경변수가 하나라도 없거나 형식이 잘못되면 어떤 요청도 처리하지 않는다.
  *   - 전화번호(한국 휴대전화)와 OTP(6자리 숫자)는 서버에서 다시 검증한다. 유효하지 않으면 SOLAPI 로 보내지 않는다.
  *   - 로그 · 응답 본문 · 오류 메시지에 OTP, 전체 전화번호, API secret 을 절대 포함하지 않는다.
- *   - SOLAPI 가 실패했는데 Supabase 에 성공(200)으로 응답하지 않는다.
+ *   - SOLAPI 가 실패했는데 Supabase 에 성공(빈 `{}`)으로 응답하지 않는다.
+ *   - 전화번호별 재전송 쿨다운(60초) + 시간당 상한을 서버(DB RPC)에서 강제한다. 앱의 타이머는 UX 용일 뿐이다.
+ *
+ * Supabase Auth HTTP Hook 오류 규약 (supabase/auth internal/hooks/hookshttp):
+ *   - 오류는 HTTP 200 + `{"error":{"http_code":N,"message":"..."}}` 로 돌려줘야 Auth 가 그 http_code 와
+ *     message 를 클라이언트에 전달한다.
+ *   - 훅이 4xx/5xx 상태 코드 자체를 돌려주면 Auth 는 본문을 읽지 않고 고정 문구
+ *     ("Unexpected status code returned from hook: 502" 등)를 내보내고, 429/503 은 재시도까지 한다.
  */
 
 // ---------------------------------------------------------------------------
@@ -179,6 +186,104 @@ export async function buildSolapiAuthorization(input: SolapiAuthInput): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// 전화번호별 발송 제한 (서버 강제) — DB RPC sms_otp_rate_limit_check (0012_sms_otp_rate_limit.sql)
+// ---------------------------------------------------------------------------
+
+/** 같은 번호 재전송 쿨다운 — 앱의 RESEND_COOLDOWN_SEC(60)과 맞춘다 */
+export const SMS_OTP_COOLDOWN_SEC = 60;
+/** 같은 번호 1시간 상한 — 한 번호가 프로젝트 SMS 한도(기본 30건/h)와 잔액을 혼자 소진하지 못하게 */
+export const SMS_OTP_MAX_PER_HOUR = 5;
+/** RPC 타임아웃 — SOLAPI 3초와 합쳐 Supabase 훅 5초 제한 안에 응답 */
+export const DEFAULT_RATE_LIMIT_TIMEOUT_MS = 1500;
+
+export type RateLimitDecision =
+  | { ok: true; allowed: true }
+  | { ok: true; allowed: false; reason: 'cooldown' | 'hourly_limit'; retryAfterSeconds: number }
+  | { ok: false; reason: 'misconfigured' | 'http_error' | 'timeout' | 'network_error' | 'invalid_response'; status?: number };
+
+/** 전화번호 해시(원문 아님)를 받아 발송 허용 여부를 돌려준다. 실패(ok:false)면 발송하지 않는다 (fail-closed) */
+export type SmsRateLimiter = (phoneHash: string) => Promise<RateLimitDecision>;
+
+/**
+ * 레이트리밋 저장용 키 — 전화번호 원문을 DB 에 남기지 않기 위해 서버 secret 으로 HMAC 한 값.
+ * secret 은 SEND_SMS_HOOK_SECRETS 의 첫 항목을 재사용한다 (회전 시 쿨다운 상태가 초기화될 뿐, 해가 없다).
+ */
+export function phoneRateLimitKey(secret: string, phoneLocal: string): Promise<string> {
+  return hmacSha256Hex(secret, `sms-otp-rate-limit:${phoneLocal}`);
+}
+
+export type RpcRateLimiterOptions = {
+  supabaseUrl: string | null | undefined;
+  serviceRoleKey: string | null | undefined;
+  fetch: typeof fetch;
+  cooldownSeconds?: number;
+  maxPerHour?: number;
+  timeoutMs?: number;
+};
+
+/**
+ * PostgREST RPC(`/rest/v1/rpc/sms_otp_rate_limit_check`)를 service role 로 호출하는 SmsRateLimiter.
+ * SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 는 Edge Runtime 이 자동 주입한다. 없으면 항상 misconfigured.
+ * 응답 본문은 `{ allowed, reason, retry_after_seconds }` (jsonb). 그 외 형식은 invalid_response.
+ */
+export function createRpcRateLimiter(opts: RpcRateLimiterOptions): SmsRateLimiter {
+  const supabaseUrl = (opts.supabaseUrl ?? '').trim().replace(/\/+$/, '');
+  const serviceRoleKey = (opts.serviceRoleKey ?? '').trim();
+  const cooldownSeconds = opts.cooldownSeconds ?? SMS_OTP_COOLDOWN_SEC;
+  const maxPerHour = opts.maxPerHour ?? SMS_OTP_MAX_PER_HOUR;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_RATE_LIMIT_TIMEOUT_MS;
+
+  return async (phoneHash) => {
+    if (!supabaseUrl || !serviceRoleKey) return { ok: false, reason: 'misconfigured' };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let res: Response;
+    try {
+      res = await opts.fetch(`${supabaseUrl}/rest/v1/rpc/sms_otp_rate_limit_check`, {
+        method: 'POST',
+        headers: {
+          apikey: serviceRoleKey,
+          Authorization: `Bearer ${serviceRoleKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          p_phone_hash: phoneHash,
+          p_cooldown_seconds: cooldownSeconds,
+          p_max_per_hour: maxPerHour,
+        }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      const aborted = controller.signal.aborted || (err instanceof Error && err.name === 'AbortError');
+      return { ok: false, reason: aborted ? 'timeout' : 'network_error' };
+    }
+
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!res.ok) return { ok: false, reason: 'http_error', status: res.status };
+    const obj = body && typeof body === 'object' ? (body as Record<string, unknown>) : null;
+    if (!obj || typeof obj.allowed !== 'boolean') return { ok: false, reason: 'invalid_response', status: res.status };
+    if (obj.allowed) return { ok: true, allowed: true };
+    const reason = obj.reason === 'hourly_limit' ? 'hourly_limit' : 'cooldown';
+    const retryAfterRaw = obj.retry_after_seconds;
+    const retryAfterSeconds =
+      typeof retryAfterRaw === 'number' && Number.isFinite(retryAfterRaw) && retryAfterRaw > 0
+        ? Math.ceil(retryAfterRaw)
+        : cooldownSeconds;
+    return { ok: true, allowed: false, reason, retryAfterSeconds };
+  };
+}
+
+// ---------------------------------------------------------------------------
 // SOLAPI 발송
 // ---------------------------------------------------------------------------
 
@@ -292,6 +397,8 @@ export type SendSmsLogger = (level: 'info' | 'warn' | 'error', message: string, 
 export type SendSmsHandlerDeps = {
   config: SendSmsConfigResult;
   verifyWebhook: WebhookVerifier;
+  /** 전화번호별 쿨다운/상한 판정 (index.ts 가 createRpcRateLimiter 로 주입). 실패 시 발송하지 않는다 */
+  rateLimiter: SmsRateLimiter;
   fetch: typeof fetch;
   now?: () => Date;
   salt?: () => string;
@@ -307,9 +414,15 @@ export function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-/** Supabase Auth Hook 오류 형식 — message 에는 고정 코드만 (OTP/전화번호/secret 없음) */
-function hookError(httpCode: number, message: string): Response {
-  return jsonResponse({ error: { http_code: httpCode, message } }, httpCode);
+/**
+ * Supabase Auth Hook 오류 응답 — message 에는 고정 코드만 (OTP/전화번호/secret 없음).
+ * Auth 가 본문을 읽는 건 HTTP 200 일 때뿐이므로 상태는 항상 200, 클라이언트가 받을 코드는 http_code 에 넣는다.
+ * (훅이 4xx/5xx 를 직접 돌려주면 Auth 는 "Unexpected status code returned from hook" 등 고정 문구를 내보내고
+ *  429/503 은 재시도까지 하므로, 우리 오류 코드가 앱에 전달되지 않는다.)
+ */
+export const HOOK_ERROR_STATUS = 200;
+export function hookError(httpCode: number, message: string): Response {
+  return jsonResponse({ error: { http_code: httpCode, message } }, HOOK_ERROR_STATUS);
 }
 
 const defaultLogger: SendSmsLogger = (level, message, fields) => {
@@ -321,13 +434,15 @@ const defaultLogger: SendSmsLogger = (level, message, fields) => {
 
 /**
  * Send SMS Hook 요청 → SOLAPI 발송.
- *   POST 만 허용 → 설정 검사(fail-closed) → 서명 검증 → payload 재검증 → SOLAPI → 200 `{}`
+ *   POST 만 허용 → 설정 검사(fail-closed) → 서명 검증 → payload 재검증 → 번호별 쿨다운/상한(DB RPC)
+ *   → SOLAPI → 200 `{}`
  * 어떤 단계에서든 실패하면 SOLAPI 호출 없이(또는 실패 그대로) 오류 응답을 돌려준다.
+ * 쿨다운/상한에 걸리면 http_code 429 `sms_rate_limited` (앱은 429 를 "요청이 너무 잦아요" 로 표시).
  */
 export async function handleSendSmsRequest(req: Request, deps: SendSmsHandlerDeps): Promise<Response> {
   const log = deps.log ?? defaultLogger;
 
-  if (req.method !== 'POST') return hookError(405, 'method_not_allowed');
+  if (req.method !== 'POST') return jsonResponse({ error: { http_code: 405, message: 'method_not_allowed' } }, 405);
 
   if (!deps.config.ok) {
     log('error', 'misconfigured — 요청 거부 (fail-closed)', {
@@ -375,6 +490,18 @@ export async function handleSendSmsRequest(req: Request, deps: SendSmsHandlerDep
   if (!isValidOtp(otp)) {
     log('warn', 'otp is not a 6-digit code — not sent');
     return hookError(400, 'invalid_otp');
+  }
+
+  // 전화번호별 재전송 쿨다운 + 시간당 상한 — 서버에서 강제 (앱 타이머는 우회 가능). 판정 실패면 발송 안 함.
+  const phoneHash = await phoneRateLimitKey(config.hookSecrets[0], to);
+  const decision = await deps.rateLimiter(phoneHash);
+  if (!decision.ok) {
+    log('error', 'rate limit check failed — not sent (fail-closed)', { reason: decision.reason, status: decision.status });
+    return hookError(503, 'sms_rate_limit_unavailable');
+  }
+  if (!decision.allowed) {
+    log('warn', 'rate limited — not sent', { reason: decision.reason, retryAfterSeconds: decision.retryAfterSeconds });
+    return hookError(429, 'sms_rate_limited');
   }
 
   const startedAt = Date.now();

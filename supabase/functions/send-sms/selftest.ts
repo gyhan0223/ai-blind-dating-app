@@ -6,8 +6,10 @@
  *   - +82 한국 번호 → 010 국내 형식 변환, 그 외 번호/잘못된 OTP 거부
  *   - SOLAPI HMAC-SHA256 Authorization 헤더 생성
  *   - 웹훅 서명 실패 / 설정 누락 / 잘못된 payload → SOLAPI(fetch) 호출 없음
- *   - SOLAPI 오류(HTTP 오류·failedMessageList·타임아웃) → 성공(200) 응답 없음
- *   - 응답·로그에 OTP / 전체 전화번호 / API secret 미노출
+ *   - SOLAPI 오류(HTTP 오류·failedMessageList·타임아웃) → 성공(`{}`) 응답 없음
+ *   - 오류는 Supabase Auth 훅 규약대로 HTTP 200 + `{error:{http_code,message}}` (Auth 가 http_code 를 앱에 전달)
+ *   - 전화번호별 쿨다운/시간당 상한(rateLimiter) 거부 → http_code 429, SOLAPI 미호출. 판정 실패 → 503, 미호출
+ *   - 응답·로그·레이트리밋 키에 OTP / 전체 전화번호 / API secret 미노출
  *
  * 실제 Standard Webhooks 라이브러리와의 통합은 Deno 테스트(hook_test.ts)가 별도로 검증한다.
  */
@@ -15,8 +17,13 @@ import { createHmac } from 'node:crypto';
 import {
   buildOtpMessage,
   buildSolapiAuthorization,
+  createRpcRateLimiter,
   handleSendSmsRequest,
   hmacSha256Hex,
+  HOOK_ERROR_STATUS,
+  phoneRateLimitKey,
+  SMS_OTP_COOLDOWN_SEC,
+  SMS_OTP_MAX_PER_HOUR,
   isValidOtp,
   loadSendSmsConfig,
   normalizeSenderNumberKR,
@@ -25,8 +32,10 @@ import {
   SOLAPI_SEND_URL,
   sendSolapiSms,
   toSolapiPhoneKR,
+  type RateLimitDecision,
   type SendSmsConfigResult,
   type SendSmsLogger,
+  type SmsRateLimiter,
 } from './sendSmsCore.ts';
 
 let passed = 0;
@@ -279,6 +288,8 @@ function captureLog(): { log: SendSmsLogger; lines: string[] } {
   return { log: (level, message, fields) => lines.push(`${level} ${message} ${JSON.stringify(fields ?? {})}`), lines };
 }
 const acceptAll = () => {};
+/** 기본 rateLimiter — 허용. 거부/실패 시나리오는 개별 테스트에서 주입 */
+const allowAll: SmsRateLimiter = async () => ({ ok: true, allowed: true });
 const rejectAll = () => {
   throw new Error('No matching signature found');
 };
@@ -294,7 +305,7 @@ await (async () => {
       config,
       fetch,
       log,
-      verifyWebhook: (body, headers) => {
+      rateLimiter: allowAll, verifyWebhook: (body, headers) => {
         verifierCalls.push({ body, headers });
       },
     });
@@ -318,8 +329,8 @@ await (async () => {
   {
     const { fetch, calls } = mockFetch(solapiOk);
     const { log, lines } = captureLog();
-    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log, verifyWebhook: rejectAll });
-    eq('bad signature status', res.status, 401);
+    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log, rateLimiter: allowAll, verifyWebhook: rejectAll });
+    eq('bad signature status', res.status, HOOK_ERROR_STATUS);
     eq('bad signature content-type', res.headers.get('Content-Type'), 'application/json');
     eq('bad signature body', await res.json(), { error: { http_code: 401, message: 'invalid_signature' } });
     eq('bad signature → solapi NOT called', calls.length, 0);
@@ -332,9 +343,9 @@ await (async () => {
     let verifierCalled = false;
     const res = await handleSendSmsRequest(
       hookRequest(hookPayload(), { 'webhook-id': 'msg_1' }),
-      { config, fetch, log: () => {}, verifyWebhook: () => { verifierCalled = true; } },
+      { config, fetch, log: () => {}, rateLimiter: allowAll, verifyWebhook: () => { verifierCalled = true; } },
     );
-    eq('missing headers status', res.status, 401);
+    eq('missing headers status', res.status, HOOK_ERROR_STATUS);
     eq('missing headers → verifier not called', verifierCalled, false);
     eq('missing headers → solapi NOT called', calls.length, 0);
   }
@@ -344,8 +355,8 @@ await (async () => {
     const { fetch, calls } = mockFetch(solapiOk);
     const { log, lines } = captureLog();
     const broken: SendSmsConfigResult = loadSendSmsConfig(fakeEnv({ SOLAPI_API_KEY: undefined }));
-    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config: broken, fetch, log, verifyWebhook: acceptAll });
-    eq('misconfigured status', res.status, 500);
+    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config: broken, fetch, log, rateLimiter: allowAll, verifyWebhook: acceptAll });
+    eq('misconfigured status', res.status, HOOK_ERROR_STATUS);
     eq('misconfigured body', await res.json(), { error: { http_code: 500, message: 'sms_hook_misconfigured' } });
     eq('misconfigured → solapi NOT called', calls.length, 0);
     eq('misconfigured log names missing var', lines.join('\n').includes('SOLAPI_API_KEY'), true);
@@ -356,8 +367,8 @@ await (async () => {
   for (const phone of ['+15551234567', '+8221234567', '', null, 12345, undefined]) {
     const { fetch, calls } = mockFetch(solapiOk);
     const { log, lines } = captureLog();
-    const res = await handleSendSmsRequest(hookRequest(hookPayload({ phone })), { config, fetch, log, verifyWebhook: acceptAll });
-    eq(`invalid phone ${JSON.stringify(phone)} status`, res.status, 400);
+    const res = await handleSendSmsRequest(hookRequest(hookPayload({ phone })), { config, fetch, log, rateLimiter: allowAll, verifyWebhook: acceptAll });
+    eq(`invalid phone ${JSON.stringify(phone)} status`, res.status, HOOK_ERROR_STATUS);
     eq(`invalid phone ${JSON.stringify(phone)} body`, await res.json(), { error: { http_code: 400, message: 'invalid_recipient' } });
     eq(`invalid phone ${JSON.stringify(phone)} → solapi NOT called`, calls.length, 0);
     eq(`invalid phone ${JSON.stringify(phone)} log has no otp`, lines.join('\n').includes(OTP), false);
@@ -366,8 +377,8 @@ await (async () => {
   // 잘못된 OTP → 400, SOLAPI 미호출
   for (const otp of ['12345', '1234567', 'abcdef', 493817, '', undefined]) {
     const { fetch, calls } = mockFetch(solapiOk);
-    const res = await handleSendSmsRequest(hookRequest(hookPayload({ otp })), { config, fetch, log: () => {}, verifyWebhook: acceptAll });
-    eq(`invalid otp ${JSON.stringify(otp)} status`, res.status, 400);
+    const res = await handleSendSmsRequest(hookRequest(hookPayload({ otp })), { config, fetch, log: () => {}, rateLimiter: allowAll, verifyWebhook: acceptAll });
+    eq(`invalid otp ${JSON.stringify(otp)} status`, res.status, HOOK_ERROR_STATUS);
     eq(`invalid otp ${JSON.stringify(otp)} body`, await res.json(), { error: { http_code: 400, message: 'invalid_otp' } });
     eq(`invalid otp ${JSON.stringify(otp)} → solapi NOT called`, calls.length, 0);
   }
@@ -375,7 +386,7 @@ await (async () => {
   // Supabase 가 + 없이 저장한 번호(821012345678)도 정상 변환
   {
     const { fetch, calls } = mockFetch(solapiOk);
-    const res = await handleSendSmsRequest(hookRequest(hookPayload({ phone: '821012345678' })), { config, fetch, log: () => {}, verifyWebhook: acceptAll });
+    const res = await handleSendSmsRequest(hookRequest(hookPayload({ phone: '821012345678' })), { config, fetch, log: () => {}, rateLimiter: allowAll, verifyWebhook: acceptAll });
     eq('stored phone without plus status', res.status, 200);
     eq('stored phone without plus → to', JSON.parse(String(calls[0]?.init.body)).messages[0].to, RECIPIENT_LOCAL);
   }
@@ -383,19 +394,19 @@ await (async () => {
   // JSON 아님 / 구조 불일치 → 400
   {
     const { fetch, calls } = mockFetch(solapiOk);
-    const res = await handleSendSmsRequest(hookRequest('not json'), { config, fetch, log: () => {}, verifyWebhook: acceptAll });
-    eq('non-json status', res.status, 400);
+    const res = await handleSendSmsRequest(hookRequest('not json'), { config, fetch, log: () => {}, rateLimiter: allowAll, verifyWebhook: acceptAll });
+    eq('non-json status', res.status, HOOK_ERROR_STATUS);
     eq('non-json → solapi NOT called', calls.length, 0);
-    const res2 = await handleSendSmsRequest(hookRequest('[]'), { config, fetch, log: () => {}, verifyWebhook: acceptAll });
-    eq('array payload status', res2.status, 400);
+    const res2 = await handleSendSmsRequest(hookRequest('[]'), { config, fetch, log: () => {}, rateLimiter: allowAll, verifyWebhook: acceptAll });
+    eq('array payload status', res2.status, HOOK_ERROR_STATUS);
     eq('array payload → solapi NOT called', calls.length, 0);
   }
 
   // POST 외 메서드 → 405
   {
     const { fetch, calls } = mockFetch(solapiOk);
-    const res = await handleSendSmsRequest(hookRequest('', signedHeaders, 'GET'), { config, fetch, log: () => {}, verifyWebhook: acceptAll });
-    eq('GET status', res.status, 405);
+    const res = await handleSendSmsRequest(hookRequest('', signedHeaders, 'GET'), { config, fetch, log: () => {}, rateLimiter: allowAll, verifyWebhook: acceptAll });
+    eq('GET status (훅 흐름 아님 — 실제 405)', res.status, 405);
     eq('GET content-type', res.headers.get('Content-Type'), 'application/json');
     eq('GET → solapi NOT called', calls.length, 0);
   }
@@ -406,8 +417,8 @@ await (async () => {
       () => new Response(JSON.stringify({ errorCode: 'ValidationError', errorMessage: `to ${RECIPIENT_LOCAL} invalid` }), { status: 400 }),
     );
     const { log, lines } = captureLog();
-    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log, verifyWebhook: acceptAll });
-    eq('solapi http error status', res.status, 502);
+    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log, rateLimiter: allowAll, verifyWebhook: acceptAll });
+    eq('solapi http error status', res.status, HOOK_ERROR_STATUS);
     eq('solapi http error content-type', res.headers.get('Content-Type'), 'application/json');
     const text = await res.text();
     eq('solapi http error body', JSON.parse(text), { error: { http_code: 502, message: 'sms_send_failed' } });
@@ -429,8 +440,8 @@ await (async () => {
         ),
     );
     const { log, lines } = captureLog();
-    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log, verifyWebhook: acceptAll });
-    eq('solapi failed list status', res.status, 502);
+    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log, rateLimiter: allowAll, verifyWebhook: acceptAll });
+    eq('solapi failed list status', res.status, HOOK_ERROR_STATUS);
     eq('solapi failed list body', await res.json(), { error: { http_code: 502, message: 'sms_send_failed' } });
     eq('solapi failed list log has status code only', lines.join('\n').includes('1041') && !lines.join('\n').includes(RECIPIENT_LOCAL), true);
   }
@@ -441,8 +452,178 @@ await (async () => {
           call.init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
         }),
     );
-    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log: () => {}, verifyWebhook: acceptAll, timeoutMs: 20 });
-    eq('solapi timeout status', res.status, 502);
+    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log: () => {}, rateLimiter: allowAll, verifyWebhook: acceptAll, timeoutMs: 20 });
+    eq('solapi timeout status', res.status, HOOK_ERROR_STATUS);
+  }
+})();
+
+// ── 전화번호별 쿨다운/상한 — rateLimiter 주입 (서버 강제, fail-closed) ──────
+await (async () => {
+  // 레이트리밋 키: 전화번호 원문이 아닌 HMAC(hex 64), secret/번호별로 다름
+  {
+    const k1 = await phoneRateLimitKey(FAKE_HOOK_SECRET_B64, RECIPIENT_LOCAL);
+    const k2 = await phoneRateLimitKey(FAKE_HOOK_SECRET_B64, RECIPIENT_LOCAL);
+    const k3 = await phoneRateLimitKey(FAKE_HOOK_SECRET_B64, '01087654321');
+    const k4 = await phoneRateLimitKey('b3RoZXItc2VjcmV0LW5vdC1yZWFsLTAwMDAwMDAw', RECIPIENT_LOCAL);
+    eq('rate key is 64-hex', /^[0-9a-f]{64}$/.test(k1), true);
+    eq('rate key deterministic', k1, k2);
+    eq('rate key differs per phone', k1 === k3, false);
+    eq('rate key differs per secret', k1 === k4, false);
+    eq('rate key has no phone', k1.includes('1012345678'), false);
+  }
+
+  // 쿨다운 거부 → http_code 429, SOLAPI 미호출, 로그에 사유만
+  {
+    const { fetch, calls } = mockFetch(solapiOk);
+    const { log, lines } = captureLog();
+    const seen: string[] = [];
+    const limiter: SmsRateLimiter = async (hash) => {
+      seen.push(hash);
+      return { ok: true, allowed: false, reason: 'cooldown', retryAfterSeconds: 42 };
+    };
+    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log, rateLimiter: limiter, verifyWebhook: acceptAll });
+    eq('rate limited status', res.status, HOOK_ERROR_STATUS);
+    eq('rate limited content-type', res.headers.get('Content-Type'), 'application/json');
+    eq('rate limited body', await res.json(), { error: { http_code: 429, message: 'sms_rate_limited' } });
+    eq('rate limited → solapi NOT called', calls.length, 0);
+    eq('limiter called once', seen.length, 1);
+    eq('limiter got hash not phone', /^[0-9a-f]{64}$/.test(seen[0] ?? '') && !seen[0]!.includes('1012345678'), true);
+    eq('limiter got same key as phoneRateLimitKey', seen[0], await phoneRateLimitKey(FAKE_HOOK_SECRET_B64, RECIPIENT_LOCAL));
+    const joined = lines.join('\n');
+    eq('rate limited log has reason', joined.includes('cooldown') && joined.includes('42'), true);
+    eq('rate limited log has no otp', joined.includes(OTP), false);
+    eq('rate limited log has no phone', joined.includes('1012345678'), false);
+  }
+
+  // 시간당 상한 거부도 동일하게 429
+  {
+    const { fetch, calls } = mockFetch(solapiOk);
+    const limiter: SmsRateLimiter = async () => ({ ok: true, allowed: false, reason: 'hourly_limit', retryAfterSeconds: 1800 });
+    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log: () => {}, rateLimiter: limiter, verifyWebhook: acceptAll });
+    eq('hourly limited body', await res.json(), { error: { http_code: 429, message: 'sms_rate_limited' } });
+    eq('hourly limited → solapi NOT called', calls.length, 0);
+  }
+
+  // 판정 실패(DB/RPC 오류·타임아웃·미설정) → 503, SOLAPI 미호출 (fail-closed)
+  for (const failure of [
+    { ok: false, reason: 'timeout' },
+    { ok: false, reason: 'http_error', status: 404 },
+    { ok: false, reason: 'misconfigured' },
+  ] as RateLimitDecision[]) {
+    const { fetch, calls } = mockFetch(solapiOk);
+    const { log, lines } = captureLog();
+    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log, rateLimiter: async () => failure, verifyWebhook: acceptAll });
+    eq(`limiter failure ${(failure as { reason: string }).reason} status`, res.status, HOOK_ERROR_STATUS);
+    eq(`limiter failure ${(failure as { reason: string }).reason} body`, await res.json(), { error: { http_code: 503, message: 'sms_rate_limit_unavailable' } });
+    eq(`limiter failure ${(failure as { reason: string }).reason} → solapi NOT called`, calls.length, 0);
+    eq(`limiter failure ${(failure as { reason: string }).reason} logged`, lines.join('\n').includes((failure as { reason: string }).reason), true);
+  }
+
+  // 허용 → SOLAPI 1회 호출 (판정은 발송 "전"에 정확히 1번)
+  {
+    const { fetch, calls } = mockFetch(solapiOk);
+    let limiterCalls = 0;
+    let solapiCalledBeforeLimiter = false;
+    const limiter: SmsRateLimiter = async () => {
+      limiterCalls += 1;
+      if (calls.length > 0) solapiCalledBeforeLimiter = true;
+      return { ok: true, allowed: true };
+    };
+    const res = await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log: () => {}, rateLimiter: limiter, verifyWebhook: acceptAll });
+    eq('allowed status', res.status, 200);
+    eq('allowed body {}', await res.text(), '{}');
+    eq('allowed → limiter once', limiterCalls, 1);
+    eq('allowed → limiter before solapi', solapiCalledBeforeLimiter, false);
+    eq('allowed → solapi once', calls.length, 1);
+  }
+
+  // 서명 실패 / 잘못된 payload 는 limiter 호출 전에 거부 (쓰레기 요청이 쿨다운 상태를 만들지 않음)
+  {
+    let limiterCalls = 0;
+    const counting: SmsRateLimiter = async () => {
+      limiterCalls += 1;
+      return { ok: true, allowed: true };
+    };
+    const { fetch } = mockFetch(solapiOk);
+    await handleSendSmsRequest(hookRequest(hookPayload()), { config, fetch, log: () => {}, rateLimiter: counting, verifyWebhook: rejectAll });
+    await handleSendSmsRequest(hookRequest(hookPayload({ otp: '12' })), { config, fetch, log: () => {}, rateLimiter: counting, verifyWebhook: acceptAll });
+    await handleSendSmsRequest(hookRequest(hookPayload({ phone: '+15551234567' })), { config, fetch, log: () => {}, rateLimiter: counting, verifyWebhook: acceptAll });
+    await handleSendSmsRequest(hookRequest('not json'), { config, fetch, log: () => {}, rateLimiter: counting, verifyWebhook: acceptAll });
+    eq('rejected requests never reach limiter', limiterCalls, 0);
+  }
+})();
+
+// ── createRpcRateLimiter — PostgREST RPC 호출/응답 해석 ─────────────────────
+await (async () => {
+  const SUPABASE_URL = 'https://abc.supabase.co';
+  const SERVICE_KEY = 'service-role-key-not-real';
+  const HASH = 'f'.repeat(64);
+  const rpcJson = (body: unknown, status = 200) => () => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+  // 요청 형식: URL / service role 헤더 / 기본 파라미터
+  {
+    const { fetch, calls } = mockFetch(rpcJson({ allowed: true, reason: 'ok', retry_after_seconds: 0 }));
+    const limiter = createRpcRateLimiter({ supabaseUrl: `${SUPABASE_URL}/`, serviceRoleKey: SERVICE_KEY, fetch });
+    const d = await limiter(HASH);
+    eq('rpc allowed', d, { ok: true, allowed: true });
+    eq('rpc url', calls[0]?.url, `${SUPABASE_URL}/rest/v1/rpc/sms_otp_rate_limit_check`);
+    eq('rpc method', calls[0]?.init.method, 'POST');
+    const h = calls[0]?.init.headers as Record<string, string>;
+    eq('rpc apikey header', h.apikey, SERVICE_KEY);
+    eq('rpc bearer header', h.Authorization, `Bearer ${SERVICE_KEY}`);
+    eq('rpc body', JSON.parse(String(calls[0]?.init.body)), {
+      p_phone_hash: HASH,
+      p_cooldown_seconds: SMS_OTP_COOLDOWN_SEC,
+      p_max_per_hour: SMS_OTP_MAX_PER_HOUR,
+    });
+    eq('rpc defaults 60s/5', [SMS_OTP_COOLDOWN_SEC, SMS_OTP_MAX_PER_HOUR], [60, 5]);
+  }
+
+  // 거부 응답 해석
+  {
+    const { fetch } = mockFetch(rpcJson({ allowed: false, reason: 'cooldown', retry_after_seconds: 37 }));
+    eq('rpc cooldown', await createRpcRateLimiter({ supabaseUrl: SUPABASE_URL, serviceRoleKey: SERVICE_KEY, fetch })(HASH), {
+      ok: true, allowed: false, reason: 'cooldown', retryAfterSeconds: 37,
+    });
+    const hourly = mockFetch(rpcJson({ allowed: false, reason: 'hourly_limit', retry_after_seconds: 1234 }));
+    eq('rpc hourly', await createRpcRateLimiter({ supabaseUrl: SUPABASE_URL, serviceRoleKey: SERVICE_KEY, fetch: hourly.fetch })(HASH), {
+      ok: true, allowed: false, reason: 'hourly_limit', retryAfterSeconds: 1234,
+    });
+    const noRetry = mockFetch(rpcJson({ allowed: false }));
+    eq('rpc denied without retry → cooldown default', await createRpcRateLimiter({ supabaseUrl: SUPABASE_URL, serviceRoleKey: SERVICE_KEY, fetch: noRetry.fetch })(HASH), {
+      ok: true, allowed: false, reason: 'cooldown', retryAfterSeconds: SMS_OTP_COOLDOWN_SEC,
+    });
+  }
+
+  // 실패: HTTP 오류 / 형식 불일치 / 미설정 / 네트워크 / 타임아웃 → ok:false (호출 측에서 fail-closed)
+  {
+    const notFound = mockFetch(rpcJson({ code: 'PGRST202', message: 'function not found' }, 404));
+    eq('rpc 404 (migration 미적용)', await createRpcRateLimiter({ supabaseUrl: SUPABASE_URL, serviceRoleKey: SERVICE_KEY, fetch: notFound.fetch })(HASH), {
+      ok: false, reason: 'http_error', status: 404,
+    });
+    const junk = mockFetch(() => new Response('<html>', { status: 200 }));
+    eq('rpc non-json', await createRpcRateLimiter({ supabaseUrl: SUPABASE_URL, serviceRoleKey: SERVICE_KEY, fetch: junk.fetch })(HASH), {
+      ok: false, reason: 'invalid_response', status: 200,
+    });
+    const shape = mockFetch(rpcJson({ something: 1 }));
+    eq('rpc wrong shape', await createRpcRateLimiter({ supabaseUrl: SUPABASE_URL, serviceRoleKey: SERVICE_KEY, fetch: shape.fetch })(HASH), {
+      ok: false, reason: 'invalid_response', status: 200,
+    });
+    const unused = mockFetch(rpcJson({ allowed: true }));
+    eq('rpc missing url → misconfigured', await createRpcRateLimiter({ supabaseUrl: '', serviceRoleKey: SERVICE_KEY, fetch: unused.fetch })(HASH), { ok: false, reason: 'misconfigured' });
+    eq('rpc missing key → misconfigured', await createRpcRateLimiter({ supabaseUrl: SUPABASE_URL, serviceRoleKey: undefined, fetch: unused.fetch })(HASH), { ok: false, reason: 'misconfigured' });
+    eq('rpc misconfigured → fetch NOT called', unused.calls.length, 0);
+    const netErr = mockFetch(() => {
+      throw new TypeError('fetch failed');
+    });
+    eq('rpc network error', await createRpcRateLimiter({ supabaseUrl: SUPABASE_URL, serviceRoleKey: SERVICE_KEY, fetch: netErr.fetch })(HASH), { ok: false, reason: 'network_error' });
+    const hang = mockFetch(
+      (call) =>
+        new Promise<Response>((_, reject) => {
+          call.init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        }),
+    );
+    eq('rpc timeout', await createRpcRateLimiter({ supabaseUrl: SUPABASE_URL, serviceRoleKey: SERVICE_KEY, fetch: hang.fetch, timeoutMs: 20 })(HASH), { ok: false, reason: 'timeout' });
   }
 })();
 

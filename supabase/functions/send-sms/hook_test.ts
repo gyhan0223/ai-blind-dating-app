@@ -4,12 +4,12 @@
  *
  * 검증:
  *   - Supabase 가 보내는 형식(webhook-id/-timestamp/-signature, `v1,whsec_` secret)으로 서명된 요청만 통과
- *   - 본문 변조 / 다른 secret / 오래된 타임스탬프 → 401, SOLAPI 미호출
+ *   - 본문 변조 / 다른 secret / 오래된 타임스탬프 → http_code 401 (HTTP 200 본문 — Auth 훅 규약), SOLAPI 미호출
  *   - secret 회전(`|` 로 여러 개) 시 어느 하나로 서명해도 통과
  */
 import { deepStrictEqual as assertEquals } from 'node:assert/strict';
 import { Webhook } from 'npm:standardwebhooks@1.1.1';
-import { handleSendSmsRequest, loadSendSmsConfig, parseHookSecrets } from './sendSmsCore.ts';
+import { handleSendSmsRequest, loadSendSmsConfig, parseHookSecrets, type SmsRateLimiter } from './sendSmsCore.ts';
 import { createWebhookVerifier } from './webhookVerifier.ts';
 
 // 테스트용 가짜 값 (실제 secret 아님)
@@ -25,6 +25,9 @@ const env = (hookSecrets: string) => (name: string) =>
     SOLAPI_SENDER_NUMBER: '010-9999-0000',
     SEND_SMS_HOOK_SECRETS: hookSecrets,
   })[name];
+
+/** 서명 검증 테스트이므로 레이트리밋은 항상 허용 */
+const rateLimiter: SmsRateLimiter = async () => ({ ok: true, allowed: true });
 
 const payload = JSON.stringify({ user: { id: 'u1', phone: '+821012345678' }, sms: { otp: OTP } });
 
@@ -55,7 +58,7 @@ Deno.test('v1,whsec_ secret 으로 서명된 요청은 통과하고 SOLAPI 가 �
   if (!config.ok) return;
   const verifyWebhook = createWebhookVerifier(config.config.hookSecrets);
   const { fetch, calls } = mockSolapi();
-  const res = await handleSendSmsRequest(request(payload, sign(SECRET_A, payload)), { config, verifyWebhook, fetch, log: () => {} });
+  const res = await handleSendSmsRequest(request(payload, sign(SECRET_A, payload)), { config, verifyWebhook, rateLimiter, fetch, log: () => {} });
   assertEquals(res.status, 200);
   assertEquals(res.headers.get('Content-Type'), 'application/json');
   assertEquals(await res.text(), '{}');
@@ -72,8 +75,8 @@ Deno.test('본문이 변조되면 401 이고 SOLAPI 는 호출되지 않는다',
   const verifyWebhook = createWebhookVerifier(config.config.hookSecrets);
   const { fetch, calls } = mockSolapi();
   const tampered = payload.replace(OTP, '000000');
-  const res = await handleSendSmsRequest(request(tampered, sign(SECRET_A, payload)), { config, verifyWebhook, fetch, log: () => {} });
-  assertEquals(res.status, 401);
+  const res = await handleSendSmsRequest(request(tampered, sign(SECRET_A, payload)), { config, verifyWebhook, rateLimiter, fetch, log: () => {} });
+  assertEquals(res.status, 200);
   assertEquals(await res.json(), { error: { http_code: 401, message: 'invalid_signature' } });
   assertEquals(calls.length, 0);
 });
@@ -83,8 +86,9 @@ Deno.test('다른 secret 으로 서명하면 401 이고 SOLAPI 는 호출되지 
   if (!config.ok) throw new Error('config');
   const verifyWebhook = createWebhookVerifier(config.config.hookSecrets);
   const { fetch, calls } = mockSolapi();
-  const res = await handleSendSmsRequest(request(payload, sign(SECRET_B, payload)), { config, verifyWebhook, fetch, log: () => {} });
-  assertEquals(res.status, 401);
+  const res = await handleSendSmsRequest(request(payload, sign(SECRET_B, payload)), { config, verifyWebhook, rateLimiter, fetch, log: () => {} });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { error: { http_code: 401, message: 'invalid_signature' } });
   assertEquals(calls.length, 0);
 });
 
@@ -94,8 +98,9 @@ Deno.test('타임스탬프가 오래된 서명은 401 (replay 방지)', async ()
   const verifyWebhook = createWebhookVerifier(config.config.hookSecrets);
   const { fetch, calls } = mockSolapi();
   const old = new Date(Date.now() - 10 * 60 * 1000);
-  const res = await handleSendSmsRequest(request(payload, sign(SECRET_A, payload, old)), { config, verifyWebhook, fetch, log: () => {} });
-  assertEquals(res.status, 401);
+  const res = await handleSendSmsRequest(request(payload, sign(SECRET_A, payload, old)), { config, verifyWebhook, rateLimiter, fetch, log: () => {} });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { error: { http_code: 401, message: 'invalid_signature' } });
   assertEquals(calls.length, 0);
 });
 
@@ -107,7 +112,7 @@ Deno.test('secret 회전: | 로 이어 붙인 secret 중 어느 하나로 서명
   const verifyWebhook = createWebhookVerifier(config.config.hookSecrets);
   for (const secret of [SECRET_A, SECRET_B]) {
     const { fetch, calls } = mockSolapi();
-    const res = await handleSendSmsRequest(request(payload, sign(secret, payload)), { config, verifyWebhook, fetch, log: () => {} });
+    const res = await handleSendSmsRequest(request(payload, sign(secret, payload)), { config, verifyWebhook, rateLimiter, fetch, log: () => {} });
     assertEquals(res.status, 200);
     assertEquals(calls.length, 1);
   }

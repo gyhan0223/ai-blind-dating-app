@@ -76,7 +76,10 @@ Supabase 대시보드에서 추가 확인:
   절대 등록하지 않습니다** (Dashboard 설정이라 코드로 차단할 수 없음 —
   `docs/release-checklist.md` 로 매 출시마다 수동 확인).
 - **Auth → Rate Limits**: SMS 발송 rate limit 확인 (OTP abuse 방지 — 기본값 유지 권장).
-  클라이언트는 재전송 60초 타이머를 추가로 강제합니다.
+  이 값은 **프로젝트 전체** 시간당 SMS 수만 제한합니다. 같은 번호의 연타는 `send-sms` 훅이
+  DB RPC(`sms_otp_rate_limit_check`, 마이그레이션 `0012`)로 **번호별 60초 쿨다운 + 시간당 5건**을 강제해
+  429 로 거부합니다 (마이그레이션 미적용이면 fail-closed → 발송 안 함). 앱은 같은 번호를 60초 동안
+  버튼 잠금(번호 변경/재시작 후에도 유지)으로 한 번 더 막습니다.
 - **Auth → Email**: 이메일 OTP 는 일반 사용자 앱에서 제거됨 —
   시드 데모 계정(개발)과 관리자 웹 로그인에만 사용.
 - **Storage**: `faces` 버킷은 마이그레이션이 생성 (private — public 전환 금지)
@@ -152,13 +155,16 @@ cd supabase/functions/_shared/identity && node --experimental-strip-types selfte
 cd supabase/functions/_shared/env && node --experimental-strip-types selftest.ts
 
 # SMS OTP 발송 훅 테스트 (Issue #4 — +82→010 변환 · 번호/OTP 검증 · SOLAPI HMAC 헤더 · 서명 실패/SOLAPI 오류 시
-# 성공 응답 없음. SOLAPI 는 fetch mock — 실제 호출 없음)
+# 성공 응답 없음 · 번호별 쿨다운/상한 거부 시 429 + SOLAPI 미호출. SOLAPI/RPC 는 fetch mock — 실제 호출 없음)
 cd supabase/functions/send-sms && node --experimental-strip-types selftest.ts
+# 번호별 쿨다운/상한 RPC(sms_otp_rate_limit_check) DB 테스트는 위 run_local_check.sh 가 함께 실행 (sms_rate_limit_tests.sql)
 # 실제 standardwebhooks 서명 검증 통합 테스트 (Deno 필요)
 deno test --allow-env supabase/functions/send-sms/hook_test.ts
 
 # 클라이언트 개발 도구 가드 테스트 (release 빌드에서 dev UI 비활성 보장)
 cd apps/mobile && node --experimental-strip-types scripts/devtools-selftest.mjs
+# 클라이언트 OTP 재전송 60초 쿨다운 테스트 (번호별 · 화면 이동/재시작 후 유지 · 저장값 검증)
+cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.mjs
 
 # 타입체크 / 빌드
 cd apps/mobile && npx tsc --noEmit && npx expo export --platform web
@@ -261,7 +267,7 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
 |---|---|---|
 | SMS OTP 발송 | **SOLAPI 실발송 구현 완료** (`send-sms` Send SMS Hook — Dashboard 훅 활성화 + secret 설정 필요). 로컬은 Test OTP | 운영 프로젝트에 훅/secret 설정 (`docs/environments.md`) |
 | 본인 인증 | `MockIdentityProvider` (모든 6자리 코드 통과, identityKey 는 번호/이름 기반 결정적) | PASS / NICE / KCB / PortOne — 기관이 내려주는 DI 를 identityKey 로 사용 |
-| OTP rate limit | Supabase 기본 + 클라이언트 60초 재전송 타이머 | 대시보드 rate limit 조정 + captcha 연동 |
+| OTP rate limit | 서버: `send-sms` 훅이 번호별 60초 쿨다운 + 시간당 5건 강제(429) + 대시보드 프로젝트 한도(30건/h) · 앱: 번호별 60초 버튼 잠금 | 실사용량 보고 한도 조정 + captcha 연동 |
 | IDENTITY_HASH_SECRET | 개발 기본값 (시드 fixture 와 공유) | `supabase secrets set` 으로 운영 secret 발급 (교체 시 기존 해시 재계산 불가 주의) |
 | 얼굴 라이브니스 | 촬영 UX 만 (좌/우 안내) + 서버 파일 존재 확인 | 온디바이스 라이브니스 SDK |
 | 얼굴 특징 벡터 | 사용자별 결정적 해시 벡터 | 얼굴 임베딩 모델 |
@@ -281,7 +287,7 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
 
 ## 다음 개발 우선순위
 
-1. 실제 본인인증(PASS/PortOne) 연동 (SMS 발송은 SOLAPI 훅으로 구현 완료 — 운영 프로젝트 설정 + 남용 방지 rate limit 튜닝 남음)
+1. 실제 본인인증(PASS/PortOne) 연동 (SMS 발송은 SOLAPI 훅 + 번호별 쿨다운/상한까지 구현 완료 — 운영 프로젝트 설정 남음)
 2. 온디바이스 라이브니스 + 얼굴 임베딩 → 외모 취향 매칭 고도화
 3. ConversationSignals 를 MatchingEngine 가중치에 반영 (만남 후 피드백 학습 포함)
 4. 추천 탐색 정책(Exploit/Explore/Diversity) 본격 구현 + 추천 풀 공정성 모니터링

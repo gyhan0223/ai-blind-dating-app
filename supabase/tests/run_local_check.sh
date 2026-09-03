@@ -31,4 +31,9 @@ if [[ "${WITH_IDENTITY_TESTS:-1}" == "1" && -f identity_tests.sql ]]; then
   $PSQL -d "$DB_NAME" -f identity_tests.sql
 fi
 
+if [[ "${WITH_SMS_RATE_LIMIT_TESTS:-1}" == "1" && -f sms_rate_limit_tests.sql ]]; then
+  echo "running sms rate limit tests"
+  $PSQL -d "$DB_NAME" -f sms_rate_limit_tests.sql
+fi
+
 echo "OK: schema check passed on $DB_NAME"

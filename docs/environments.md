@@ -112,25 +112,42 @@ Supabase Phone Auth 의 `signInWithOtp` / `verifyOtp` 흐름은 그대로 두고
   → HTTP Hook POST https://<ref>.supabase.co/functions/v1/send-sms
       헤더: webhook-id / webhook-timestamp / webhook-signature (Standard Webhooks 서명)
       본문: { user: { phone }, sms: { otp } }
-  → send-sms: 서명 검증 → 번호/OTP 재검증 → SOLAPI send-many/detail (HMAC-SHA256 인증)
-  → 200 {} 이면 Supabase 가 클라이언트에 성공 응답, 오류면 signInWithOtp 가 실패
+  → send-sms: 서명 검증 → 번호/OTP 재검증 → 번호별 쿨다운/상한 판정 (DB RPC sms_otp_rate_limit_check)
+      → SOLAPI send-many/detail (HMAC-SHA256 인증)
+  → 200 {} 이면 Supabase 가 클라이언트에 성공 응답
+  → 오류는 200 + {error:{http_code,message}} 로 돌려주고 Supabase 가 그 http_code 로 signInWithOtp 를 실패시킴
+      (429 sms_rate_limited → 앱은 "요청이 너무 잦아요")
 앱 verifyOtp(+8210…, 123456) → Supabase 가 저장한 OTP 와 비교 (함수 무관)
 ```
 
 보안 설계 (`supabase/functions/send-sms/`):
 
+- **오류 응답 규약** — Supabase Auth 는 훅이 **HTTP 200** 으로 `{ "error": { "http_code": N, "message": "…" } }` 를
+  돌려줄 때만 본문을 읽어 그 http_code/message 를 앱에 전달한다. 훅이 4xx/5xx 상태 코드를 직접 돌려주면
+  본문을 무시하고 "Unexpected status code returned from hook: 502" 같은 고정 문구를 내보내며, 429/503 은
+  재시도까지 한다. 그래서 아래의 401/400/429/500/502/503 은 모두 **본문의 http_code** 다 (HTTP 상태는 200).
 - **JWT 인증 없음, 서명 검증 필수** — 훅은 JWT 발급 전에 호출되므로 `--no-verify-jwt` 로 배포한다.
   대신 `SEND_SMS_HOOK_SECRETS` 로 Standard Webhooks 서명(`standardwebhooks` 라이브러리)을 검증하고,
   실패하면 SOLAPI 를 호출하지 않고 401 을 돌려준다. 타임스탬프 ±5분 밖은 거부(replay 방지).
 - **fail-closed** — `SOLAPI_API_KEY` / `SOLAPI_API_SECRET` / `SOLAPI_SENDER_NUMBER` / `SEND_SMS_HOOK_SECRETS`
   중 하나라도 없거나 형식이 틀리면 모든 요청에 500. 로그에는 변수 이름만 남긴다.
+- **번호별 재전송 쿨다운 + 시간당 상한 (서버 강제)** — Dashboard Rate Limits 는 프로젝트 전체 시간당 SMS 수만
+  제한하고 같은 번호의 60초 내 재요청을 막지 않는다. 그래서 `send-sms` 가 발송 직전에 DB RPC
+  `sms_otp_rate_limit_check` (마이그레이션 `0012_sms_otp_rate_limit.sql`) 로 **같은 번호 60초 쿨다운 + 1시간 5건**을
+  판정하고, 걸리면 SOLAPI 를 호출하지 않고 429 `sms_rate_limited` 를 돌려준다. 행 잠금으로 동시 연타에도 1건만 허용.
+  RPC 는 Edge Runtime 이 자동 주입하는 `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` 로 호출한다 (추가 secret 없음).
+  판정 자체가 실패(마이그레이션 미적용·DB 오류·1.5초 타임아웃)하면 503 `sms_rate_limit_unavailable` 로 발송하지 않는다
+  (fail-closed). 테이블 `sms_otp_send_log` 에는 전화번호 원문 대신 HMAC(hook secret) 해시만 저장하며,
+  RLS 정책 없음 + anon/authenticated 권한 회수로 클라이언트는 접근할 수 없다. 앱의 60초 버튼 잠금은 UX 용이다.
 - **서버 재검증** — `user.phone` 은 `+821012345678` / `821012345678` 어느 형식이든 `01012345678` 로 바꾸고
   한국 휴대전화(`01[016789]` + 7~8자리)만 허용, OTP 는 6자리 숫자만 허용. 아니면 400 (SOLAPI 미호출).
 - **실패를 성공으로 숨기지 않음** — SOLAPI HTTP 오류·`failedMessageList`·타임아웃(3초, Supabase 훅 5초 제한 고려)은
   전부 502. 응답/로그/오류 메시지에는 OTP·전체 전화번호·API secret 이 들어가지 않는다 (고정 코드 + SOLAPI statusCode 만).
 - **SOLAPI SDK 미사용** — Deno Web Crypto 로 `HMAC-SHA256 apiKey=…, date=…, salt=…, signature=…` 헤더를 직접 만든다.
   발신/수신번호에는 `+`, `-`, 공백을 넣지 않는다.
-- 클라이언트(`apps/mobile`)는 변경 없음. SOLAPI 키/secret 은 `EXPO_PUBLIC_*` 에 절대 넣지 않는다.
+- 클라이언트(`apps/mobile`)는 `signInWithOtp` / `verifyOtp` 그대로. 429 를 받으면 "요청이 너무 잦아요" 를 표시하고
+  같은 번호를 60초 잠근다(`lib/otpCooldown` — 번호 변경/앱 재시작 후에도 유지). SOLAPI 키/secret 은 `EXPO_PUBLIC_*` 에
+  절대 넣지 않는다.
 
 환경별 정책:
 
@@ -145,20 +162,25 @@ Supabase Phone Auth 의 `signInWithOtp` / `verifyOtp` 흐름은 그대로 두고
 ```bash
 # 1) 서버 secret (값은 저장소에 절대 커밋하지 않는다)
 supabase secrets set SOLAPI_API_KEY=<key> SOLAPI_API_SECRET=<secret> SOLAPI_SENDER_NUMBER=<01012345678> --project-ref <ref>
-# 2) 함수 배포 — 반드시 --no-verify-jwt (훅은 JWT 없이 호출된다). production 은 deploy-production.sh 가 대신 수행
+# 2) 마이그레이션 적용 (0012_sms_otp_rate_limit.sql — 번호별 쿨다운/상한 RPC. 없으면 send-sms 가 발송을 거부한다)
+supabase db push --project-ref <ref>
+#    함수 배포 — 반드시 --no-verify-jwt (훅은 JWT 없이 호출된다). production 은 deploy-production.sh 가 대신 수행
 supabase functions deploy send-sms --no-verify-jwt --project-ref <ref>
 # 3) Dashboard → Authentication → Hooks → "Send SMS" → Enable, HTTP 타입,
 #    URL: https://<ref>.supabase.co/functions/v1/send-sms → Generate secret → 표시된 v1,whsec_... 복사
 supabase secrets set SEND_SMS_HOOK_SECRETS='v1,whsec_...' --project-ref <ref>
 # 4) Dashboard → Authentication → Providers → Phone: Enable, SMS provider 항목은 사용하지 않음(훅이 대체)
-#    Rate Limits 에서 SMS 발송 한도 확인
+#    Rate Limits 에서 SMS 발송 한도 확인 (프로젝트 전체 한도 — 번호별 제한은 위 RPC 가 담당)
 ```
 
 secret 회전: Dashboard 에서 새 secret 을 만든 뒤 `SEND_SMS_HOOK_SECRETS='v1,whsec_new|v1,whsec_old'` 로 잠시
 둘 다 허용하고, 훅이 새 secret 으로 서명하는 것을 확인한 뒤 old 를 제거한다.
 
-검증: `cd supabase/functions/send-sms && node --experimental-strip-types selftest.ts` (SOLAPI 는 fetch mock,
-실제 호출 없음) · `deno test --allow-env supabase/functions/send-sms/hook_test.ts` (실제 standardwebhooks 서명 검증).
+검증: `cd supabase/functions/send-sms && node --experimental-strip-types selftest.ts` (SOLAPI/RPC 는 fetch mock,
+실제 호출 없음) · `deno test --allow-env supabase/functions/send-sms/hook_test.ts` (실제 standardwebhooks 서명 검증) ·
+`bash supabase/tests/run_local_check.sh` (마이그레이션 + `sms_rate_limit_tests.sql` — RPC 쿨다운/상한/권한 검증).
+실기기: 같은 번호로 "인증번호 받기 → 번호 변경 → 인증번호 받기" 를 60초 안에 하면 버튼이 잠겨 있고, 앱을 우회해
+직접 호출해도 429 가 돌아오며 Edge Function 로그에 `rate limited — not sent` 가 남는다.
 
 ## Test OTP 정책 (코드로 강제 불가 — Dashboard 설정)
 
