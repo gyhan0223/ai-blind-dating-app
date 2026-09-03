@@ -4,17 +4,23 @@ import { View } from 'react-native';
 import { Button, Field, InlineNotice, Screen, Text } from '@/components/ui';
 import { track } from '@/lib/analytics';
 import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
+import { loadOtpCooldowns, saveOtpCooldowns } from '@/lib/otpCooldown';
+import { type CooldownMap, cooldownRemainingSec, formatCooldown, markSent } from '@/lib/otpCooldownCore';
 import { autoHyphen, formatPhoneKR, normalizePhoneKR } from '@/lib/phone';
 import { supabase } from '@/lib/supabase';
 import { colors, spacing } from '@/theme/tokens';
-
-const RESEND_COOLDOWN_SEC = 60;
 
 /**
  * 전화번호 SMS OTP 로그인/가입 (Supabase Phone Auth).
  *
  * 전화번호는 로그인 수단일 뿐이다 — 신규/기존/중복 계정의 최종 판단은
  * OTP 이후 본인확인 단계(verify-identity Edge Function 의 identity_key_hash)가 담당한다.
+ *
+ * 재전송 제한 (두 겹):
+ *   - 화면: 같은 번호는 발송(또는 서버 429) 후 60초 동안 "인증번호 받기/재전송" 버튼을 잠근다.
+ *     번호 변경으로 첫 화면에 돌아가거나 앱을 껐다 켜도 유지된다 (lib/otpCooldown — AsyncStorage).
+ *   - 서버: send-sms 훅이 번호별 60초 쿨다운 + 시간당 상한을 DB 로 강제하고 429 를 돌려준다.
+ *     화면 타이머는 우회될 수 있으므로 진짜 차단은 서버 쪽이다.
  *
  * 개발 환경: Supabase 대시보드 Phone provider 의 Test OTP 로
  * 010-0000-XXXX 대역을 인증번호 123456 으로 등록해 사용한다 (README 참고).
@@ -26,54 +32,73 @@ export default function Login() {
   const [stage, setStage] = useState<'phone' | 'code'>('phone');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [resendLeft, setResendLeft] = useState(0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** 번호별 마지막 발송 시각 — 번호 변경/앱 재시작 후에도 유지 (저장소에서 복원) */
+  const [sentAt, setSentAt] = useState<CooldownMap>({});
+  const [now, setNow] = useState(() => Date.now());
+  const mountedRef = useRef(true);
 
   const e164 = normalizePhoneKR(phone);
+  const resendLeft = e164 ? cooldownRemainingSec(sentAt[e164], now) : 0;
 
-  const startResendTimer = () => {
-    setResendLeft(RESEND_COOLDOWN_SEC);
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => {
-      setResendLeft((s) => {
-        if (s <= 1 && timerRef.current) clearInterval(timerRef.current);
-        return Math.max(0, s - 1);
-      });
-    }, 1000);
+  useEffect(() => {
+    mountedRef.current = true;
+    loadOtpCooldowns().then((map) => {
+      if (mountedRef.current) setSentAt(map);
+    });
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // 쿨다운이 남아 있는 동안만 1초마다 시계를 갱신한다
+  const ticking = resendLeft > 0;
+  useEffect(() => {
+    if (!ticking) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [ticking]);
+
+  const startResendTimer = (phoneE164: string) => {
+    const at = Date.now();
+    const next = markSent(sentAt, phoneE164, at);
+    setSentAt(next);
+    setNow(at);
+    void saveOtpCooldowns(next);
   };
-
-  useEffect(
-    () => () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    },
-    [],
-  );
 
   const requestCode = async () => {
     if (!e164) {
       setError('올바른 휴대전화 번호를 입력해 주세요.');
       return;
     }
+    if (cooldownRemainingSec(sentAt[e164], Date.now()) > 0) {
+      setError('방금 인증번호를 보냈어요. 잠시 후 다시 시도해 주세요.');
+      return;
+    }
     setLoading(true);
     setError(null);
-    // OTP 발송/쿨다운/횟수 제한은 Supabase Auth 가 담당 (rate limit 은 대시보드 설정)
+    // 발송·번호별 쿨다운·횟수 제한은 서버(Supabase Auth + send-sms 훅)가 최종 판단 — 429 면 너무 잦은 요청
     const { error: err } = await supabase.auth.signInWithOtp({
       phone: e164,
       options: { shouldCreateUser: true },
     });
     setLoading(false);
     if (err) {
+      if (err.status === 429) {
+        // 서버가 막았다 → 화면도 같은 번호를 60초 잠근다 (연타 방지)
+        startResendTimer(e164);
+        setError('요청이 너무 잦아요. 잠시 후 다시 시도해 주세요.');
+        return;
+      }
       setError(
-        err.status === 429
-          ? '요청이 너무 잦아요. 잠시 후 다시 시도해 주세요.'
-          : __DEV__
-            ? `인증번호를 보내지 못했어요.\n[dev] ${err.message}` // 개발 모드에서만 원인 표시
-            : '인증번호를 보내지 못했어요. 번호를 확인해 주세요.',
+        __DEV__
+          ? `인증번호를 보내지 못했어요.\n[dev] ${err.message}` // 개발 모드에서만 원인 표시
+          : '인증번호를 보내지 못했어요. 번호를 확인해 주세요.',
       );
       return;
     }
     setCode('');
-    startResendTimer();
+    startResendTimer(e164);
     setStage('code');
   };
 
@@ -141,9 +166,6 @@ export default function Login() {
     router.replace('/');
   };
 
-  const fmtTimer = (s: number) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-
   return (
     <Screen>
       <Text variant="title" style={{ marginTop: spacing.xl, marginBottom: spacing.sm }}>
@@ -183,7 +205,12 @@ export default function Login() {
 
       {stage === 'phone' ? (
         <>
-          <Button title="인증번호 받기" onPress={requestCode} loading={loading} disabled={!e164} />
+          <Button title="인증번호 받기" onPress={requestCode} loading={loading} disabled={!e164 || resendLeft > 0} />
+          {resendLeft > 0 && (
+            <Text variant="caption" color={colors.sub} style={{ marginTop: spacing.sm, textAlign: 'center' }}>
+              이 번호로 방금 보냈어요. {formatCooldown(resendLeft)} 후 다시 받을 수 있어요
+            </Text>
+          )}
           {__DEV__ && DEV_TOOLS_ENABLED && (
             <View style={{ marginTop: spacing.sm }}>
               <Button
@@ -208,7 +235,7 @@ export default function Login() {
           <Button title="확인" onPress={verify} loading={loading} disabled={code.length !== 6} />
           {resendLeft > 0 ? (
             <Text variant="caption" color={colors.sub} style={{ textAlign: 'center' }}>
-              {fmtTimer(resendLeft)} 후 재전송
+              {formatCooldown(resendLeft)} 후 재전송
             </Text>
           ) : (
             <Button kind="ghost" title="인증번호 재전송" onPress={requestCode} />
