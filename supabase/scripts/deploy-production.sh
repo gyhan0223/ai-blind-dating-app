@@ -14,13 +14,18 @@
 #  4) 개발용 secret(ALLOW_DEV_LOGIN 등)이 존재하면 배포를 실패시킨다.
 #  5) send-sms(Supabase Auth Send SMS Hook → SOLAPI, Issue #4)는 JWT 발급 전에 호출되므로
 #     --no-verify-jwt 로 배포한다. 호출자 인증은 함수 안의 웹훅 서명 검증(SEND_SMS_HOOK_SECRETS)이 담당한다.
+#  6) didit-webhook(Didit 라이브니스 결과 웹훅)도 JWT 없이 호출되므로 --no-verify-jwt 로 배포한다.
+#     호출자 인증은 X-Signature-V2 HMAC 검증(DIDIT_WEBHOOK_SECRET)이 담당한다. (docs/face-liveness-didit.md)
+#  7) complete-face-verification 은 개발용 mock 전용이라 production 에 배포하지 않는다
+#     (FACE_VERIFICATION_PROVIDER=didit 이면 기동 자체를 거부한다 — 2차 방어).
 set -euo pipefail
 
 # production 에 배포하는 함수 allowlist — dev-login 은 절대 추가하지 않는다
 PROD_FUNCTIONS=(
   verify-identity
   delete-account
-  complete-face-verification
+  start-face-liveness
+  didit-webhook
   daily-recommendation
   icebreaker
   send-sms
@@ -30,6 +35,7 @@ PROD_FUNCTIONS=(
 # (대신 함수가 Standard Webhooks 서명을 검증한다. 다른 함수는 절대 추가하지 않는다)
 NO_VERIFY_JWT_FUNCTIONS=(
   send-sms
+  didit-webhook
 )
 
 # production 에 반드시 존재해야 하는 secret (값은 확인 불가 — 존재만 확인, 값 검증은 서버 가드가 수행)
@@ -37,6 +43,9 @@ REQUIRED_SECRETS=(
   IDENTITY_HASH_SECRET
   IDENTITY_PROVIDER
   FACE_VERIFICATION_PROVIDER
+  DIDIT_API_KEY
+  DIDIT_WORKFLOW_ID
+  DIDIT_WEBHOOK_SECRET
   SOLAPI_API_KEY
   SOLAPI_API_SECRET
   SOLAPI_SENDER_NUMBER
@@ -56,11 +65,16 @@ if [[ $# -ne 1 ]]; then
 fi
 PROJECT_REF="$1"
 
-echo "== 1/4 dev-login 배포 여부 확인 (${PROJECT_REF}) =="
+echo "== 1/4 dev-login / complete-face-verification 배포 여부 확인 (${PROJECT_REF}) =="
 DEPLOYED="$(supabase functions list --project-ref "$PROJECT_REF")"
 if grep -qE "(^|[^a-zA-Z0-9-])dev-login([^a-zA-Z0-9-]|$)" <<<"$DEPLOYED"; then
   echo "ERROR: production 에 dev-login 함수가 배포되어 있습니다. 배포를 중단합니다." >&2
   echo "  먼저 삭제하세요: supabase functions delete dev-login --project-ref ${PROJECT_REF}" >&2
+  exit 1
+fi
+if grep -qE "(^|[^a-zA-Z0-9-])complete-face-verification([^a-zA-Z0-9-]|$)" <<<"$DEPLOYED"; then
+  echo "ERROR: production 에 개발용 mock 함수 complete-face-verification 이 배포되어 있습니다. 배포를 중단합니다." >&2
+  echo "  먼저 삭제하세요: supabase functions delete complete-face-verification --project-ref ${PROJECT_REF}" >&2
   exit 1
 fi
 
@@ -73,6 +87,8 @@ for required in "${REQUIRED_SECRETS[@]}"; do
     echo "  (IDENTITY_HASH_SECRET: 32자+ 고유 값 / *_PROVIDER: mock 이 아닌 실제 provider" >&2
     echo "   — 값이 잘못되면 함수가 cold start 에서 기동을 거부합니다." >&2
     echo "   SOLAPI_* / SEND_SMS_HOOK_SECRETS: SMS OTP 실발송(send-sms) 필수 — 없으면 OTP 가 발송되지 않습니다." >&2
+    echo "   DIDIT_API_KEY / DIDIT_WORKFLOW_ID / DIDIT_WEBHOOK_SECRET: 얼굴 라이브니스(start-face-liveness, didit-webhook)" >&2
+    echo "   필수 — 없으면 두 함수가 기동을 거부합니다 (FACE_VERIFICATION_PROVIDER=didit)." >&2
     echo "   docs/environments.md)" >&2
     exit 1
   fi
@@ -104,3 +120,5 @@ echo "   (주의: *_PROVIDER secret 의 값이 mock 이 아닌지는 CLI 로 확
 echo "    잘못 설정된 경우 verify-identity / complete-face-verification 이 기동 실패로 드러납니다)"
 echo "   (send-sms: Dashboard → Authentication → Hooks 에서 Send SMS Hook 이 이 함수 URL 로 켜져 있고"
 echo "    SEND_SMS_HOOK_SECRETS 가 Dashboard 의 hook secret 과 같은지 확인하세요 — CLI 로 검증 불가)"
+echo "   (didit-webhook: Didit 콘솔의 웹훅 URL 이 https://${PROJECT_REF}.supabase.co/functions/v1/didit-webhook 이고"
+echo "    DIDIT_WEBHOOK_SECRET 이 콘솔의 webhook secret 과 같은지 확인하세요 — docs/face-liveness-didit.md)"

@@ -36,4 +36,9 @@ if [[ "${WITH_SMS_RATE_LIMIT_TESTS:-1}" == "1" && -f sms_rate_limit_tests.sql ]]
   $PSQL -d "$DB_NAME" -f sms_rate_limit_tests.sql
 fi
 
+if [[ "${WITH_FACE_LIVENESS_TESTS:-1}" == "1" && -f face_liveness_tests.sql ]]; then
+  echo "running face liveness tests"
+  $PSQL -d "$DB_NAME" -f face_liveness_tests.sql
+fi
+
 echo "OK: schema check passed on $DB_NAME"

@@ -8,7 +8,11 @@
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "infoPlist": {
+        "NSCameraUsageDescription": "본인 확인을 위해 얼굴을 촬영할 때 카메라를 사용해요. 촬영한 얼굴은 상대에게 공개되지 않아요.",
+        "NSMicrophoneUsageDescription": "얼굴 확인 영상을 잠시 녹화할 때 마이크 권한이 필요해요. 음성은 저장하거나 사용하지 않아요."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -17,7 +21,15 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
+      "blockedPermissions": [
+        "android.permission.NFC",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_EXTERNAL_STORAGE"
+      ]
     },
     "web": {
       "output": "static",
@@ -31,6 +43,15 @@
           "backgroundColor": "#208AEF",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
+        }
+      ],
+      [
+        "@didit-protocol/sdk-react-native",
+        {
+          "iosVariant": "autodetection",
+          "androidVariant": "autodetection",
+          "iosNfcEnabled": false,
+          "androidNfcEnabled": false
         }
       ]
     ],

@@ -1,39 +1,35 @@
 /**
- * 얼굴 인증 확정 Edge Function.
+ * complete-face-verification — 개발 전용 Mock 얼굴 인증 즉시 승인 Edge Function.
  *
- * 1. 사용자가 private bucket 에 올린 3장(정면/좌/우)이 실제 존재하는지 확인
- * 2. 모의 라이브니스 통과 처리 + 모의 특징 벡터 생성
- *    (실서비스: 온디바이스 라이브니스 SDK + 얼굴 임베딩 모델로 교체)
- * 3. face_verifications approved + users.face_verified 갱신
+ * ⚠️ 이 함수는 실제 라이브니스가 아니다. 카메라가 없는 시뮬레이터/개발 빌드에서 온보딩 흐름만 검증하기 위해
+ *    face_verifications approved(provider='mock') + users.face_verified=true 를 만든다.
  *
- * 사용자 얼굴 이미지는 이 함수 밖으로 절대 나가지 않는다.
+ * 실제 흐름(production)은 start-face-liveness(세션 생성) → Didit 네이티브 SDK → didit-webhook(서명 검증 +
+ * 서버 재조회) 이며, 이 함수는 그 경로에 전혀 관여하지 않는다.
+ *
+ * fail-closed 가드 (Issue #3 원칙 유지)
+ *   - FACE_VERIFICATION_PROVIDER 가 mock 이 아니면(예: didit) cold start 에서 throw → 함수가 뜨지 않는다.
+ *   - production 에서는 requireFaceProviderKind 가 mock/미설정을 거부하므로 어떤 조합으로도 기동되지 않는다.
+ *   - production 배포 allowlist(supabase/scripts/deploy-production.sh) 에서도 제외된다 (1차 방어).
+ *   - 모바일 production 코드는 이 함수를 호출하지 않는다 (`__DEV__ && DEV_TOOLS_ENABLED` 버튼 전용).
+ *
+ * 과거의 정면/좌/우 3장 업로드 검사는 제거했다 — 사용자가 직접 올린 이미지는 라이브니스가 검증된 이미지가
+ * 아니므로 새 흐름에서 신뢰하지 않으며 임베딩 입력으로도 쓰지 않는다. feature_vector 는 만들지 않는다 (null).
  */
 import { requireFaceProviderKind } from '../_shared/env/env.ts';
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
+import { getFaceLivenessProvider } from '../_shared/face/FaceLivenessProvider.ts';
+import { resolveOutcome } from '../_shared/face/faceCore.ts';
 
-const POSES = ['front', 'left', 'right'] as const;
-
-/**
- * 얼굴 인증 provider 를 cold start 에서 확정한다 (Issue #3 보완 — fail-closed):
- *   development / staging → FACE_VERIFICATION_PROVIDER 미설정이면 mock
- *                           (모의 라이브니스 통과 + 모의 특징 벡터)
- *   production            → 실제 provider 필수. 미설정·mock 이면 requireFaceProviderKind 가,
- *                           구현되지 않은 이름이면 아래 검사가 throw 하여 함수가 아예 뜨지 않는다.
- * 즉 실제 라이브니스 provider 가 구현되기 전까지 production 에서는 이 함수를 직접 호출해도
- * face_verifications approved / users.face_verified=true 를 만들 수 없다.
- * 실서비스 provider 연동 시 여기서 kind 분기를 추가한다.
- */
 const FACE_PROVIDER_KIND = requireFaceProviderKind();
 if (FACE_PROVIDER_KIND !== 'mock') {
-  throw new Error(`[face] 구현되지 않은 FACE_VERIFICATION_PROVIDER 입니다: ${FACE_PROVIDER_KIND}`);
+  throw new Error(
+    `[face] complete-face-verification 은 개발용 mock 전용입니다 (FACE_VERIFICATION_PROVIDER=${FACE_PROVIDER_KIND}). ` +
+      '실제 provider 는 start-face-liveness / didit-webhook 을 사용하세요.',
+  );
 }
 
-/** 사용자별 결정적 모의 특징 벡터 (mock provider 전용 — production 은 위 가드로 차단) */
-async function mockFeatureVector(userId: string): Promise<number[]> {
-  const bytes = new TextEncoder().encode(userId);
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-  return Array.from(digest.slice(0, 16)).map((b) => Number((b / 255).toFixed(4)));
-}
+const provider = getFaceLivenessProvider(FACE_PROVIDER_KIND, (name) => Deno.env.get(name), (i, init) => fetch(i, init));
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -41,46 +37,36 @@ Deno.serve(async (req) => {
   const auth = await requireUser(req);
   if (auth instanceof Response) return auth;
 
-  const body = await req.json().catch(() => null);
-  const paths = body?.paths as Record<string, string> | undefined;
-  if (!paths) return json({ error: 'invalid_body' }, 400);
-
+  const body = await req.json().catch(() => ({}));
   const db = serviceClient();
 
-  // 경로 검증: 반드시 본인 폴더의 pose 파일이어야 한다
-  for (const pose of POSES) {
-    if (paths[pose] !== `${auth.userId}/${pose}.jpg`) {
-      return json({ error: 'invalid_path' }, 400);
-    }
-  }
-
-  // 실제 업로드 여부 확인
-  const { data: objects, error: listErr } = await db.storage.from('faces').list(auth.userId);
-  if (listErr) return json({ error: 'storage_error' }, 500);
-  const names = new Set((objects ?? []).map((o) => o.name));
-  for (const pose of POSES) {
-    if (!names.has(`${pose}.jpg`)) return json({ verified: false, reason: 'missing_image' });
-  }
-
-  const featureVector = await mockFeatureVector(auth.userId);
+  // Mock decision 을 실제 provider 와 같은 도메인 판정 경로(resolveOutcome)로 통과시킨다.
+  // sessionId 에 "duplicate" 가 포함되면 중복 얼굴 의심 시나리오(in_review) 를 재현할 수 있다.
+  const scenario = typeof body?.scenario === 'string' ? body.scenario : 'approved';
+  const decision = await provider.getDecision(`mock-${scenario}`);
+  if (!decision.ok) return json({ error: 'mock_decision_failed' }, 500);
+  const outcome = resolveOutcome(decision.decision);
 
   const { error: insertErr } = await db.from('face_verifications').insert({
     user_id: auth.userId,
-    status: 'approved',
-    front_path: paths.front,
-    left_path: paths.left,
-    right_path: paths.right,
-    liveness_passed: true,
-    provider: FACE_PROVIDER_KIND,
-    feature_vector: featureVector,
+    status: outcome.status,
+    liveness_passed: outcome.livenessPassed,
+    provider: 'mock',
+    provider_status: decision.decision.providerStatus,
+    liveness_method: decision.decision.livenessMethod,
+    liveness_score: decision.decision.livenessScore,
+    provider_reason: outcome.reason,
+    provider_event_at: new Date().toISOString(),
+    feature_vector: null,
   });
   if (insertErr) return json({ error: 'db_error' }, 500);
 
-  const { error: userErr } = await db
-    .from('users')
-    .update({ face_verified: true })
-    .eq('id', auth.userId);
+  if (outcome.status !== 'approved') {
+    return json({ verified: false, status: outcome.status });
+  }
+
+  const { error: userErr } = await db.from('users').update({ face_verified: true }).eq('id', auth.userId);
   if (userErr) return json({ error: 'db_error' }, 500);
 
-  return json({ verified: true });
+  return json({ verified: true, status: 'approved' });
 });
