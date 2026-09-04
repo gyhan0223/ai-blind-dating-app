@@ -43,7 +43,9 @@ supabase secrets set ALLOW_DEV_LOGIN=1    # dev-login opt-in (production 에선 
 supabase functions deploy verify-identity
 supabase functions deploy delete-account
 supabase functions deploy dev-login       # 개발/스테이징 전용 — production 에는 배포 금지!
-supabase functions deploy complete-face-verification
+supabase functions deploy complete-face-verification   # 개발 전용 Mock 승인 — FACE_VERIFICATION_PROVIDER=mock 일 때만 기동
+supabase functions deploy start-face-liveness           # 실제 얼굴 라이브니스 (Didit) — docs/face-liveness-didit.md
+supabase functions deploy didit-webhook --no-verify-jwt # Didit 결과 웹훅 (서명 검증) — 반드시 --no-verify-jwt
 supabase functions deploy daily-recommendation
 supabase functions deploy icebreaker
 
@@ -229,8 +231,9 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
   별도 함수로 분리. identity 보존으로 재가입 시 복구로 이어짐. banned 는 계정 삭제
   후에도 identity 에 남아 재가입 차단.
 - **얼굴 인증 = 보조 신호**: DI/identityKey 가 primary duplicate-account control,
-  얼굴은 실제 사람 확인 + 매칭용 (`face_verifications.feature_vector`).
-  동일 얼굴 탐지는 향후 추가 인증 대상 선별에만 사용 (auto-ban 없음).
+  얼굴은 **Didit 능동형 라이브니스(3D Action & Flash)** 로 실제 사람 확인 + Face Search 1:N 중복 의심 시
+  `in_review` (auto-ban 없음). 승인은 서명 검증된 웹훅 + 서버 재조회로만 — `docs/face-liveness-didit.md`.
+  라이브니스는 실명·나이를 증명하지 않는다 (본인확인은 별도).
 - **Device signal**: `device_events` 에 가입/인증 이벤트만 기록 (서버 전용).
   "1 device = 1 account" 정책은 두지 않음 (폰 교체/중고기기 정상 시나리오).
 
@@ -252,8 +255,9 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
 
 ## 개인정보 보호 구조
 
-1. **얼굴 이미지**: private bucket `faces` (`<user_id>/<pose>.jpg`), storage RLS 로 본인 폴더만 접근.
-   public URL 없음. 다른 사용자의 얼굴을 가져오는 코드 경로 자체가 없음.
+1. **얼굴 이미지**: private bucket `faces`. 라이브니스가 검증된 reference image 는 서버만 저장/접근하는
+   `<user_id>/liveness/reference.jpg` (클라이언트는 읽기조차 불가). public URL 없음. raw video·audit image·Provider 응답 전체 미저장.
+   다른 사용자의 얼굴을 가져오는 코드 경로 자체가 없음. (예전 사용자 업로드 `<user_id>/<pose>.jpg` 는 검증 이미지가 아니므로 더 이상 사용하지 않음)
 2. **profiles(공개용) / private_profiles(가치관·민감 응답) 분리** — private 은 본인만 조회 가능.
 3. **RLS 전면 적용**: 메시지·신고·피드백·행동 이벤트·좋아요(받은 쪽 비공개)·
    만남 의사(상호 yes 전 비공개)까지 시뮬레이션 테스트로 검증 (`supabase/tests/rls_tests.sql`).
@@ -269,8 +273,8 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
 | 본인 인증 | `MockIdentityProvider` (모든 6자리 코드 통과, identityKey 는 번호/이름 기반 결정적) | PASS / NICE / KCB / PortOne — 기관이 내려주는 DI 를 identityKey 로 사용 |
 | OTP rate limit | 서버: `send-sms` 훅이 번호별 60초 쿨다운 + 시간당 5건 강제(429) + 대시보드 프로젝트 한도(30건/h) · 앱: 번호별 60초 버튼 잠금 | 실사용량 보고 한도 조정 + captcha 연동 |
 | IDENTITY_HASH_SECRET | 개발 기본값 (시드 fixture 와 공유) | `supabase secrets set` 으로 운영 secret 발급 (교체 시 기존 해시 재계산 불가 주의) |
-| 얼굴 라이브니스 | 촬영 UX 만 (좌/우 안내) + 서버 파일 존재 확인 | 온디바이스 라이브니스 SDK |
-| 얼굴 특징 벡터 | 사용자별 결정적 해시 벡터 | 얼굴 임베딩 모델 |
+| 얼굴 라이브니스 | **Didit 네이티브 SDK 능동형 라이브니스 구현 완료** (`start-face-liveness` + `didit-webhook`, Development Build 필요). 개발 Mock 은 `complete-face-verification` (production 미배포) | Didit 콘솔 설정·secret·실기기 검증 (`docs/face-liveness-didit.md`) |
+| 얼굴 특징 벡터 | 미생성 (null) — 검증된 reference image 만 private 저장 | 얼굴 임베딩 모델 (reference image 입력, 별도 동의 필요) |
 | 외모 취향 테스트 | 추상 인상 일러스트 카드 | 합법적 synthetic face dataset |
 | Icebreaker | 규칙 기반 | LLM |
 | 결제 | 구조만 (subscriptions 테이블, Plus=추천 개수만) | 인앱 결제 / PG |
@@ -288,7 +292,7 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
 ## 다음 개발 우선순위
 
 1. 실제 본인인증(PASS/PortOne) 연동 (SMS 발송은 SOLAPI 훅 + 번호별 쿨다운/상한까지 구현 완료 — 운영 프로젝트 설정 남음)
-2. 온디바이스 라이브니스 + 얼굴 임베딩 → 외모 취향 매칭 고도화
+2. 얼굴 임베딩(검증된 reference image 입력) → 외모 취향 매칭 고도화 (라이브니스는 Didit 으로 구현 완료 — 콘솔 설정·실기기 검증 남음)
 3. ConversationSignals 를 MatchingEngine 가중치에 반영 (만남 후 피드백 학습 포함)
 4. 추천 탐색 정책(Exploit/Explore/Diversity) 본격 구현 + 추천 풀 공정성 모니터링
 5. 푸시 알림 (매치/메시지) · 계정 삭제 셀프서비스 · 결제
