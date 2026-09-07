@@ -33,6 +33,7 @@ export async function loadDashboardStats(db: SupabaseClient) {
     meetupCompleted,
     secondDateYes,
     pendingReports,
+    pendingFaceReviews,
   ] = await Promise.all([
     count(db, 'users'),
     count(db, 'users', (q) => q.gte('last_active_at', weekAgo)),
@@ -46,6 +47,7 @@ export async function loadDashboardStats(db: SupabaseClient) {
     count(db, 'matches', (q) => q.eq('meetup_state', 'completed')),
     count(db, 'meetup_feedback', (q) => q.eq('met_again_intent', 'yes')),
     count(db, 'reports', (q) => q.eq('status', 'pending')),
+    count(db, 'face_verifications', (q) => q.eq('status', 'in_review')),
   ]);
 
   const funnel: FunnelStep[] = [
@@ -70,6 +72,7 @@ export async function loadDashboardStats(db: SupabaseClient) {
     meetupMutual,
     meetupCompleted,
     pendingReports,
+    pendingFaceReviews,
     funnel,
   };
 }

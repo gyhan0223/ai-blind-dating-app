@@ -37,9 +37,17 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] `complete-face-verification`(개발용 mock) 함수가 production 에 **배포되어 있지 않다** (`supabase functions list`)
 - [ ] `didit-webhook` 이 **`--no-verify-jwt` 로 배포**되어 있고 Didit 콘솔 웹훅 URL 이
       `https://<prod-ref>.supabase.co/functions/v1/didit-webhook` 이다 (staging URL 아님)
-- [ ] Didit 워크플로: Liveness 단계만 · Active `3D Action & Flash` · 최대 3회 · Face Search 1:N 켜짐 · 신분증/AML/주소/NFC 없음
-- [ ] 마이그레이션 `0013_face_liveness.sql` 이 production DB 에 적용되어 있다 (`face_liveness_begin_session` RPC 존재)
+- [ ] Didit 콘솔 웹훅 destination 의 **version 이 V3** 이고 `status.updated` · `data.updated` 를 구독한다
+      (V2 destination 이면 `event_id`/`liveness_checks[]` 가 오지 않아 승인이 되지 않는 것이 정상)
+- [ ] Didit 워크플로: Liveness 단계 **하나만** · Active `3D Action & Flash` · 최대 3회 · Face Search 1:N 켜짐 · 신분증/AML/주소/NFC 없음
+      (라이브니스 노드가 여러 개면 서버가 fail-closed 로 승인하지 않는다)
+- [ ] 마이그레이션 `0013_face_liveness.sql` + `0014_face_liveness_v3_hardening.sql` 이 production DB 에 적용되어 있다
+      (`face_liveness_begin_session` · `face_liveness_approve` · `face_liveness_admin_review` RPC, `face_webhook_events` · `face_verification_reviews` 테이블 존재)
+- [ ] `admin-face-review` 가 배포되어 있고(JWT ON) anon key / 사용자 JWT 로 호출하면 401 이다
 - [ ] 잘못된 서명으로 didit-webhook 을 호출하면 401 이고 DB 가 바뀌지 않는다
+- [ ] `webhook_type: transaction.status.updated` 같은 비세션 이벤트를 서명해 보내면 200 `unsupported_event` 이고 DB 가 바뀌지 않는다
+- [ ] 같은 `event_id` 를 두 번 보내면 두 번째는 200 `duplicate` 이고 함수 로그에 Decision 재조회가 없다
+- [ ] `select * from face_liveness_inconsistent_rows()` 가 0행이다 (approved 인데 `face_verified=false` / `reference_path` 없음 없음)
 - [ ] production 에서 verify-identity 를 직접 호출해도 아무 6자리 코드로 통과되지 않는다
 - [ ] production 에서 complete-face-verification 을 직접 호출해도 `face_verified=true` 가 되지 않는다 (미배포 또는 기동 실패)
 - [ ] 사용자 JWT 로 `face_verifications` 에 insert/update 하면 거부된다 (RLS + 트리거)
@@ -66,6 +74,8 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 
 - [ ] `SUPABASE_SERVICE_ROLE_KEY` 가 서버 환경변수로만 존재한다 (`NEXT_PUBLIC_*` 금지, 브라우저 노출 없음)
 - [ ] `ADMIN_PASSWORD` 가 기본값(`change-me`)이 아니다
+- [ ] 관리자 웹 **얼굴 검토** 화면이 열리고, 조건(라이브니스 Approved · liveness_passed · 참조 이미지) 없는 행은 승인이 409 로 거부된다
+- [ ] 얼굴 검토 화면에 중복 매칭된 상대 사용자 정보·얼굴 이미지가 표시되지 않는다 (세션 id 는 앞 8자만)
 
 ## Verification (실기기)
 
@@ -76,10 +86,13 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] 개발 fixture 번호(010-0000-XXXX)가 production 에서 **동작하지 않는다**
       (Test OTP 미등록 → 실제 SMS 발송 실패/미도달 확인)
 - [ ] 얼굴 인증을 건너뛸 수 있는 경로가 UI 어디에도 없다
-- [ ] 실기기(iOS·Android)에서 `docs/face-liveness-didit.md` 10절 실기기 체크리스트를 통과했다
-      (실제 얼굴 통과 · 인쇄 사진/재생 영상/두 명/가림/저조도 실패 안내 · 중단 후 복귀 · 재시작 시 pending 복원 · 중복 가입 in_review)
+- [ ] 실기기(iOS·Android)에서 `docs/face-liveness-didit.md` 12절 실기기 체크리스트를 통과했다 — **아직 미수행 (실제 Didit 계정·실기기 E2E 필요)**
+      (실제 얼굴 통과 · 인쇄 사진/재생 영상/두 명/가림/저조도 실패 안내 · 중단 후 복귀 · 재시작 시 pending 복원 · Resubmit 시 재시작 안내 · 중복 가입 in_review → 관리자 처리)
+- [ ] 승인 시 `face_verifications.status='approved'` / `verified_at` / `users.face_verified=true` 가 같은 시점에 바뀌었다 (RPC 한 트랜잭션)
+- [ ] reference image 가 없으면 승인되지 않고 `in_review`(`reference_image_unavailable`) 로 남았다가 재확인으로 복구된다
 - [ ] Storage `faces/<uid>/liveness/reference.jpg` 가 사용자 JWT 로 읽히지 않는다
-- [ ] 개인정보처리방침에 생체정보(민감정보) 처리·국외 이전·외모 매칭 목적 별도 동의가 반영되어 있다 (`docs/face-liveness-didit.md` 8절)
+- [ ] Android release 빌드에서 얼굴 확인 1회 후 `adb logcat | grep -iE 'token=|vendorData=|workflowId='` 가 0줄이다 (SDK patch 적용 — `npm run sdk:verify-no-token-log` 가 OK)
+- [ ] 개인정보처리방침에 생체정보(민감정보) 처리·국외 이전·외모 매칭 목적 별도 동의가 반영되어 있다 (`docs/face-liveness-didit.md` 10절 TODO — 출시 차단)
 - [ ] 서버 selftest 통과:
       `cd supabase/functions/_shared/env && node --experimental-strip-types selftest.ts`
       `cd supabase/functions/_shared/identity && node --experimental-strip-types selftest.ts`
@@ -87,5 +100,7 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       `cd supabase/functions/_shared/face && node --experimental-strip-types selftest.ts`
       `cd apps/mobile && node --experimental-strip-types scripts/face-liveness-selftest.mjs`
       `deno test --allow-env supabase/functions/send-sms/hook_test.ts`
-      `bash supabase/tests/run_local_check.sh` (sms_rate_limit_tests.sql · face_liveness_tests.sql 포함)
+      `bash supabase/tests/run_local_check.sh` (sms_rate_limit_tests.sql · face_liveness_tests.sql · face_liveness_concurrency_test.sh 포함)
+      `cd apps/mobile && npm run sdk:verify-no-token-log`
+      `cd apps/admin && npx tsc --noEmit`
       `cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.mjs`

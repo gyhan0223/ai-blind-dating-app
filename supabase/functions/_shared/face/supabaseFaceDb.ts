@@ -2,17 +2,29 @@
  * FaceDb 의 Supabase 구현 (Deno Edge Function 전용 — service role).
  * RPC / 테이블 / storage 접근을 한 곳에 모아 핵심 로직(순수 모듈)이 supabase-js 에 의존하지 않게 한다.
  *
+ * 승인은 오직 RPC face_liveness_approve(단일 트랜잭션) 로만 이루어진다 — 이 클래스에는 users.face_verified 를
+ * 직접 갱신하는 경로가 없다.
  * 로그에 경로/URL/토큰을 남기지 않는다. storage 는 private bucket "faces" 만 사용하며 public URL 을 만들지 않는다.
  */
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
-import type { BeginSessionResult, FaceDb, FaceRow, FaceRowPatch } from './faceDb.ts';
+import type {
+  AdminReviewInput,
+  AdminReviewResult,
+  ApproveInput,
+  ApproveResult,
+  BeginSessionResult,
+  FaceDb,
+  FaceRow,
+  FaceRowPatch,
+  WebhookEventRecord,
+} from './faceDb.ts';
 import type { FaceVerificationStatus } from './faceCore.ts';
 import { referenceImagePath } from './faceCore.ts';
 
 const FACES_BUCKET = 'faces';
 
 const ROW_COLUMNS =
-  'id, user_id, status, provider, provider_session_id, provider_status, provider_event_at, liveness_passed, reference_path, expires_at, attempt_count, created_at';
+  'id, user_id, status, provider, provider_session_id, provider_status, provider_event_at, provider_reason, liveness_passed, liveness_score, liveness_method, reference_path, expires_at, attempt_count, created_at';
 
 type RawRow = {
   id: string;
@@ -22,7 +34,10 @@ type RawRow = {
   provider_session_id: string | null;
   provider_status: string | null;
   provider_event_at: string | null;
+  provider_reason: string | null;
   liveness_passed: boolean;
+  liveness_score: number | string | null;
+  liveness_method: string | null;
   reference_path: string | null;
   expires_at: string | null;
   attempt_count: number;
@@ -30,6 +45,7 @@ type RawRow = {
 };
 
 function toRow(r: RawRow): FaceRow {
+  const score = r.liveness_score === null ? null : Number(r.liveness_score);
   return {
     id: r.id,
     userId: r.user_id,
@@ -38,12 +54,19 @@ function toRow(r: RawRow): FaceRow {
     providerSessionId: r.provider_session_id,
     providerStatus: r.provider_status,
     providerEventAt: r.provider_event_at ? new Date(r.provider_event_at) : null,
+    providerReason: r.provider_reason,
     livenessPassed: r.liveness_passed,
+    livenessScore: score !== null && Number.isFinite(score) ? score : null,
+    livenessMethod: r.liveness_method,
     referencePath: r.reference_path,
     expiresAt: r.expires_at ? new Date(r.expires_at) : null,
     attemptCount: r.attempt_count,
     createdAt: new Date(r.created_at),
   };
+}
+
+function rpcRecord(data: unknown): Record<string, unknown> | null {
+  return typeof data === 'object' && data !== null && !Array.isArray(data) ? (data as Record<string, unknown>) : null;
 }
 
 export class SupabaseFaceDb implements FaceDb {
@@ -60,11 +83,11 @@ export class SupabaseFaceDb implements FaceDb {
       p_max_per_hour: limits.maxPerHour,
       p_max_per_day: limits.maxPerDay,
     });
-    if (error || !data || typeof data !== 'object') {
+    const r = error ? null : rpcRecord(data);
+    if (!r) {
       // 마이그레이션 미적용/DB 오류 → 세션을 만들지 않는다 (fail-closed)
       throw new Error('face_liveness_begin_session rpc failed');
     }
-    const r = data as Record<string, unknown>;
     switch (r.action) {
       case 'already_verified':
         return { action: 'already_verified' };
@@ -146,9 +169,46 @@ export class SupabaseFaceDb implements FaceDb {
     return { ok: true };
   }
 
-  async setUserFaceVerified(userId: string): Promise<{ ok: boolean }> {
-    const { error } = await this.db.from('users').update({ face_verified: true }).eq('id', userId);
-    return { ok: !error };
+  async approveVerification(input: ApproveInput): Promise<ApproveResult> {
+    const { data, error } = await this.db.rpc('face_liveness_approve', {
+      p_row_id: input.rowId,
+      p_user_id: input.userId,
+      p_provider_session_id: input.providerSessionId,
+      p_reference_path: input.referencePath,
+      p_liveness_passed: input.livenessPassed,
+      p_liveness_score: input.livenessScore,
+      p_liveness_method: input.livenessMethod,
+      p_provider_status: input.providerStatus,
+      p_provider_event_at: input.providerEventAt.toISOString(),
+      p_reason: input.reason,
+    });
+    if (error) return { ok: false, reason: error.code ?? 'rpc_error' };
+    const r = rpcRecord(data);
+    if (!r) return { ok: false, reason: 'rpc_invalid' };
+    if (r.ok !== true) return { ok: false, reason: typeof r.reason === 'string' ? r.reason : 'rejected' };
+    return { ok: true, faceVerified: true, changed: r.changed === true };
+  }
+
+  async adminReview(input: AdminReviewInput): Promise<AdminReviewResult> {
+    const { data, error } = await this.db.rpc('face_liveness_admin_review', {
+      p_row_id: input.rowId,
+      p_action: input.action,
+      p_actor: input.actor,
+      p_note: input.note,
+      p_reference_path: input.referencePath ?? null,
+      p_liveness_score: input.livenessScore ?? null,
+      p_liveness_method: input.livenessMethod ?? null,
+      p_provider_status: input.providerStatus ?? null,
+    });
+    if (error) return { ok: false, reason: error.code ?? 'rpc_error' };
+    const r = rpcRecord(data);
+    if (!r) return { ok: false, reason: 'rpc_invalid' };
+    if (r.ok !== true) return { ok: false, reason: typeof r.reason === 'string' ? r.reason : 'rejected' };
+    return {
+      ok: true,
+      status: r.status === 'approved' ? 'approved' : 'rejected',
+      faceVerified: r.face_verified === true,
+    };
   }
 
   async isUserFaceVerified(userId: string): Promise<boolean> {
@@ -168,5 +228,25 @@ export class SupabaseFaceDb implements FaceDb {
     });
     if (error) return { ok: false };
     return { ok: true, path };
+  }
+
+  async hasProcessedWebhookEvent(eventId: string): Promise<boolean> {
+    const { data } = await this.db.from('face_webhook_events').select('event_id').eq('event_id', eventId).maybeSingle();
+    return !!data;
+  }
+
+  async markWebhookEventProcessed(record: WebhookEventRecord): Promise<void> {
+    // 동시에 같은 이벤트가 두 번 처리돼도 한 행만 남는다 (충돌 무시). 실패해도 예외를 던지지 않는다 — 처리 자체는 끝났다.
+    await this.db.from('face_webhook_events').upsert(
+      {
+        event_id: record.eventId,
+        provider: 'didit',
+        provider_session_id: record.providerSessionId,
+        webhook_type: record.webhookType,
+        provider_status: record.providerStatus,
+        outcome: record.outcome,
+      },
+      { onConflict: 'event_id', ignoreDuplicates: true },
+    );
   }
 }

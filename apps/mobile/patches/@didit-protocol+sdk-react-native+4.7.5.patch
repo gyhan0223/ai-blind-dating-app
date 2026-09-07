@@ -1,0 +1,25 @@
+diff --git a/node_modules/@didit-protocol/sdk-react-native/android/src/main/java/com/sdkreactnative/SdkReactNativeModule.kt b/node_modules/@didit-protocol/sdk-react-native/android/src/main/java/com/sdkreactnative/SdkReactNativeModule.kt
+index a02b03b..d223f81 100644
+--- a/node_modules/@didit-protocol/sdk-react-native/android/src/main/java/com/sdkreactnative/SdkReactNativeModule.kt
++++ b/node_modules/@didit-protocol/sdk-react-native/android/src/main/java/com/sdkreactnative/SdkReactNativeModule.kt
+@@ -46,7 +46,8 @@ class SdkReactNativeModule(reactContext: ReactApplicationContext) :
+         config: ReadableMap?,
+         promise: Promise
+     ) {
+-        Log.d(TAG, "startVerification: token=${token.take(8)}..., config=$config")
++        // bonsim patch: never log any part of the session token (see apps/mobile/patches)
++        Log.d(TAG, "startVerification: config=$config")
+         val activity = reactApplicationContext.currentActivity
+         scope.launch {
+             try {
+@@ -80,8 +81,8 @@ class SdkReactNativeModule(reactContext: ReactApplicationContext) :
+         config: ReadableMap?,
+         promise: Promise
+     ) {
+-        Log.d(TAG, "startVerificationWithWorkflow: workflowId=$workflowId, vendorData=$vendorData, metadata=$metadata")
+-        Log.d(TAG, "startVerificationWithWorkflow: contactDetails=$contactDetails, expectedDetails=$expectedDetails, config=$config")
++        // bonsim patch: never log workflow id / vendor data / metadata / contact & expected details (PII)
++        Log.d(TAG, "startVerificationWithWorkflow: config=$config")
+         val activity = reactApplicationContext.currentActivity
+         scope.launch {
+             try {

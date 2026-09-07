@@ -2,13 +2,22 @@
  * 얼굴 라이브니스 도메인 핵심 로직 — 순수 모듈 (Deno Edge Function / Node selftest 겸용).
  * Deno 전역·npm 의존 없음. Provider(Didit) 응답을 "내부 도메인 상태" 로 바꾸는 유일한 지점이다.
  *
+ * Didit API v3 계약 (docs.didit.me/sessions-api/retrieve-session · integration/webhooks)
+ *   - Decision: GET /v3/session/{id}/decision/ → { session_id, workflow_id, vendor_data, status,
+ *       liveness_checks: [{ status, method, score, reference_image, matches[], warnings[] }], warnings[] ... }
+ *   - V3 웹훅의 decision 객체도 같은 plural-array 구조다.
+ *   - 세션 상태: Not Started / In Progress / Awaiting User / In Review / Approved / Declined /
+ *       Resubmitted / Expired / Kyc Expired / Abandoned
+ *
  * 보안 원칙
  *   - 클라이언트가 보낸 어떤 값도 승인 판단에 쓰지 않는다. 승인은 서명 검증된 웹훅 + 서버가 직접
  *     조회한 Decision 결과로만 결정된다.
  *   - fail-closed: payload 가 불완전하거나 알 수 없는 형태면 절대 approved 로 해석하지 않는다.
+ *     (liveness_checks 가 없거나 비어 있으면 승인 불가, 라이브니스 노드가 여러 개면 임의 선택 대신 거부)
+ *   - session_id / workflow_id / vendor_data 가 기대값과 다르면 거부한다.
  *   - approved 는 sticky — 뒤늦게 도착한 오래된 이벤트가 승인을 되돌리지 못한다 (DB 트리거가 최종 방어).
- *   - 중복 얼굴(Face Search 1:N) 의심은 자동 승인하지 않고 in_review 로 둔다. 어떤 계정과 유사한지는
- *     저장·노출하지 않으며 사유 코드만 남긴다.
+ *   - 중복 얼굴(liveness_checks[].matches[]) 의심은 자동 승인하지 않고 in_review 로 둔다. 어떤 계정과 유사한지는
+ *     읽지도 저장하지도 않으며 사유 코드만 남긴다.
  *   - 라이브니스는 "실제 사람이 카메라 앞에 있다" 만 확인한다. 실명·생년월일·성인 여부를 증명하지 않는다.
  */
 
@@ -32,13 +41,20 @@ export type FaceReasonCode =
   | 'liveness_declined'
   | 'face_search_match'
   | 'in_review'
+  | 'awaiting_user'
+  | 'resubmission_requested'
   | 'session_expired'
   | 'session_abandoned'
   | 'superseded'
   | 'provider_create_failed'
   | 'decision_unavailable'
   | 'decision_incomplete'
-  | 'reference_image_unavailable';
+  | 'reference_image_unavailable'
+  | 'admin_approved'
+  | 'admin_rejected';
+
+/** 사용하는 Didit Sessions API 버전 — 다른 버전으로 조용히 fallback 하지 않는다 */
+export const DIDIT_API_VERSION = 'v3';
 
 // ---------------------------------------------------------------------------
 // 세션 생성 제한 (Provider 워크플로의 "세션 안 재시도 최대 3회" 와 별개로, 세션 자체의 생성 횟수)
@@ -56,7 +72,6 @@ export const REFERENCE_IMAGE_ALLOWED_TYPES: readonly string[] = ['image/jpeg', '
 
 // ---------------------------------------------------------------------------
 // Didit 상태 문자열 → 도메인 상태
-// (Didit 세션 상태: Not Started / In Progress / In Review / Approved / Declined / Abandoned / Expired / Kyc Expired)
 // ---------------------------------------------------------------------------
 
 export function mapDiditStatus(raw: unknown): FaceVerificationStatus | null {
@@ -71,6 +86,9 @@ export function mapDiditStatus(raw: unknown): FaceVerificationStatus | null {
       return 'in_review';
     case 'not started':
     case 'in progress':
+    // 사용자의 추가 행동이 필요한 상태 — 절대 승인으로 해석하지 않으며, 앱이 다시 시작할 수 있는 pending 으로 둔다
+    case 'awaiting user':
+    case 'resubmitted':
       return 'pending';
     case 'abandoned':
     case 'expired':
@@ -79,6 +97,25 @@ export function mapDiditStatus(raw: unknown): FaceVerificationStatus | null {
     default:
       return null;
   }
+}
+
+/**
+ * Provider 가 "사용자가 다시 진행해야 한다" 고 알린 상태인지 (Resubmitted / Awaiting User).
+ * 앱은 이 경우 무한 대기 대신 얼굴 확인을 다시 시작할 수 있게 안내한다 (토큰은 재발급하지 않는다 — 새 세션).
+ */
+export function providerStatusRequiresUserAction(raw: string | null | undefined): boolean {
+  if (typeof raw !== 'string') return false;
+  const s = raw.trim().toLowerCase();
+  return s === 'resubmitted' || s === 'awaiting user';
+}
+
+/** pending 상태의 사유 코드 (Resubmitted / Awaiting User 는 구분해 기록한다) */
+export function pendingReasonFor(raw: string | null | undefined): FaceReasonCode | null {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim().toLowerCase();
+  if (s === 'resubmitted') return 'resubmission_requested';
+  if (s === 'awaiting user') return 'awaiting_user';
+  return null;
 }
 
 /** 웹훅만으로 처리해도 되는 상태(중간 상태) vs Decision 재조회가 필요한 최종 상태 */
@@ -95,7 +132,7 @@ export type LivenessDecision = {
   providerStatus: string;
   /** 도메인 상태 (중복 얼굴 의심 등 보정 전) */
   status: FaceVerificationStatus;
-  /** liveness.status === "Approved" */
+  /** liveness_checks[0].status === "Approved" */
   livenessPassed: boolean;
   livenessScore: number | null;
   livenessMethod: string | null;
@@ -103,11 +140,31 @@ export type LivenessDecision = {
   referenceImageUrl: string | null;
   /** Face Search 1:N 중복 의심 — 어떤 계정과 유사한지는 취급하지 않는다 */
   duplicateSuspected: boolean;
+  /** 중복 의심 근거 종류만 기록 (상대 정보 없음) */
+  duplicateSignal: 'matches' | 'warning' | null;
+  /** Resubmitted / Awaiting User — 사용자가 다시 진행해야 한다 */
+  userActionRequired: boolean;
 };
 
-export type DecisionParseResult =
-  | { ok: true; decision: LivenessDecision }
-  | { ok: false; reason: 'invalid_payload' | 'session_mismatch' | 'unknown_status' | 'missing_liveness' };
+export type DecisionParseFailure =
+  | 'invalid_payload'
+  | 'session_mismatch'
+  | 'workflow_mismatch'
+  | 'vendor_mismatch'
+  | 'unknown_status'
+  | 'missing_liveness'
+  | 'multiple_liveness';
+
+export type DecisionParseResult = { ok: true; decision: LivenessDecision } | { ok: false; reason: DecisionParseFailure };
+
+/** 파서가 대조할 기대값 — 서버가 아는 값만 넣는다 (클라이언트 입력 금지) */
+export type DecisionExpectation = {
+  sessionId: string;
+  /** DIDIT_WORKFLOW_ID — 주어지면 응답의 workflow_id 가 반드시 일치해야 한다 */
+  workflowId?: string | null;
+  /** DB 행의 user_id — 주어지면 응답의 vendor_data 가 반드시 일치해야 한다 */
+  userId?: string | null;
+};
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -133,51 +190,57 @@ function isHttpsUrl(v: unknown): v is string {
   }
 }
 
-const FACE_SEARCH_KEYS = ['face_search', 'face_search_1n', 'face_search_1_n', 'duplicate_face', 'duplicate_check'];
+/** warnings[].risk 코드 중 중복 얼굴 / Face Search 관련으로 간주하는 패턴 (보조 신호) */
+const DUPLICATE_RISK_PATTERN = /DUPLICATE|FACE_SEARCH|MULTIPLE_ACCOUNT|ALREADY_(REGISTERED|VERIFIED|ENROLLED)|SAME_(FACE|PERSON)/i;
 
-/**
- * Face Search(1:N) 결과 유무만 판단한다. 매칭된 상대 정보는 읽지 않고 버린다.
- * Provider 워크플로 설정(권장 임계값)이 이미 판정한 status/matches 만 본다 — 로컬 임계값을 두지 않는다.
- */
-function detectDuplicateSuspicion(root: Record<string, unknown>): boolean {
-  for (const key of FACE_SEARCH_KEYS) {
-    const v = root[key];
-    if (!isRecord(v)) continue;
-    const st = asString(v.status)?.toLowerCase();
-    if (st === 'declined' || st === 'in review') return true;
-    const matches = v.matches ?? v.results ?? v.duplicates;
-    if (Array.isArray(matches) && matches.length > 0) return true;
-    if (typeof v.match_count === 'number' && v.match_count > 0) return true;
-  }
-  const warnings = root.warnings;
-  if (Array.isArray(warnings)) {
-    for (const w of warnings) {
-      const code = isRecord(w) ? asString(w.risk) ?? asString(w.code) : asString(w);
-      if (code && /DUPLICATE|FACE_SEARCH|MULTIPLE_ACCOUNT/i.test(code)) return true;
-    }
+function hasDuplicateWarning(warnings: unknown): boolean {
+  if (!Array.isArray(warnings)) return false;
+  for (const w of warnings) {
+    const code = isRecord(w) ? (asString(w.risk) ?? asString(w.code)) : asString(w);
+    if (code && DUPLICATE_RISK_PATTERN.test(code)) return true;
   }
   return false;
 }
 
 /**
- * Didit Session Decision(GET /v2/session/{id}/decision/) 또는 웹훅의 decision 객체를 파싱한다.
- *  - session_id 가 기대값과 다르면 거부 (다른 세션의 결과를 붙이는 실수/공격 방지)
- *  - liveness 객체가 없으면 어떤 상태든 승인으로 해석하지 않는다 (missing_liveness)
+ * Didit Session Decision(GET /v3/session/{id}/decision/) 또는 V3 웹훅의 decision 객체를 파싱한다.
+ *  - session_id / workflow_id / vendor_data 가 기대값과 다르면 거부 (다른 세션·워크플로·사용자의 결과를 붙이는 실수/공격 방지)
+ *  - liveness_checks 가 없거나 비어 있으면 어떤 상태든 승인으로 해석하지 않는다 (missing_liveness)
+ *  - Liveness-only 워크플로 전제 — 라이브니스 노드가 여러 개면 임의로 고르지 않고 거부 (multiple_liveness)
+ *  - matches[] 항목 존재 → 중복 의심. 항목 내용(다른 사용자 id/vendor_data/사진)은 읽지 않는다.
  */
-export function parseDiditDecision(json: unknown, expectedSessionId: string): DecisionParseResult {
+export function parseDiditDecision(json: unknown, expected: DecisionExpectation): DecisionParseResult {
   if (!isRecord(json)) return { ok: false, reason: 'invalid_payload' };
   const root = isRecord(json.decision) ? json.decision : json;
 
   const sessionId = asString(root.session_id) ?? asString(json.session_id);
-  if (!sessionId || sessionId !== expectedSessionId) return { ok: false, reason: 'session_mismatch' };
+  if (!sessionId || sessionId !== expected.sessionId) return { ok: false, reason: 'session_mismatch' };
+
+  if (expected.workflowId) {
+    const workflowId = asString(root.workflow_id) ?? asString(json.workflow_id);
+    if (!workflowId || workflowId !== expected.workflowId) return { ok: false, reason: 'workflow_mismatch' };
+  }
+
+  if (expected.userId) {
+    const vendorData = asString(root.vendor_data) ?? asString(json.vendor_data);
+    if (!vendorData || vendorData !== expected.userId) return { ok: false, reason: 'vendor_mismatch' };
+  }
 
   const providerStatus = asString(root.status) ?? asString(json.status);
   const status = mapDiditStatus(providerStatus);
   if (!providerStatus || !status) return { ok: false, reason: 'unknown_status' };
 
-  const liveness = isRecord(root.liveness) ? root.liveness : null;
-  if (!liveness) {
-    // 라이브니스 결과가 없는 응답은 승인 근거가 될 수 없다. (Declined/Expired 는 그 자체로 처리 가능)
+  const userActionRequired = providerStatusRequiresUserAction(providerStatus);
+  const rootWarningDuplicate = hasDuplicateWarning(root.warnings);
+
+  const checks = root.liveness_checks;
+  const nodes = Array.isArray(checks) ? checks.filter(isRecord) : [];
+  if (Array.isArray(checks) && checks.length !== nodes.length) return { ok: false, reason: 'invalid_payload' };
+
+  if (nodes.length > 1) return { ok: false, reason: 'multiple_liveness' };
+
+  if (nodes.length === 0) {
+    // 라이브니스 결과가 없는 응답은 승인 근거가 될 수 없다. (Declined/Expired/진행 중은 그 자체로 처리 가능)
     if (status === 'approved' || status === 'in_review') return { ok: false, reason: 'missing_liveness' };
     return {
       ok: true,
@@ -188,14 +251,21 @@ export function parseDiditDecision(json: unknown, expectedSessionId: string): De
         livenessScore: null,
         livenessMethod: null,
         referenceImageUrl: null,
-        duplicateSuspected: detectDuplicateSuspicion(root),
+        duplicateSuspected: rootWarningDuplicate,
+        duplicateSignal: rootWarningDuplicate ? 'warning' : null,
+        userActionRequired,
       },
     };
   }
 
-  const livenessStatus = asString(liveness.status)?.toLowerCase() ?? null;
+  const liveness = nodes[0];
+  const livenessStatus = asString(liveness.status)?.trim().toLowerCase() ?? null;
   const livenessPassed = livenessStatus === 'approved';
-  const referenceImage = liveness.reference_image ?? liveness.reference_image_url;
+
+  // matches[] 에 항목이 하나라도 있으면 중복 의심. 항목 내용은 버린다 (저장·로그 금지).
+  const matches = liveness.matches;
+  const matchesPresent = Array.isArray(matches) && matches.length > 0;
+  const warningDuplicate = rootWarningDuplicate || hasDuplicateWarning(liveness.warnings);
 
   return {
     ok: true,
@@ -205,8 +275,10 @@ export function parseDiditDecision(json: unknown, expectedSessionId: string): De
       livenessPassed,
       livenessScore: asScore(liveness.score),
       livenessMethod: asString(liveness.method),
-      referenceImageUrl: isHttpsUrl(referenceImage) ? referenceImage : null,
-      duplicateSuspected: detectDuplicateSuspicion(root),
+      referenceImageUrl: isHttpsUrl(liveness.reference_image) ? liveness.reference_image : null,
+      duplicateSuspected: matchesPresent || warningDuplicate,
+      duplicateSignal: matchesPresent ? 'matches' : warningDuplicate ? 'warning' : null,
+      userActionRequired,
     },
   };
 }
@@ -218,7 +290,7 @@ export function parseDiditDecision(json: unknown, expectedSessionId: string): De
 export type ResolvedOutcome = {
   status: FaceVerificationStatus;
   livenessPassed: boolean;
-  reason: FaceReasonCode;
+  reason: FaceReasonCode | null;
 };
 
 export function resolveOutcome(decision: LivenessDecision): ResolvedOutcome {
@@ -245,7 +317,7 @@ export function resolveOutcome(decision: LivenessDecision): ResolvedOutcome {
       return { status: 'expired', livenessPassed: false, reason: 'session_expired' };
     case 'pending':
     default:
-      return { status: 'pending', livenessPassed: false, reason: 'in_review' };
+      return { status: 'pending', livenessPassed: false, reason: pendingReasonFor(decision.providerStatus) };
   }
 }
 
@@ -277,22 +349,40 @@ export function decideTransition(
 
 // ---------------------------------------------------------------------------
 // 웹훅 payload 최소 파싱 (전체 payload 는 저장하지 않는다)
+//   V3 웹훅: { event_id, webhook_type, session_id, status, vendor_data, workflow_id, created_at, timestamp, decision? }
+//   세션 이벤트는 status.updated / data.updated 뿐이다. user.* / business.* / transaction.* / travel_rule.* /
+//   activity.* 는 세션 이벤트가 아니므로 세션 상태에 반영하지 않고 무시한다.
 // ---------------------------------------------------------------------------
 
-export type WebhookEvent = {
-  sessionId: string;
-  providerStatus: string;
-  status: FaceVerificationStatus | null;
-  vendorData: string | null;
-  webhookType: string | null;
-  /** created_at / timestamp (unix seconds) → Date */
-  eventAt: Date | null;
-  /** 웹훅에 decision 이 실려 오면 참고용으로 넘긴다 (승인 근거는 서버 재조회 결과) */
-  decision: unknown;
-};
+export const SESSION_WEBHOOK_TYPES = ['status.updated', 'data.updated'] as const;
+export type SessionWebhookType = (typeof SESSION_WEBHOOK_TYPES)[number];
+
+export type WebhookEvent =
+  | {
+      kind: 'session';
+      /** V3 event_id — 멱등 처리 키 (없는 구버전 payload 는 created_at+status 로만 판단) */
+      eventId: string | null;
+      webhookType: SessionWebhookType;
+      sessionId: string;
+      providerStatus: string;
+      status: FaceVerificationStatus | null;
+      vendorData: string | null;
+      /** 서버 설정과 대조만 하고 로그에는 남기지 않는다 */
+      workflowId: string | null;
+      /** created_at / timestamp (unix seconds) → Date */
+      eventAt: Date | null;
+      /** 웹훅에 decision 이 실려 오면 참고용으로 넘긴다 (승인 근거는 서버 재조회 결과) */
+      decision: unknown;
+    }
+  | { kind: 'unsupported'; webhookType: string | null; eventId: string | null };
 
 export function parseWebhookEvent(body: unknown): WebhookEvent | null {
   if (!isRecord(body)) return null;
+  const webhookType = asString(body.webhook_type);
+  const eventId = asString(body.event_id);
+  if (!webhookType || !(SESSION_WEBHOOK_TYPES as readonly string[]).includes(webhookType)) {
+    return { kind: 'unsupported', webhookType, eventId };
+  }
   const sessionId = asString(body.session_id);
   const providerStatus = asString(body.status);
   if (!sessionId || !providerStatus) return null;
@@ -303,11 +393,14 @@ export function parseWebhookEvent(body: unknown): WebhookEvent | null {
         ? body.timestamp
         : null;
   return {
+    kind: 'session',
+    eventId,
+    webhookType: webhookType as SessionWebhookType,
     sessionId,
     providerStatus,
     status: mapDiditStatus(providerStatus),
     vendorData: asString(body.vendor_data),
-    webhookType: asString(body.webhook_type),
+    workflowId: asString(body.workflow_id),
     eventAt: ts !== null && Number.isFinite(ts) ? new Date(ts * 1000) : null,
     decision: body.decision ?? null,
   };

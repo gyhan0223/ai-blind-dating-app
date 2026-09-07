@@ -11,17 +11,27 @@
  * POST { action: 'sync', sessionId }
  *   서버가 Provider Decision 을 직접 조회해 DB 에 반영한다 (웹훅 지연 대비). 클라이언트가 보낸 값은
  *   sessionId(본인 소유 확인용) 뿐이며, 승인 여부는 오직 Provider 응답으로 결정된다.
- *   → 200 { ok: true, status, faceVerified }
+ *   → 200 { ok: true, status, faceVerified, userActionRequired }
+ *        userActionRequired: Provider 가 Resubmitted / Awaiting User 를 알렸다 — 앱은 무한 대기 대신 다시 시작을 안내한다
  *   → 404 { error: 'session_not_found' }       (없거나 다른 사용자의 세션)
  *   → 503 { error: 'provider_unavailable' }
  *
  * 세션 토큰은 응답으로 한 번만 전달되고 어디에도 저장되지 않는다.
  * 유효한 pending 세션이 있어도 토큰을 다시 줄 수 없으므로, 이전 세션은 superseded 로 만료하고 새로 만든다
- * (rate limit 안에서). 이전 세션의 웹훅이 뒤늦게 승인으로 오면 그 행이 approved 가 되며 문제 없다.
+ * (rate limit 안에서). Didit v3 는 같은 vendor_data 의 미완료 세션(Not Started/In Progress/Resubmitted/Awaiting User)이
+ * 있으면 새 세션 대신 그 세션을 다시 돌려줄 수 있다 — 이 경우 같은 session_id 를 가진 기존 행을 다시 pending 으로
+ * 열고 방금 만든 행을 superseded 로 마감한다 (provider_session_id UNIQUE 충돌 방지).
+ * 이전 세션의 웹훅이 뒤늦게 승인으로 오면 그 행이 approved 가 되며 문제 없다.
  */
-import { FACE_SESSION_DEFAULT_TTL_MS, FACE_SESSION_MAX_PER_DAY, FACE_SESSION_MAX_PER_HOUR, shortId } from './faceCore.ts';
+import {
+  FACE_SESSION_DEFAULT_TTL_MS,
+  FACE_SESSION_MAX_PER_DAY,
+  FACE_SESSION_MAX_PER_HOUR,
+  providerStatusRequiresUserAction,
+  shortId,
+} from './faceCore.ts';
 import type { FaceDb, FaceLogger } from './faceDb.ts';
-import { applyDecisionToRow } from './faceOutcome.ts';
+import { applyDecisionToRow, repairApprovedRow } from './faceOutcome.ts';
 import type { FaceLivenessProvider } from './FaceLivenessProvider.ts';
 
 export type StartFaceLivenessDeps = {
@@ -102,13 +112,39 @@ async function startSession(userId: string, deps: StartFaceLivenessDeps): Promis
     parsedExpiry && Number.isFinite(parsedExpiry.getTime())
       ? parsedExpiry
       : new Date(deps.now().getTime() + FACE_SESSION_DEFAULT_TTL_MS);
+  const providerStatus = created.providerStatus ?? 'Not Started';
 
-  await db.attachProviderSession(begin.id, {
-    providerSessionId: created.sessionId,
-    expiresAt,
-    providerStatus: 'Not Started',
-  });
-  log.info(`[face] session ${shortId(created.sessionId)} created (attempt ${begin.attemptCount})`);
+  // Didit 이 같은 vendor_data 의 미완료 세션을 그대로 돌려준 경우 — 기존 행을 다시 연다
+  const existing = await db.getRowBySessionId(created.sessionId);
+  let rowId = begin.id;
+  if (existing) {
+    if (existing.userId !== userId || existing.status === 'approved') {
+      // 다른 사용자의 세션 id 이거나 이미 승인된 세션이 다시 왔다 — 절대 붙이지 않는다 (fail-closed)
+      await db.updateRow(begin.id, { status: 'expired', providerReason: 'provider_create_failed' });
+      log.error(`[face] provider returned session ${shortId(created.sessionId)} that cannot be attached`);
+      return { status: 503, body: { error: 'provider_unavailable' } };
+    }
+    await db.updateRow(begin.id, { status: 'expired', providerReason: 'superseded' });
+    const reopened = await db.updateRow(existing.id, {
+      status: 'pending',
+      expiresAt,
+      providerStatus,
+      providerReason: null,
+    });
+    if (!reopened.ok) {
+      log.error(`[face] session ${shortId(created.sessionId)} reopen rejected (${reopened.error})`);
+      return { status: 503, body: { error: 'provider_unavailable' } };
+    }
+    rowId = existing.id;
+    log.info(`[face] session ${shortId(created.sessionId)} reused by provider (attempt ${begin.attemptCount})`);
+  } else {
+    await db.attachProviderSession(rowId, {
+      providerSessionId: created.sessionId,
+      expiresAt,
+      providerStatus,
+    });
+    log.info(`[face] session ${shortId(created.sessionId)} created (attempt ${begin.attemptCount})`);
+  }
 
   return {
     status: 200,
@@ -136,13 +172,16 @@ async function syncSession(
   if (!row || row.userId !== userId) return { status: 404, body: { error: 'session_not_found' } };
 
   if (row.status === 'approved') {
-    return { status: 200, body: { ok: true, status: 'approved', faceVerified: await db.isUserFaceVerified(userId) } };
+    // 행은 approved 인데 사용자 플래그가 없는 부분 실패 상태면 여기서 복구한다 (멱등)
+    const repaired = await repairApprovedRow({ row, db, provider, log, now: deps.now });
+    if (repaired.providerUnavailable) return { status: 503, body: { error: 'provider_unavailable', status: 'approved' } };
+    return { status: 200, body: { ok: true, status: 'approved', faceVerified: repaired.faceVerified, userActionRequired: false } };
   }
   if (row.status === 'rejected' || row.status === 'expired') {
-    return { status: 200, body: { ok: true, status: row.status, faceVerified: false } };
+    return { status: 200, body: { ok: true, status: row.status, faceVerified: false, userActionRequired: false } };
   }
 
-  const decision = await provider.getDecision(sessionId);
+  const decision = await provider.getDecision(sessionId, { userId: row.userId });
   if (!decision.ok) {
     // Provider 장애 / 불완전한 응답 → 승인하지 않는다 (fail-closed). 상태는 그대로 pending/in_review.
     log.warn(`[face] session ${shortId(sessionId)} decision unavailable (${decision.reason}${decision.detail ? `:${decision.detail}` : ''})`);
@@ -152,5 +191,7 @@ async function syncSession(
   const applied = await applyDecisionToRow({ row, decision: decision.decision, eventAt: deps.now(), db, provider, log });
   const status = applied.status;
   const faceVerified = status === 'approved' ? await db.isUserFaceVerified(userId) : false;
-  return { status: 200, body: { ok: true, status, faceVerified } };
+  const userActionRequired =
+    status === 'pending' && (decision.decision.userActionRequired || providerStatusRequiresUserAction(row.providerStatus));
+  return { status: 200, body: { ok: true, status, faceVerified, userActionRequired } };
 }

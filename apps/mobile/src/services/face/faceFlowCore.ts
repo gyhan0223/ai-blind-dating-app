@@ -30,6 +30,7 @@ export type FaceErrorCode =
   | 'processing_timeout'
   | 'too_many_attempts'
   | 'session_expired'
+  | 'user_action_required'
   | 'provider_unavailable'
   | 'already_verified'
   | 'unknown';
@@ -105,6 +106,11 @@ export const FACE_ERROR_MESSAGES: Record<FaceErrorCode, FaceErrorMessage> = {
     body: '얼굴 확인을 처음부터 다시 시작해 주세요.',
     action: 'retry',
   },
+  user_action_required: {
+    title: '얼굴 확인을 다시 진행해 주세요',
+    body: '이전 확인이 완료되지 않았어요. 아래 버튼으로 얼굴 확인을 다시 시작해 주세요. 이미 입력한 정보는 그대로 남아 있어요.',
+    action: 'retry',
+  },
   provider_unavailable: {
     title: '지금은 얼굴 확인을 할 수 없어요',
     body: '확인 서비스에 일시적인 문제가 있어요. 잠시 후 다시 시도해 주세요.',
@@ -168,7 +174,12 @@ export function mapServerStatus(input: {
   faceVerified: boolean;
   sessionId: string | null;
   processing?: { startedAt: number };
+  /** 서버(sync)가 Provider 의 Resubmitted / Awaiting User 를 알렸다 — 대기 대신 다시 시작 안내 */
+  userActionRequired?: boolean;
 }): FaceScreenState {
+  if (input.status === 'pending' && input.userActionRequired) {
+    return { kind: 'error', code: 'user_action_required' };
+  }
   switch (input.status) {
     case 'approved':
       if (input.faceVerified) return { kind: 'approved' };
@@ -298,9 +309,18 @@ export function isProcessingTimedOut(elapsedMs: number): boolean {
 export type FaceVerificationRowLike = {
   status: FaceVerificationStatus;
   provider_session_id: string | null;
+  /** Provider 원본 상태 문자열 (예: "Resubmitted") — 재시작 안내 판단에만 쓴다. 점수/사유/경로는 읽지 않는다 */
+  provider_status?: string | null;
   expires_at: string | null;
   created_at: string;
 };
+
+/** Provider 가 "사용자가 다시 진행해야 한다" 고 알린 상태 (서버 faceCore.providerStatusRequiresUserAction 과 동일 규칙) */
+export function providerStatusRequiresUserAction(raw: string | null | undefined): boolean {
+  if (typeof raw !== 'string') return false;
+  const s = raw.trim().toLowerCase();
+  return s === 'resubmitted' || s === 'awaiting user';
+}
 
 /** pending 세션이 아직 유효하면 processing 으로 복원해 결과를 이어서 기다린다 */
 export function restoreScreenState(
@@ -311,6 +331,8 @@ export function restoreScreenState(
   if (faceVerified) return { kind: 'approved' };
   if (!row) return { kind: 'intro' };
   if (row.status === 'pending') {
+    // Provider 가 재진행을 요구한 세션(Resubmitted / Awaiting User)은 기다리지 않고 다시 시작을 안내한다
+    if (providerStatusRequiresUserAction(row.provider_status)) return { kind: 'error', code: 'user_action_required' };
     const expires = row.expires_at ? Date.parse(row.expires_at) : NaN;
     const stillValid = !!row.provider_session_id && Number.isFinite(expires) && expires > now;
     if (!stillValid) return { kind: 'intro' };

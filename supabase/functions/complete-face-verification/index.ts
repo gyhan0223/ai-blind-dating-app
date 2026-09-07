@@ -43,7 +43,7 @@ Deno.serve(async (req) => {
   // Mock decision 을 실제 provider 와 같은 도메인 판정 경로(resolveOutcome)로 통과시킨다.
   // sessionId 에 "duplicate" 가 포함되면 중복 얼굴 의심 시나리오(in_review) 를 재현할 수 있다.
   const scenario = typeof body?.scenario === 'string' ? body.scenario : 'approved';
-  const decision = await provider.getDecision(`mock-${scenario}`);
+  const decision = await provider.getDecision(`mock-${scenario}`, { userId: auth.userId });
   if (!decision.ok) return json({ error: 'mock_decision_failed' }, 500);
   const outcome = resolveOutcome(decision.decision);
 

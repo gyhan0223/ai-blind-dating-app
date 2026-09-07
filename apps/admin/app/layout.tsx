@@ -17,6 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Link href="/">대시보드</Link>
             <Link href="/users">사용자</Link>
             <Link href="/reports">신고</Link>
+            <Link href="/face-reviews">얼굴 검토</Link>
           </nav>
         </header>
         <main className="container">{children}</main>

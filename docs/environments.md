@@ -55,10 +55,10 @@ Issue #3 기준 환경 모델. 핵심 원칙은 두 가지다.
 | `IDENTITY_HASH_SECRET` | 생략 가능 (dev fixture secret 사용) | **필수** — 32자+ 고유 값 | **필수** — 32자+ 고유 값 (staging 과 다른 값) | **예** | 미설정/개발 기본값/짧은 값 → verify-identity 기동 실패 |
 | `IDENTITY_PROVIDER` | 생략 가능 (`mock` 기본값) | 생략 가능 (`mock`) 또는 실제 provider | **필수** — 실제 provider 이름 (`mock` 금지) | 아니오 | 미설정/`mock`/미구현 이름 → verify-identity 기동 실패 |
 | `FACE_VERIFICATION_PROVIDER` | 생략 가능 (`mock` 기본값) | `didit` 권장 (실기기 테스트) 또는 생략(`mock`) | **필수** — `didit` (`mock` 금지) | 아니오 | 미설정/`mock`/미구현 이름 → start-face-liveness·didit-webhook 기동 실패. `mock` 은 complete-face-verification(개발용)만 기동 |
-| `DIDIT_API_KEY` | didit 사용 시 필수 | **필수** (didit 시) | **필수** | **예** | Didit 세션 생성·Decision 조회. 로그/응답 미노출 |
-| `DIDIT_WORKFLOW_ID` | didit 사용 시 필수 | **필수** (didit 시) | **필수** | 아니오 (비공개 취급) | Liveness-only 워크플로 ID (3D Action & Flash, 최대 3회, Face Search) |
-| `DIDIT_WEBHOOK_SECRET` | didit 사용 시 필수 | **필수** (didit 시) — staging 앱의 secret | **필수** — production 앱의 secret | **예** | didit-webhook 의 `X-Signature-V2` 검증. 없으면 모든 웹훅 500 |
-| `DIDIT_API_BASE_URL` | — | — | — | 아니오 | 선택. 기본 `https://verification.didit.me` |
+| `DIDIT_API_KEY` | didit 사용 시 필수 | **필수** (didit 시) | **필수** | **예** | Didit Sessions API **v3** 세션 생성·Decision 조회·삭제. 로그/응답 미노출 |
+| `DIDIT_WORKFLOW_ID` | didit 사용 시 필수 | **필수** (didit 시) | **필수** | 아니오 (비공개 취급) | Liveness-only 워크플로 ID (라이브니스 노드 1개, 3D Action & Flash, 최대 3회, Face Search). Decision/웹훅 `workflow_id` 대조 |
+| `DIDIT_WEBHOOK_SECRET` | didit 사용 시 필수 | **필수** (didit 시) — staging 앱의 secret | **필수** — production 앱의 secret | **예** | didit-webhook 의 `X-Signature-V2` 검증. 콘솔 웹훅 destination 은 **V3** 여야 한다. 없으면 모든 웹훅 500 |
+| `DIDIT_API_BASE_URL` | — | — | — | 아니오 | 선택. 기본 `https://verification.didit.me`. https 가 아니면 기동 실패 |
 | `ALLOW_DEV_LOGIN` | `1` (dev-login 쓸 때) | 필요 시 `1` | **설정 금지** — 설정돼도 403 | 아니오 | dev-login opt-in |
 | `DEV_LOGIN_PASSWORD` | 생략 가능 (seed 기본값) | 고유 값 권장 | 해당 없음 (dev-login 미배포) | 예 | dev-login 계정 비밀번호 |
 | `DEV_LOGIN_ALLOW_ANY_PHONE` | 필요 시 `1` | 필요 시 `1` | 해당 없음 | 아니오 | 테스트 대역 외 번호 허용 |
@@ -75,6 +75,7 @@ Issue #3 기준 환경 모델. 핵심 원칙은 두 가지다.
 | `SUPABASE_URL` | 아니오 | 환경별 프로젝트 URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | **예** | 서버 컴포넌트에서만 사용. `NEXT_PUBLIC_*` 로 절대 노출 금지 |
 | `ADMIN_PASSWORD` | **예** | 관리자 로그인 |
+| `ADMIN_ACTOR_LABEL` | 아니오 | 선택. 얼굴 인증 검토 감사 기록(`face_verification_reviews.actor`)에 남는 처리자 이름. 기본 `admin-web` |
 
 ## dev-login 정책 (fail-closed allowlist)
 
@@ -96,8 +97,10 @@ APP_ENV ∈ { development, staging }   AND   ALLOW_DEV_LOGIN=1
 
 얼굴 인증은 실제 provider **Didit** 이 연동되어 있다 (`docs/face-liveness-didit.md`):
 
-- `FACE_VERIFICATION_PROVIDER=didit` → `start-face-liveness`(세션 생성/서버 재조회) + `didit-webhook`(서명 검증 + Decision 재조회)
-  만 승인을 만들 수 있다. `DIDIT_API_KEY` / `DIDIT_WORKFLOW_ID` / `DIDIT_WEBHOOK_SECRET` 이 하나라도 없으면 두 함수가 기동을 거부한다.
+- `FACE_VERIFICATION_PROVIDER=didit` → `start-face-liveness`(세션 생성/서버 재조회) + `didit-webhook`(서명 검증 + v3 Decision 재조회)
+  + `admin-face-review`(service role 전용 관리자 검토)만 승인을 만들 수 있으며, 승인은 항상 DB RPC `face_liveness_approve`
+  한 트랜잭션(행 + `users.face_verified`)으로 반영된다. `DIDIT_API_KEY` / `DIDIT_WORKFLOW_ID` / `DIDIT_WEBHOOK_SECRET` 이 하나라도
+  없으면 세 함수가 기동을 거부한다.
 - `FACE_VERIFICATION_PROVIDER=mock` (development/staging 만) → `start-face-liveness` 는 409 `provider_is_mock` 으로 세션을 만들지 않고,
   개발용 `complete-face-verification`(앱의 "개발 모드: 얼굴 인증 통과" 버튼, `__DEV__ && DEV_TOOLS_ENABLED`)만 승인을 만든다.
   이 함수는 production allowlist 에 없고, 배포돼 있어도 `didit` 이면 기동을 거부한다.
@@ -240,7 +243,8 @@ bash supabase/scripts/deploy-production.sh <prod-ref>
 #   2) 필수 secret(IDENTITY_HASH_SECRET, *_PROVIDER, DIDIT_*, SOLAPI_*, SEND_SMS_HOOK_SECRETS) 존재 확인 — 없으면 실패
 #      개발용 secret(ALLOW_DEV_LOGIN, DEV_LOGIN_*) 존재 시 실패
 #   3) APP_ENV=production 직접 설정 (CLI 로 값 검증이 불가하므로 설정으로 확정)
-#   4) allowlist 함수만 배포 (dev-login·complete-face-verification 제외, send-sms·didit-webhook 은 --no-verify-jwt)
+#   4) allowlist 함수만 배포 (dev-login·complete-face-verification 제외, send-sms·didit-webhook 은 --no-verify-jwt,
+#      admin-face-review 는 JWT ON + 함수 안에서 service role key 일치 검사)
 ```
 
 `supabase functions deploy` 를 **인자 없이 실행하면 dev-login 을 포함한 전체 함수가 배포되므로
