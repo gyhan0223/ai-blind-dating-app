@@ -3,7 +3,7 @@
   "main": "expo-router/entry",
   "version": "1.0.0",
   "dependencies": {
-    "@didit-protocol/sdk-react-native": "^4.7.5",
+    "@didit-protocol/sdk-react-native": "4.7.5",
     "@expo/ui": "~57.0.12",
     "@expo/vector-icons": "^15.1.1",
     "@react-native-async-storage/async-storage": "2.2.0",
@@ -24,6 +24,7 @@
     "expo-symbols": "~57.0.2",
     "expo-system-ui": "~57.0.2",
     "expo-web-browser": "~57.0.2",
+    "patch-package": "8.0.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.2",
@@ -47,7 +48,10 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "postinstall": "patch-package",
+    "face:selftest": "node --experimental-strip-types scripts/face-liveness-selftest.mjs",
+    "sdk:verify-no-token-log": "bash scripts/verify-sdk-no-token-log.sh"
   },
   "private": true
 }

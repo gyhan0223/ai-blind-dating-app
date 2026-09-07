@@ -17,8 +17,10 @@ import {
   type FetchLike,
   getDiditDecision,
   type ImageFetchResult,
+  isValidDiditBaseUrl,
 } from './diditClient.ts';
 import {
+  type DecisionParseFailure,
   type DecisionParseResult,
   type LivenessDecision,
   parseDiditDecision,
@@ -29,19 +31,24 @@ import {
 export type FaceProviderKind = 'didit' | 'mock';
 
 export type ProviderSessionResult =
-  | { ok: true; sessionId: string; sessionToken: string; expiresAt: string | null }
+  | { ok: true; sessionId: string; sessionToken: string; expiresAt: string | null; providerStatus: string | null }
   | { ok: false; reason: 'mock_provider' | 'provider_error'; httpStatus?: number };
 
 export type ProviderDecisionResult =
   | { ok: true; decision: LivenessDecision }
-  | { ok: false; reason: 'provider_error' | 'invalid_decision'; detail?: string; httpStatus?: number };
+  | { ok: false; reason: 'provider_error' | 'invalid_decision'; detail?: DecisionParseFailure; httpStatus?: number };
+
+/** Decision 조회 시 서버가 대조할 값 — DB 행(user_id)에서만 온다 */
+export type DecisionContext = { userId: string };
 
 export interface FaceLivenessProvider {
   readonly kind: FaceProviderKind;
+  /** 서버가 아는 워크플로 id (웹훅/Decision 의 workflow_id 대조용). mock 은 null */
+  readonly workflowId: string | null;
   /** 서버에서 세션 생성. vendorData 는 인증된 Supabase user id */
   createSession(input: { userId: string }): Promise<ProviderSessionResult>;
-  /** 서버가 직접 최종 결정을 조회한다 — 승인의 유일한 근거 */
-  getDecision(sessionId: string): Promise<ProviderDecisionResult>;
+  /** 서버가 직접 최종 결정을 조회한다 — 승인의 유일한 근거. session/workflow/vendor 불일치는 invalid_decision */
+  getDecision(sessionId: string, ctx: DecisionContext): Promise<ProviderDecisionResult>;
   /** 승인된 세션의 reference image 다운로드 (서명 URL 만료 전, 서버 전용) */
   fetchReferenceImage(url: string): Promise<ImageFetchResult>;
   /** 회원 탈퇴 시 Provider 측 세션/생체 데이터 삭제 */
@@ -61,13 +68,15 @@ export type DiditConfig = {
   baseUrl: string | undefined;
 };
 
-export type DiditConfigResult = { ok: true; config: DiditConfig } | { ok: false; missing: string[] };
+export type DiditConfigResult = { ok: true; config: DiditConfig } | { ok: false; missing: string[]; invalid: string[] };
 
-/** 누락된 변수 "이름" 만 돌려준다 (값은 절대 포함하지 않는다). */
+/** 누락/잘못된 변수 "이름" 만 돌려준다 (값은 절대 포함하지 않는다). */
 export function loadDiditConfig(env: (name: string) => string | undefined): DiditConfigResult {
   const read = (name: string) => (env(name) ?? '').trim();
   const missing = DIDIT_REQUIRED_ENV_VARS.filter((name) => read(name) === '');
-  if (missing.length > 0) return { ok: false, missing: [...missing] };
+  const invalid: string[] = [];
+  if (!isValidDiditBaseUrl(read('DIDIT_API_BASE_URL'))) invalid.push('DIDIT_API_BASE_URL');
+  if (missing.length > 0 || invalid.length > 0) return { ok: false, missing: [...missing], invalid };
   return {
     ok: true,
     config: {
@@ -85,11 +94,13 @@ export function loadDiditConfig(env: (name: string) => string | undefined): Didi
 
 export class DiditFaceLivenessProvider implements FaceLivenessProvider {
   readonly kind = 'didit' as const;
+  readonly workflowId: string;
   private readonly config: DiditConfig;
   private readonly deps: DiditClientDeps;
 
   constructor(config: DiditConfig, fetchFn: FetchLike) {
     this.config = config;
+    this.workflowId = config.workflowId;
     this.deps = { apiKey: config.apiKey, baseUrl: config.baseUrl, fetch: fetchFn };
   }
 
@@ -99,13 +110,23 @@ export class DiditFaceLivenessProvider implements FaceLivenessProvider {
       vendorData: input.userId,
     });
     if (!res.ok) return { ok: false, reason: 'provider_error', httpStatus: res.httpStatus };
-    return { ok: true, sessionId: res.sessionId, sessionToken: res.sessionToken, expiresAt: res.expiresAt };
+    return {
+      ok: true,
+      sessionId: res.sessionId,
+      sessionToken: res.sessionToken,
+      expiresAt: res.expiresAt,
+      providerStatus: res.providerStatus,
+    };
   }
 
-  async getDecision(sessionId: string): Promise<ProviderDecisionResult> {
+  async getDecision(sessionId: string, ctx: DecisionContext): Promise<ProviderDecisionResult> {
     const res = await getDiditDecision(this.deps, sessionId);
     if (!res.ok) return { ok: false, reason: 'provider_error', httpStatus: res.httpStatus };
-    const parsed: DecisionParseResult = parseDiditDecision(res.json, sessionId);
+    const parsed: DecisionParseResult = parseDiditDecision(res.json, {
+      sessionId,
+      workflowId: this.config.workflowId,
+      userId: ctx.userId,
+    });
     if (!parsed.ok) return { ok: false, reason: 'invalid_decision', detail: parsed.reason };
     return { ok: true, decision: parsed.decision };
   }
@@ -134,12 +155,14 @@ export class DiditFaceLivenessProvider implements FaceLivenessProvider {
  */
 export class MockFaceLivenessProvider implements FaceLivenessProvider {
   readonly kind = 'mock' as const;
+  readonly workflowId = null;
 
   async createSession(): Promise<ProviderSessionResult> {
     return { ok: false, reason: 'mock_provider' };
   }
 
   async getDecision(sessionId: string): Promise<ProviderDecisionResult> {
+    const duplicate = sessionId.includes('duplicate');
     return {
       ok: true,
       decision: {
@@ -149,7 +172,9 @@ export class MockFaceLivenessProvider implements FaceLivenessProvider {
         livenessScore: 100,
         livenessMethod: 'MOCK',
         referenceImageUrl: null,
-        duplicateSuspected: sessionId.includes('duplicate'),
+        duplicateSuspected: duplicate,
+        duplicateSignal: duplicate ? 'matches' : null,
+        userActionRequired: false,
       },
     };
   }
@@ -176,8 +201,12 @@ export function getFaceLivenessProvider(
     case 'didit': {
       const cfg = loadDiditConfig(env);
       if (!cfg.ok) {
+        const parts = [
+          cfg.missing.length > 0 ? `누락: [${cfg.missing.join(', ')}]` : null,
+          cfg.invalid.length > 0 ? `잘못된 값: [${cfg.invalid.join(', ')}] (https URL 필요)` : null,
+        ].filter(Boolean);
         throw new Error(
-          `[face] Didit 설정 누락: [${cfg.missing.join(', ')}] — supabase secrets set 으로 설정하세요 (docs/face-liveness-didit.md)`,
+          `[face] Didit 설정 오류 — ${parts.join(' / ')} — supabase secrets set 으로 설정하세요 (docs/face-liveness-didit.md)`,
         );
       }
       return new DiditFaceLivenessProvider(cfg.config, fetchFn);

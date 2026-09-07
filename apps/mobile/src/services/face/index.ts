@@ -69,10 +69,13 @@ export async function startFaceLiveness(): Promise<StartFaceLivenessResult> {
 }
 
 export type SyncFaceLivenessResult =
-  | { ok: true; status: FaceVerificationStatus; faceVerified: boolean }
+  | { ok: true; status: FaceVerificationStatus; faceVerified: boolean; userActionRequired: boolean }
   | { ok: false; code: FaceErrorCode };
 
-/** 서버가 Provider 결과를 직접 재조회하도록 요청한다. 응답의 status 도 화면 표시용일 뿐, 진행은 DB 확인 후. */
+/**
+ * 서버가 Provider 결과를 직접 재조회하도록 요청한다. 응답의 status 도 화면 표시용일 뿐, 진행은 DB 확인 후.
+ * userActionRequired 는 Provider 가 Resubmitted / Awaiting User 를 알린 경우 — 대기 대신 다시 시작을 안내한다.
+ */
 export async function syncFaceLiveness(sessionId: string): Promise<SyncFaceLivenessResult> {
   const res = await invokeFace({ action: 'sync', sessionId });
   if (res.status === 200 && res.body?.ok === true && typeof res.body.status === 'string') {
@@ -80,6 +83,7 @@ export async function syncFaceLiveness(sessionId: string): Promise<SyncFaceLiven
       ok: true,
       status: res.body.status as FaceVerificationStatus,
       faceVerified: res.body.faceVerified === true,
+      userActionRequired: res.body.userActionRequired === true,
     };
   }
   if (res.status === 404) return { ok: false, code: 'session_expired' };
@@ -87,11 +91,11 @@ export async function syncFaceLiveness(sessionId: string): Promise<SyncFaceLiven
   return { ok: false, code: 'provider_unavailable' };
 }
 
-/** 본인의 최신 얼굴 인증 행 (RLS: 본인 행만 조회 가능. 점수/경로 등은 읽지 않는다) */
+/** 본인의 최신 얼굴 인증 행 (RLS: 본인 행만 조회 가능. 점수/사유 코드/경로는 읽지 않는다) */
 export async function getLatestFaceVerification(userId: string): Promise<FaceVerificationRowLike | null> {
   const { data } = await supabase
     .from('face_verifications')
-    .select('status, provider_session_id, expires_at, created_at')
+    .select('status, provider_session_id, provider_status, expires_at, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(1)

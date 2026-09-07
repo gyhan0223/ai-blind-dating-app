@@ -41,7 +41,8 @@ export function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (typeof value === 'object') {
     const obj = value as Record<string, unknown>;
-    const keys = Object.keys(obj).sort();
+    // JSON.stringify 와 같이 undefined 값 키는 생략한다
+    const keys = Object.keys(obj).filter((k) => obj[k] !== undefined).sort();
     return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
   }
   return JSON.stringify(value);

@@ -384,4 +384,285 @@ begin
 end;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- 6) 0014 — 원자적 승인 RPC face_liveness_approve: 전제 조건 · 멱등 · 부분 실패 복구 · 거절 행 보호
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  fa uuid := '55555555-5555-5555-5555-555555555555';
+  fb uuid := '66666666-6666-6666-6666-666666666666';
+  row_id uuid;
+  res jsonb;
+  st text;
+  verified boolean;
+  vat timestamptz;
+  ref text := '55555555-5555-5555-5555-555555555555/liveness/reference.jpg';
+begin
+  update public.users set face_verified = false where id in (fa, fb);
+
+  insert into public.face_verifications (user_id, status, provider, provider_session_id, expires_at, provider_event_at)
+  values (fa, 'pending', 'didit', 'didit-sess-a-approve', now() + interval '30 minutes', now() - interval '10 minutes')
+  returning id into row_id;
+
+  -- 존재하지 않는 행 / 다른 사용자 / 다른 세션 / reference_path 없음·다른 폴더 / liveness 미통과 → 아무것도 바꾸지 않는다
+  res := public.face_liveness_approve(gen_random_uuid(), fa, 'didit-sess-a-approve', ref, true);
+  if res->>'reason' <> 'row_not_found' then raise exception 'FAIL approve unknown row: %', res; end if;
+  res := public.face_liveness_approve(row_id, fb, 'didit-sess-a-approve', ref, true);
+  if res->>'reason' <> 'user_mismatch' then raise exception 'FAIL approve user mismatch: %', res; end if;
+  res := public.face_liveness_approve(row_id, fa, 'didit-sess-other', ref, true);
+  if res->>'reason' <> 'session_mismatch' then raise exception 'FAIL approve session mismatch: %', res; end if;
+  res := public.face_liveness_approve(row_id, fa, 'didit-sess-a-approve', null, true);
+  if res->>'reason' <> 'reference_missing' then raise exception 'FAIL approve null reference: %', res; end if;
+  res := public.face_liveness_approve(row_id, fa, 'didit-sess-a-approve', fb::text || '/liveness/reference.jpg', true);
+  if res->>'reason' <> 'reference_missing' then raise exception 'FAIL approve foreign reference: %', res; end if;
+  res := public.face_liveness_approve(row_id, fa, 'didit-sess-a-approve', ref, false);
+  if res->>'reason' <> 'liveness_not_passed' then raise exception 'FAIL approve without liveness: %', res; end if;
+
+  select fv.status, u.face_verified into st, verified
+    from public.face_verifications fv join public.users u on u.id = fv.user_id where fv.id = row_id;
+  if st <> 'pending' or verified then raise exception 'FAIL rejected approve attempts changed state (% / %)', st, verified; end if;
+
+  -- 정상 승인: 행 + verified_at + users.face_verified 가 함께 바뀐다
+  res := public.face_liveness_approve(row_id, fa, 'didit-sess-a-approve', ref, true, 97.5, 'active', 'Approved', now(), 'liveness_approved');
+  if (res->>'ok')::boolean is not true or (res->>'changed')::boolean is not true then raise exception 'FAIL approve: %', res; end if;
+  select status, verified_at, reference_path into st, vat, ref from public.face_verifications where id = row_id;
+  select face_verified into verified from public.users where id = fa;
+  if st <> 'approved' or vat is null or not verified or ref is null then
+    raise exception 'FAIL approve did not apply atomically (% / % / %)', st, vat, verified;
+  end if;
+  if (select liveness_passed from public.face_verifications where id = row_id) is not true then
+    raise exception 'FAIL approve did not set liveness_passed';
+  end if;
+
+  -- 멱등: 다시 호출해도 ok, changed=false
+  res := public.face_liveness_approve(row_id, fa, 'didit-sess-a-approve', ref, true);
+  if (res->>'ok')::boolean is not true or (res->>'changed')::boolean then raise exception 'FAIL approve not idempotent: %', res; end if;
+
+  -- 부분 실패 복구: 행은 approved 인데 users.face_verified=false 인 비정상 상태 → 플래그만 복구
+  update public.users set face_verified = false where id = fa;
+  res := public.face_liveness_approve(row_id, fa, 'didit-sess-a-approve', ref, true);
+  select face_verified into verified from public.users where id = fa;
+  if (res->>'ok')::boolean is not true or (res->>'changed')::boolean is not true or not verified then
+    raise exception 'FAIL approve did not repair users.face_verified: %', res;
+  end if;
+
+  -- 오래된 provider_event_at 로 호출해도 저장값보다 과거로 내려가지 않는다 (트리거와 충돌 없음)
+  res := public.face_liveness_approve(row_id, fa, 'didit-sess-a-approve', ref, true, null, null, null, now() - interval '1 day');
+  if (res->>'ok')::boolean is not true then raise exception 'FAIL approve with old event_at: %', res; end if;
+
+  -- 거절된 행은 자동 승인으로 되살아나지 않는다
+  insert into public.face_verifications (user_id, status, provider, provider_session_id, liveness_passed)
+  values (fb, 'rejected', 'didit', 'didit-sess-b-rejected', true);
+  res := public.face_liveness_approve(
+    (select id from public.face_verifications where provider_session_id = 'didit-sess-b-rejected'),
+    fb, 'didit-sess-b-rejected', fb::text || '/liveness/reference.jpg', true);
+  if res->>'reason' <> 'rejected_row' then raise exception 'FAIL approve revived rejected row: %', res; end if;
+  select face_verified into verified from public.users where id = fb;
+  if verified then raise exception 'FAIL rejected approve set users.face_verified'; end if;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 7) 0014 — 관리자 검토 RPC: 조건 없는 승인 불가 · 승인/거절 + 감사 기록 · 클라이언트 호출 불가
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  fb uuid := '66666666-6666-6666-6666-666666666666';
+  row_id uuid;
+  res jsonb;
+  st text;
+  verified boolean;
+  n int;
+  refb text := '66666666-6666-6666-6666-666666666666/liveness/reference.jpg';
+begin
+  update public.users set face_verified = false where id = fb;
+
+  -- 중복 얼굴 의심 in_review 행 (liveness_passed=true, reference_path 없음)
+  insert into public.face_verifications
+    (user_id, status, provider, provider_session_id, liveness_passed, provider_reason, provider_event_at)
+  values (fb, 'in_review', 'didit', 'didit-sess-b-review', true, 'face_search_match', now() - interval '5 minutes')
+  returning id into row_id;
+
+  res := public.face_liveness_admin_review(row_id, 'approve', 'ops', null, null);
+  if res->>'reason' <> 'reference_missing' then raise exception 'FAIL admin approve without reference: %', res; end if;
+  res := public.face_liveness_admin_review(row_id, 'approve', '', null, refb);
+  if res->>'reason' <> 'invalid_args' then raise exception 'FAIL admin approve without actor: %', res; end if;
+  res := public.face_liveness_admin_review(row_id, 'ban', 'ops', null, refb);
+  if res->>'reason' <> 'invalid_args' then raise exception 'FAIL admin unknown action: %', res; end if;
+
+  -- liveness_passed=false 인 in_review(decision_incomplete) 행은 reference 가 있어도 승인 불가
+  -- (liveness_passed 는 트리거가 true → false 를 막으므로 별도 행으로 검증한다)
+  insert into public.face_verifications
+    (user_id, status, provider, provider_session_id, liveness_passed, provider_reason, provider_event_at)
+  values (fb, 'in_review', 'didit', 'didit-sess-b-incomplete', false, 'decision_incomplete', now() - interval '4 minutes');
+  res := public.face_liveness_admin_review(
+    (select id from public.face_verifications where provider_session_id = 'didit-sess-b-incomplete'),
+    'approve', 'ops', null, refb);
+  if res->>'reason' <> 'liveness_not_passed' then raise exception 'FAIL admin approve without liveness: %', res; end if;
+  if (select status from public.face_verifications where provider_session_id = 'didit-sess-b-incomplete') <> 'in_review' then
+    raise exception 'FAIL refused admin approve changed incomplete row';
+  end if;
+
+  select count(*) into n from public.face_verification_reviews where user_id = fb;
+  if n <> 0 then raise exception 'FAIL refused admin actions wrote audit rows (%)', n; end if;
+
+  -- 승인 → approved + users.face_verified + 감사 기록 (한 트랜잭션)
+  res := public.face_liveness_admin_review(row_id, 'approve', 'ops-kim', '쌍둥이 확인', refb, 91.2, 'active', 'In Review');
+  if (res->>'ok')::boolean is not true or res->>'status' <> 'approved' then raise exception 'FAIL admin approve: %', res; end if;
+  select status into st from public.face_verifications where id = row_id;
+  select face_verified into verified from public.users where id = fb;
+  if st <> 'approved' or not verified then raise exception 'FAIL admin approve state (% / %)', st, verified; end if;
+  if (select provider_reason from public.face_verifications where id = row_id) <> 'admin_approved' then
+    raise exception 'FAIL admin approve reason';
+  end if;
+  select count(*) into n from public.face_verification_reviews
+   where face_verification_id = row_id and action = 'approve' and actor = 'ops-kim'
+     and previous_status = 'in_review' and new_status = 'approved' and note = '쌍둥이 확인';
+  if n <> 1 then raise exception 'FAIL admin approve audit missing'; end if;
+
+  -- 이미 approved 인 행은 관리자 승인/거절 대상이 아니다
+  res := public.face_liveness_admin_review(row_id, 'approve', 'ops', null, refb);
+  if res->>'reason' <> 'invalid_state' then raise exception 'FAIL admin approve twice: %', res; end if;
+  res := public.face_liveness_admin_review(row_id, 'reject', 'ops', null);
+  if res->>'reason' <> 'invalid_state' then raise exception 'FAIL admin reject approved row: %', res; end if;
+  select status into st from public.face_verifications where id = row_id;
+  if st <> 'approved' then raise exception 'FAIL admin reject changed approved row'; end if;
+
+  -- 거절: 새 in_review 행 → rejected, 사용자 플래그 false (다른 approved 행이 없을 때), 감사 기록
+  update public.users set face_verified = false where id = fb;
+  -- 테스트 정리: approved 행은 운영 override 로만 되돌릴 수 있다 (다음 거절 검증에서 "다른 approved 행 없음" 조건을 만들기 위해)
+  perform set_config('app.face_verification_override', 'on', true);
+  update public.face_verifications set status = 'rejected', provider_reason = 'test_cleanup' where id = row_id;
+  perform set_config('app.face_verification_override', '', true);
+
+  insert into public.face_verifications
+    (user_id, status, provider, provider_session_id, liveness_passed, provider_reason, provider_event_at)
+  values (fb, 'in_review', 'didit', 'didit-sess-b-review-2', true, 'face_search_match', now() - interval '2 minutes')
+  returning id into row_id;
+  update public.users set face_verified = true where id = fb; -- 비정상 플래그가 있어도 거절 시 false 로 정리된다
+  res := public.face_liveness_admin_review(row_id, 'reject', 'ops-lee', null);
+  if (res->>'ok')::boolean is not true or res->>'status' <> 'rejected' then raise exception 'FAIL admin reject: %', res; end if;
+  select status into st from public.face_verifications where id = row_id;
+  select face_verified into verified from public.users where id = fb;
+  if st <> 'rejected' or verified then raise exception 'FAIL admin reject state (% / %)', st, verified; end if;
+  if (select provider_reason from public.face_verifications where id = row_id) <> 'admin_rejected' then
+    raise exception 'FAIL admin reject reason';
+  end if;
+  select count(*) into n from public.face_verification_reviews
+   where face_verification_id = row_id and action = 'reject' and actor = 'ops-lee' and previous_status = 'in_review';
+  if n <> 1 then raise exception 'FAIL admin reject audit missing'; end if;
+
+  -- 거절된 행은 이후 자동 승인 RPC 로도 되살아나지 않는다
+  res := public.face_liveness_approve(row_id, fb, 'didit-sess-b-review-2', refb, true);
+  if res->>'reason' <> 'rejected_row' then raise exception 'FAIL approve after admin reject: %', res; end if;
+
+  -- 비정상 데이터 점검 함수: approved 인데 플래그 없음 / reference 없음 행이 보인다
+  insert into public.face_verifications
+    (user_id, status, provider, provider_session_id, liveness_passed, provider_event_at)
+  values (fb, 'in_review', 'didit', 'didit-sess-b-incons', true, now())
+  returning id into row_id;
+  res := public.face_liveness_approve(row_id, fb, 'didit-sess-b-incons', refb, true);
+  if (res->>'ok')::boolean is not true then raise exception 'FAIL setup inconsistent: %', res; end if;
+  update public.users set face_verified = false where id = fb;
+  select count(*) into n from public.face_liveness_inconsistent_rows() where face_verification_id = row_id;
+  if n <> 1 then raise exception 'FAIL inconsistent row not listed'; end if;
+  res := public.face_liveness_approve(row_id, fb, 'didit-sess-b-incons', refb, true);
+  select count(*) into n from public.face_liveness_inconsistent_rows() where face_verification_id = row_id;
+  if n <> 0 then raise exception 'FAIL inconsistent row still listed after repair'; end if;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 8) 0014 — 웹훅 event_id 테이블 · 감사 테이블 · RPC 는 클라이언트(authenticated/anon)가 접근할 수 없다
+-- ---------------------------------------------------------------------------
+insert into public.face_webhook_events (event_id, provider_session_id, webhook_type, provider_status, outcome)
+values ('evt-test-1', 'didit-sess-a-approve', 'status.updated', 'Approved', 'ok:approved');
+insert into public.face_webhook_events (event_id, provider_session_id, webhook_type, provider_status, outcome)
+values ('evt-test-1', 'didit-sess-a-approve', 'status.updated', 'Approved', 'ok:approved')
+on conflict (event_id) do nothing;
+
+do $$
+declare n int;
+begin
+  select count(*) into n from public.face_webhook_events where event_id = 'evt-test-1';
+  if n <> 1 then raise exception 'FAIL event_id not unique (%)', n; end if;
+  update public.face_webhook_events set received_at = now() - interval '10 days' where event_id = 'evt-test-1';
+  n := public.face_liveness_prune_webhook_events(interval '7 days');
+  if n < 1 then raise exception 'FAIL prune did not remove old events'; end if;
+end;
+$$;
+
+select set_config('request.jwt.claim.sub', '66666666-6666-6666-6666-666666666666', false);
+set role authenticated;
+
+do $$
+declare
+  denied boolean;
+  n int;
+begin
+  begin
+    select count(*) into n from public.face_webhook_events;
+    if n <> 0 then raise exception 'FAIL client can read face_webhook_events (%)', n; end if;
+  exception when insufficient_privilege then
+    null;
+  end;
+  begin
+    select count(*) into n from public.face_verification_reviews;
+    if n <> 0 then raise exception 'FAIL client can read face_verification_reviews (%)', n; end if;
+  exception when insufficient_privilege then
+    null;
+  end;
+
+  denied := false;
+  begin
+    insert into public.face_webhook_events (event_id, outcome) values ('evt-client', 'x');
+  exception when others then
+    denied := true;
+  end;
+  if not denied then raise exception 'FAIL client could insert face_webhook_events'; end if;
+
+  denied := false;
+  begin
+    perform public.face_liveness_approve(gen_random_uuid(), '66666666-6666-6666-6666-666666666666'::uuid, 'x', 'y', true);
+  exception when insufficient_privilege then
+    denied := true;
+  end;
+  if not denied then raise exception 'FAIL client could call face_liveness_approve'; end if;
+
+  denied := false;
+  begin
+    perform public.face_liveness_admin_review(gen_random_uuid(), 'approve', 'me', null);
+  exception when insufficient_privilege then
+    denied := true;
+  end;
+  if not denied then raise exception 'FAIL client could call face_liveness_admin_review'; end if;
+
+  denied := false;
+  begin
+    perform public.face_liveness_inconsistent_rows();
+  exception when insufficient_privilege then
+    denied := true;
+  end;
+  if not denied then raise exception 'FAIL client could call face_liveness_inconsistent_rows'; end if;
+end;
+$$;
+
+reset role;
+select set_config('request.jwt.claim.sub', '', false);
+
+-- anon 도 동일
+set role anon;
+do $$
+declare denied boolean := false;
+begin
+  begin
+    perform public.face_liveness_approve(gen_random_uuid(), gen_random_uuid(), 'x', 'y', true);
+  exception when insufficient_privilege then
+    denied := true;
+  end;
+  if not denied then raise exception 'FAIL anon could call face_liveness_approve'; end if;
+end;
+$$;
+reset role;
+
 select 'FACE LIVENESS TESTS PASSED' as result;

@@ -26,7 +26,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0009 순서대로)
+# 마이그레이션 적용 (0001 → 0014 순서대로)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -44,8 +44,9 @@ supabase functions deploy verify-identity
 supabase functions deploy delete-account
 supabase functions deploy dev-login       # 개발/스테이징 전용 — production 에는 배포 금지!
 supabase functions deploy complete-face-verification   # 개발 전용 Mock 승인 — FACE_VERIFICATION_PROVIDER=mock 일 때만 기동
-supabase functions deploy start-face-liveness           # 실제 얼굴 라이브니스 (Didit) — docs/face-liveness-didit.md
-supabase functions deploy didit-webhook --no-verify-jwt # Didit 결과 웹훅 (서명 검증) — 반드시 --no-verify-jwt
+supabase functions deploy start-face-liveness           # 실제 얼굴 라이브니스 (Didit API v3) — docs/face-liveness-didit.md
+supabase functions deploy didit-webhook --no-verify-jwt # Didit V3 결과 웹훅 (서명 검증) — 반드시 --no-verify-jwt
+supabase functions deploy admin-face-review             # 관리자 얼굴 인증 검토 (service role 전용 — 관리자 웹이 호출)
 supabase functions deploy daily-recommendation
 supabase functions deploy icebreaker
 

@@ -11,6 +11,8 @@
  *   - 앱을 종료했다 다시 열어도 pending 세션이 복원된다
  *   - Expo Go(Development Build 아님) 에서 이해할 수 있는 오류
  *   - 실패 사유(중복 얼굴 의심 등)를 사용자에게 구분해 노출하지 않는다
+ *   - Didit v3 상태: Resubmitted / Awaiting User 는 승인이 아니며, 무한 대기 대신 "다시 진행" 안내 (앱 재시작 복원 포함)
+ *   - 승인 복구: 행은 approved 인데 users.face_verified 가 아직 아니면 계속 대기하다가 서버 sync 가 복구하면 approved
  */
 import {
   FACE_ERROR_MESSAGES,
@@ -22,6 +24,7 @@ import {
   mapStartFailure,
   nextStateAfterSdk,
   PROCESSING_TIMEOUT_MS,
+  providerStatusRequiresUserAction,
   restoreScreenState,
   shouldSyncAt,
 } from '../src/services/face/faceFlowCore.ts';
@@ -97,6 +100,34 @@ eq('restore pending without session → intro', restoreScreenState({ status: 'pe
 eq('restore in_review', restoreScreenState({ status: 'in_review', provider_session_id: 's1', expires_at: null, created_at: past }, false, NOW), { kind: 'in_review', sessionId: 's1' });
 eq('restore rejected → intro (retry)', restoreScreenState({ status: 'rejected', provider_session_id: 's1', expires_at: null, created_at: past }, false, NOW), { kind: 'intro' });
 eq('restore approved row but flag false → processing', restoreScreenState({ status: 'approved', provider_session_id: 's1', expires_at: null, created_at: past }, false, NOW).kind, 'processing');
+
+// ── Didit v3 상태: Resubmitted / Awaiting User → 다시 진행 안내 (승인 아님, 무한 대기 아님) ──
+eq('provider status resubmitted requires user action', providerStatusRequiresUserAction('Resubmitted'), true);
+eq('provider status awaiting user requires user action', providerStatusRequiresUserAction('Awaiting User'), true);
+eq('provider status approved does not', providerStatusRequiresUserAction('Approved'), false);
+eq('provider status null does not', providerStatusRequiresUserAction(null), false);
+eq('sync pending + userActionRequired → user_action_required error', mapServerStatus({ status: 'pending', faceVerified: false, sessionId: 's1', processing: { startedAt: NOW }, userActionRequired: true }), { kind: 'error', code: 'user_action_required' });
+eq('sync pending without flag → keep processing', mapServerStatus({ status: 'pending', faceVerified: false, sessionId: 's1', processing: { startedAt: NOW }, userActionRequired: false }).kind, 'processing');
+eq('userActionRequired never approves', mapServerStatus({ status: 'pending', faceVerified: true, sessionId: 's1', userActionRequired: true }).kind, 'error');
+eq('user_action_required is retryable', FACE_ERROR_MESSAGES.user_action_required.action, 'retry');
+eq('restore pending Resubmitted → user_action_required (no infinite wait)', restoreScreenState({ status: 'pending', provider_session_id: 's1', provider_status: 'Resubmitted', expires_at: future, created_at: past }, false, NOW), { kind: 'error', code: 'user_action_required' });
+eq('restore pending Awaiting User → user_action_required', restoreScreenState({ status: 'pending', provider_session_id: 's1', provider_status: 'Awaiting User', expires_at: future, created_at: past }, false, NOW), { kind: 'error', code: 'user_action_required' });
+eq('restore pending In Progress → processing', restoreScreenState({ status: 'pending', provider_session_id: 's1', provider_status: 'In Progress', expires_at: future, created_at: past }, false, NOW).kind, 'processing');
+eq('restore verified user ignores provider status', restoreScreenState({ status: 'pending', provider_session_id: 's1', provider_status: 'Resubmitted', expires_at: future, created_at: past }, true, NOW), { kind: 'approved' });
+
+// ── 승인 복구 시나리오: 행 approved + 플래그 false → 대기 → 서버 sync 복구 → approved ──
+{
+  const restored = restoreScreenState({ status: 'approved', provider_session_id: 's1', provider_status: 'Approved', expires_at: null, created_at: past }, false, NOW);
+  eq('recovery: approved row without flag restores to processing', restored.kind, 'processing');
+  // 첫 sync: 서버가 아직 복구하지 못함 (approved / faceVerified=false) → 계속 processing
+  eq('recovery: sync approved but flag false keeps processing', mapServerStatus({ status: 'approved', faceVerified: false, sessionId: 's1', processing: { startedAt: NOW } }).kind, 'processing');
+  // 다음 sync: 서버 RPC 가 users.face_verified 를 복구 → approved
+  eq('recovery: sync approved with flag → approved', mapServerStatus({ status: 'approved', faceVerified: true, sessionId: 's1', processing: { startedAt: NOW } }), { kind: 'approved' });
+  // 복구가 오래 걸리면 timeout 안내 (wait 액션) — 사용자는 "결과 다시 확인" 또는 "얼굴 확인 다시 시도" 가 가능하다
+  eq('recovery: timeout is a wait action, not a dead end', FACE_ERROR_MESSAGES.processing_timeout.action, 'wait');
+  // 행이 approved 인데 세션 id 가 없는 비정상 데이터는 intro 로 (새 세션으로 재시도 가능)
+  eq('recovery: approved row without session id → intro', restoreScreenState({ status: 'approved', provider_session_id: null, expires_at: null, created_at: past }, false, NOW), { kind: 'intro' });
+}
 
 // ── Development Build 아님 ─────────────────────────────────────────────────
 eq('expo go detected', isExpoGo('storeClient'), true);

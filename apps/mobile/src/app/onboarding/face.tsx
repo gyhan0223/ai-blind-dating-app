@@ -15,6 +15,7 @@ import {
   isDiditSdkAvailable,
   isProcessingTimedOut,
   mapSdkResult,
+  providerStatusRequiresUserAction,
   mapServerStatus,
   nextStateAfterSdk,
   POLL_INTERVAL_MS,
@@ -97,13 +98,14 @@ export default function FaceStep() {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
-    const settle = async (status: Parameters<typeof mapServerStatus>[0]['status']) => {
+    const settle = async (status: Parameters<typeof mapServerStatus>[0]['status'], userActionRequired = false) => {
       const user = status === 'approved' ? await refreshAppUser() : null;
       const next = mapServerStatus({
         status,
         faceVerified: user?.face_verified === true,
         sessionId,
         processing: { startedAt },
+        userActionRequired,
       });
       if (next.kind !== 'processing') {
         setState(next);
@@ -120,7 +122,8 @@ export default function FaceStep() {
           syncsDone.current += 1;
           const synced = await syncFaceLiveness(sessionId);
           if (cancelled) return;
-          if (synced.ok && synced.status !== 'pending' && (await settle(synced.status))) return;
+          // pending 이라도 Provider 가 재진행(Resubmitted/Awaiting User)을 요구하면 무한 대기 대신 다시 시작 안내
+          if (synced.ok && (synced.status !== 'pending' || synced.userActionRequired) && (await settle(synced.status, synced.userActionRequired))) return;
           if (!synced.ok && synced.code === 'session_expired') {
             setState({ kind: 'error', code: 'session_expired' });
             return;
@@ -128,7 +131,10 @@ export default function FaceStep() {
         }
         const row = await getLatestFaceVerification(userId);
         if (cancelled) return;
-        if (row && row.provider_session_id === sessionId && row.status !== 'pending' && (await settle(row.status))) return;
+        if (row && row.provider_session_id === sessionId) {
+          const needsUser = row.status === 'pending' && providerStatusRequiresUserAction(row.provider_status);
+          if ((row.status !== 'pending' || needsUser) && (await settle(row.status, needsUser))) return;
+        }
       } catch {
         // 일시적 오류는 다음 폴링에서 다시 시도
       }
@@ -213,7 +219,15 @@ export default function FaceStep() {
         const synced = await syncFaceLiveness(sessionId);
         if (synced.ok && synced.status !== 'in_review') {
           const user = synced.status === 'approved' ? await refreshAppUser() : null;
-          setState(mapServerStatus({ status: synced.status, faceVerified: user?.face_verified === true, sessionId }));
+          setState(
+            mapServerStatus({
+              status: synced.status,
+              faceVerified: user?.face_verified === true,
+              sessionId,
+              processing: { startedAt: Date.now() },
+              userActionRequired: synced.userActionRequired,
+            }),
+          );
           return;
         }
       }

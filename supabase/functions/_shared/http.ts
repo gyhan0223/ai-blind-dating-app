@@ -26,6 +26,32 @@ export function serviceClient(): SupabaseClient {
   );
 }
 
+/** 상수 시간 문자열 비교 (secret 비교용) */
+function timingSafeEqualString(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const x = enc.encode(a);
+  const y = enc.encode(b);
+  if (x.byteLength === 0 || x.byteLength !== y.byteLength) return false;
+  let diff = 0;
+  for (let i = 0; i < x.byteLength; i += 1) diff |= x[i] ^ y[i];
+  return diff === 0;
+}
+
+/**
+ * 서버 전용 호출자 인증 — Authorization 헤더가 이 프로젝트의 service role key 와 정확히 같아야 한다.
+ * 관리자 웹(Next.js 서버 액션)처럼 service role key 를 가진 서버만 통과한다. 사용자 JWT 는 401.
+ * (service role key 는 이미 RLS 를 우회하는 최상위 secret 이므로 이 검사가 추가 권한을 만들지 않는다)
+ */
+export function requireServiceRole(req: Request): { ok: true } | Response {
+  const expected = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  const authHeader = req.headers.get('Authorization') ?? '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!expected || !token || !timingSafeEqualString(token, expected)) {
+    return json({ error: 'unauthorized' }, 401);
+  }
+  return { ok: true };
+}
+
 /** Authorization 헤더의 사용자 JWT 를 검증하고 userId(+토큰)를 돌려준다. */
 export async function requireUser(
   req: Request,

@@ -18,6 +18,8 @@
 #     호출자 인증은 X-Signature-V2 HMAC 검증(DIDIT_WEBHOOK_SECRET)이 담당한다. (docs/face-liveness-didit.md)
 #  7) complete-face-verification 은 개발용 mock 전용이라 production 에 배포하지 않는다
 #     (FACE_VERIFICATION_PROVIDER=didit 이면 기동 자체를 거부한다 — 2차 방어).
+#  8) admin-face-review(관리자 얼굴 인증 검토)는 JWT 검증 ON 으로 배포하며, 함수 안에서 Authorization 이
+#     service role key 와 일치할 때만 처리한다 (관리자 웹 서버 액션 전용 — 공개 API 아님).
 set -euo pipefail
 
 # production 에 배포하는 함수 allowlist — dev-login 은 절대 추가하지 않는다
@@ -26,6 +28,7 @@ PROD_FUNCTIONS=(
   delete-account
   start-face-liveness
   didit-webhook
+  admin-face-review
   daily-recommendation
   icebreaker
   send-sms

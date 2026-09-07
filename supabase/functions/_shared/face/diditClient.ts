@@ -1,11 +1,11 @@
 /**
  * Didit Verification API 클라이언트 — 순수 모듈 (fetch 주입, Deno / Node 겸용).
  *
- * 엔드포인트 (Didit 공식 데모 didit-full-demo / 문서 기준):
- *   POST   {base}/v3/session/                   세션 생성 → { session_id, session_token, url, status, ... }
- *   GET    {base}/v2/session/{id}/decision/      세션 결정 조회 (liveness 결과·reference_image 포함)
- *   DELETE {base}/v2/session/{id}/delete/        세션·생체 데이터 삭제 (회원 탈퇴 후속 작업용)
- *   base = https://verification.didit.me  (DIDIT_API_BASE_URL 로 재정의 가능)
+ * 엔드포인트 — Didit Sessions API v3 로 통일 (docs.didit.me/sessions-api/*). v2 로 fallback 하지 않는다.
+ *   POST   {base}/v3/session/                   세션 생성 → { session_id, session_token, url, status, expires_at ... }
+ *   GET    {base}/v3/session/{id}/decision/      세션 결정 조회 (liveness_checks[] · reference_image · matches[] 포함)
+ *   DELETE {base}/v3/session/{id}/delete/        세션·생체 데이터 삭제 (회원 탈퇴 후속 작업용) — 200 JSON 또는 204
+ *   base = https://verification.didit.me  (DIDIT_API_BASE_URL 로 재정의 가능 — https 만 허용)
  *
  * 보안 원칙
  *   - API Key 는 서버에서만 사용한다. 응답/로그/오류 메시지에 key·session_token·이미지 URL 을 넣지 않는다.
@@ -13,10 +13,14 @@
  *   - 세션 생성 요청은 워크플로 id + vendor_data(인증된 Supabase user id) 만 보낸다.
  */
 
+import { DIDIT_API_VERSION } from './faceCore.ts';
+
 export const DIDIT_DEFAULT_BASE_URL = 'https://verification.didit.me';
-export const DIDIT_SESSION_CREATE_PATH = '/v3/session/';
-export const diditDecisionPath = (sessionId: string) => `/v2/session/${encodeURIComponent(sessionId)}/decision/`;
-export const diditDeletePath = (sessionId: string) => `/v2/session/${encodeURIComponent(sessionId)}/delete/`;
+export const DIDIT_SESSION_CREATE_PATH = `/${DIDIT_API_VERSION}/session/`;
+export const diditDecisionPath = (sessionId: string) =>
+  `/${DIDIT_API_VERSION}/session/${encodeURIComponent(sessionId)}/decision/`;
+export const diditDeletePath = (sessionId: string) =>
+  `/${DIDIT_API_VERSION}/session/${encodeURIComponent(sessionId)}/delete/`;
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -45,8 +49,20 @@ export type DecisionFetchResult =
   | { ok: true; json: unknown }
   | { ok: false; reason: DiditFailureReason; httpStatus?: number };
 
+/** base URL 은 https 여야 한다 (API Key 가 평문으로 나가는 것을 막는다). 잘못된 값은 fail-closed. */
+export function isValidDiditBaseUrl(baseUrl: string | undefined): boolean {
+  const b = (baseUrl ?? '').trim();
+  if (b === '') return true; // 기본값 사용
+  try {
+    return new URL(b).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function normalizeBase(baseUrl: string | undefined): string {
   const b = (baseUrl ?? '').trim() || DIDIT_DEFAULT_BASE_URL;
+  if (!isValidDiditBaseUrl(b)) throw new Error('[face] DIDIT_API_BASE_URL 은 https URL 이어야 합니다');
   return b.replace(/\/+$/, '');
 }
 
@@ -55,10 +71,12 @@ async function requestJson(
   path: string,
   init: RequestInit,
 ): Promise<{ ok: true; status: number; json: unknown } | { ok: false; reason: DiditFailureReason; httpStatus?: number }> {
+  // base URL 검증은 try 밖에서 — 잘못된 설정은 network_error 로 감추지 않고 그대로 실패시킨다 (fail-closed)
+  const base = normalizeBase(deps.baseUrl);
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), deps.timeoutMs ?? 8000) : null;
   try {
-    const res = await deps.fetch(`${normalizeBase(deps.baseUrl)}${path}`, {
+    const res = await deps.fetch(`${base}${path}`, {
       ...init,
       headers: {
         Accept: 'application/json',
@@ -112,10 +130,14 @@ export async function createDiditSession(
   };
 }
 
-/** 세션 결정 조회 — 승인 여부의 유일한 근거. 파싱은 faceCore.parseDiditDecision 이 담당. */
+/** 세션 결정 조회 (GET /v3/session/{id}/decision/) — 승인 여부의 유일한 근거. 파싱·대조는 faceCore.parseDiditDecision 이 담당. */
 export async function getDiditDecision(deps: DiditClientDeps, sessionId: string): Promise<DecisionFetchResult> {
   const res = await requestJson(deps, diditDecisionPath(sessionId), { method: 'GET' });
   if (!res.ok) return res;
+  // 예상 밖 응답(객체가 아닌 본문)은 fail-closed — 본문은 돌려주지 않는다
+  if (typeof res.json !== 'object' || res.json === null || Array.isArray(res.json)) {
+    return { ok: false, reason: 'invalid_response', httpStatus: res.status };
+  }
   return { ok: true, json: res.json };
 }
 

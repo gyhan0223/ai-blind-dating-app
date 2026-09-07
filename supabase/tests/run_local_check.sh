@@ -41,4 +41,9 @@ if [[ "${WITH_FACE_LIVENESS_TESTS:-1}" == "1" && -f face_liveness_tests.sql ]]; 
   $PSQL -d "$DB_NAME" -f face_liveness_tests.sql
 fi
 
+if [[ "${WITH_FACE_CONCURRENCY_TESTS:-1}" == "1" && -f face_liveness_concurrency_test.sh ]]; then
+  echo "running face liveness concurrency tests (approve RPC — two sessions)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash face_liveness_concurrency_test.sh
+fi
+
 echo "OK: schema check passed on $DB_NAME"
