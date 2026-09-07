@@ -1,13 +1,14 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "본심",
+    "slug": "bonsim",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "mobile",
+    "scheme": "bonsim",
     "userInterfaceStyle": "automatic",
     "ios": {
+      "bundleIdentifier": "com.gyhan.bonsim",
       "icon": "./assets/expo.icon",
       "infoPlist": {
         "NSCameraUsageDescription": "본인 확인을 위해 얼굴을 촬영할 때 카메라를 사용해요. 촬영한 얼굴은 상대에게 공개되지 않아요.",
@@ -15,6 +16,7 @@
       }
     },
     "android": {
+      "package": "com.gyhan.bonsim",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",

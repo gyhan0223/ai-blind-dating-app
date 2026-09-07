@@ -262,8 +262,31 @@ adb logcat -c && adb logcat -s SdkReactNative:* DiditSdk:* | grep -iE 'token=|ve
 ```
 
 요구사항 (SDK 4.7.5 기준): React Native 0.76+ New Architecture, iOS 13+, Android API 24+. 이 앱은 Expo SDK 57 / RN 0.86 이라 충족한다.
-**Bundle ID / Android package 는 저장소에 없다.** 스토어 식별자가 확정되면 `app.json` 에 직접 추가한다 (임의 값을 커밋하지 않는다).
-빌드/EAS 절차는 이전과 같다 (`npx eas build --profile development --platform ios|android`). 이 저장소에는 `eas.json` 이 없다.
+### EAS Development Build (실기기 테스트)
+
+앱 식별자는 `app.json` 에 확정되어 있다 — `name: 본심`, `slug: bonsim`, `scheme: bonsim`, `ios.bundleIdentifier` / `android.package: com.gyhan.bonsim`.
+`expo-dev-client` 가 설치되어 있고 `apps/mobile/eas.json` 에 프로필 3개가 있다:
+
+| 프로필 | 설정 | 용도 |
+|---|---|---|
+| `development` | `developmentClient: true`, `distribution: internal` | Didit SDK 실기기 테스트 (Metro 에 연결되는 개발 클라이언트) |
+| `preview` | `distribution: internal` | 내부 배포용 release 빌드 (스토어 미제출) |
+| `production` | `autoIncrement: true` (`appVersionSource: remote`) | 스토어 제출용 — 빌드 번호를 EAS 가 자동 증가 |
+
+ios/android 네이티브 디렉터리는 커밋하지 않는다 (`.gitignore`). EAS Build 가 `expo prebuild` 를 실행해 Didit config plugin 설정
+(`autodetection`, NFC OFF, `blockedPermissions`) 을 네이티브 프로젝트에 반영한다. 운영자가 실행할 명령:
+
+```bash
+cd apps/mobile
+npm install -g eas-cli && eas login
+eas init                                   # 최초 1회 — Expo 프로젝트 생성 후 app.json 에 extra.eas.projectId 를 기록 (커밋)
+eas build --profile development --platform android   # 실기기 Development Build (APK, internal 배포)
+eas build --profile development --platform ios       # iOS 는 Apple 개발자 계정 + 테스트 기기 UDID 등록(eas device:create) 필요
+npx expo start --dev-client                # 설치한 개발 빌드가 이 Metro 서버에 연결된다
+```
+
+`EXPO_PUBLIC_SUPABASE_URL` / `EXPO_PUBLIC_SUPABASE_ANON_KEY` 는 EAS 환경변수(`eas env:create` 또는 콘솔) 로 넣는다. production 프로필에는
+`EXPO_PUBLIC_DEV_LOGIN` 을 넣지 않는다 (`docs/environments.md`). Didit API Key / 웹훅 secret 은 Supabase Edge Function secret 이며 앱 빌드에는 넣지 않는다.
 
 이 환경에서 확인한 것: `expo prebuild --no-install --platform android` 가 `gradle.properties` 에 `diditSdkAndroidVariant=autodetection` 을 생성한다.
 실제 Gradle/Xcode 빌드와 기기 실행은 자격증명·실기기가 필요해 수행하지 못했다.
@@ -335,7 +358,7 @@ cd apps/admin && npx tsc --noEmit
 
 - Didit 콘솔 설정(Liveness-only 워크플로 · 3D Action & Flash · Face Search · **V3 웹훅 destination**) + secret 4개 등록 — 운영자
 - Supabase staging: `0014` 마이그레이션 적용, `admin-face-review` 배포, 관리자 웹 `ADMIN_ACTOR_LABEL`(선택) — 운영자
-- Bundle ID / package 확정 후 Development Build 로 실기기 체크리스트(12절) 통과 — 실제 Didit 응답 형태 1회 확인 포함
+- `eas init` 으로 EAS 프로젝트 연결 후 `eas build --profile development` 실기기 체크리스트(12절) 통과 — 실제 Didit 응답 형태 1회 확인 포함
 - 개인정보처리방침 개정 + 외모 매칭 목적 별도 동의 (10절 TODO) — 출시 차단
 - `delete-account` 에 Didit 세션 삭제·storage 삭제 연결 (10절 TODO)
 - 얼굴 임베딩(다음 작업)은 `status='approved' and reference_path is not null` 행만 입력으로 사용한다
