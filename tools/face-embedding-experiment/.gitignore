@@ -1,0 +1,8 @@
+# 모델 파일(38MB)과 실험 사진/결과는 커밋하지 않는다 — 사진은 개인정보다.
+models/*.onnx
+images/
+results/
+*.csv
+*.json
+.venv/
+__pycache__/

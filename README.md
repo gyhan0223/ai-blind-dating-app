@@ -275,7 +275,7 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
 | OTP rate limit | 서버: `send-sms` 훅이 번호별 60초 쿨다운 + 시간당 5건 강제(429) + 대시보드 프로젝트 한도(30건/h) · 앱: 번호별 60초 버튼 잠금 | 실사용량 보고 한도 조정 + captcha 연동 |
 | IDENTITY_HASH_SECRET | 개발 기본값 (시드 fixture 와 공유) | `supabase secrets set` 으로 운영 secret 발급 (교체 시 기존 해시 재계산 불가 주의) |
 | 얼굴 라이브니스 | **Didit 네이티브 SDK 능동형 라이브니스 구현 완료** (`start-face-liveness` + `didit-webhook`, Development Build 필요). 개발 Mock 은 `complete-face-verification` (production 미배포) | Didit 콘솔 설정·secret·실기기 검증 (`docs/face-liveness-didit.md`) |
-| 얼굴 특징 벡터 | 미생성 (null) — 검증된 reference image 만 private 저장 | 얼굴 임베딩 모델 (reference image 입력, 별도 동의 필요) |
+| 얼굴 특징 벡터 | 미생성 (null) — 검증된 reference image 만 private 저장 | 얼굴 임베딩 모델 (reference image 입력, 별도 동의 필요) — 모델 조사·검증 계획: `docs/face-embedding-model-research.md`, PC 실험 도구: `tools/face-embedding-experiment/` |
 | 외모 취향 테스트 | 추상 인상 일러스트 카드 | 합법적 synthetic face dataset |
 | Icebreaker | 규칙 기반 | LLM |
 | 결제 | 구조만 (subscriptions 테이블, Plus=추천 개수만) | 인앱 결제 / PG |

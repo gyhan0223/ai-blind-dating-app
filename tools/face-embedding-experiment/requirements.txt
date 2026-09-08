@@ -1,0 +1,4 @@
+# 얼굴 임베딩 최소 실험 (개발자 PC 전용). 서버/앱 의존성이 아니다.
+# 검증한 조합: Python 3.11 + opencv-python 5.0.0 + numpy 2.4 (Linux). Windows 도 같은 pip 패키지를 쓴다.
+opencv-python>=4.10,<6
+numpy>=1.26
