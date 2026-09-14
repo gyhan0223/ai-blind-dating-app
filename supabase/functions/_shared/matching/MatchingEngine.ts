@@ -1,39 +1,61 @@
 /**
- * MatchingEngine — 양방향 궁합 계산의 단일 진입점.
+ * MatchingEngine — 양방향 점수 계산의 단일 진입점.
  *
- * 설계 원칙
- *  * 절대적 외모 점수는 존재하지 않는다. 모든 값은 "관계·방향" 예측이다.
- *  * A→B 와 B→A 를 따로 계산하고, 최종 점수는 조화 평균 —
- *    한쪽만 높은 조합은 우선순위가 내려간다.
- *  * Dealbreaker 는 점수가 아니라 필터다.
- *  * 초기 버전은 단순 weighted scoring. 각 차원 계산 함수를 교체하면
- *    (예: 임베딩 기반 외모 취향, LLM 대화 궁합) 그대로 업그레이드된다.
+ * 설계 원칙 (#40)
+ *  * 외모 차원은 존재하지 않는다. 얼굴 임베딩·외모 취향·외모 중요도는 입력 계약에도, 계산에도 없다.
+ *  * 활성 차원: personality / values / lifestyle / relationship.
+ *    이 쌍에서 비교 가능한 정보가 없는 차원은 null(unavailable) 이며 중립값으로 채우지 않는다.
+ *    base = Σ(유효 차원 점수 × viewer 중요도) / Σ(유효 차원 중요도)  — 유효 차원만으로 재정규화.
+ *  * A→B 와 B→A 를 따로 계산하고, 최종 점수는 조화 평균 — 한쪽만 높은 조합은 우선순위가 내려간다.
+ *  * 양방향 중 한쪽이라도 base 가 없으면 total 은 null 이고 basis='conditions_only' —
+ *    필수 조건을 통과한 후보를 자동 탈락시키지 않으며, 순위는 결정적 tie-break 로 정한다.
+ *  * Dealbreaker(필수 조건) 는 점수가 아니라 필터다. soft preference(“~면 좋겠어요”) 는 가감점이다.
+ *  * 카드 설명 문구는 공개된 사실(취미·지역·연애 목적·공개 질문 답변·스스로 고른 키워드)에서만 만든다.
+ *    비공개 응답(설문·가치관)이나 차원 점수로 문구를 만들지 않는다.
+ *  * 어떤 값도 사용자에게 "궁합 확률·정확도" 로 표현하지 않는다. total 은 내부 정렬용 숫자다.
  */
+import { PUBLIC_PROMPTS, pickAllowedValues } from './publicPrompts.ts';
 import type {
+  ActiveDimension,
   Dealbreaker,
   DimensionScores,
+  DirectionalScore,
+  ImportanceWeights,
   MatchResult,
   MatchScore,
   QuestionnaireResponse,
   RecommendationStrategy,
-  StyleVector,
   UserSnapshot,
 } from './types.ts';
+import { ACTIVE_DIMENSIONS } from './types.ts';
 
 // ---------------------------------------------------------------------------
-// 유틸
+// 유틸 — 숫자 검증
 // ---------------------------------------------------------------------------
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
-/** 1~5 두 값의 유사도 (0~1) */
-function likertSimilarity(a: number | null | undefined, b: number | null | undefined): number | null {
-  if (a == null || b == null) return null;
-  return clamp01(1 - Math.abs(a - b) / 4);
+/** 유한한 숫자만 통과 (NaN/Infinity/문자열 거부) */
+function finiteOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/** 리커트 1~5 응답 검증 — 범위 밖·비수치는 "응답 없음" 으로 본다 (응답을 만들어내지 않는다) */
+function likertOrNull(v: unknown): number | null {
+  const n = finiteOrNull(v);
+  return n != null && n >= 1 && n <= 5 ? n : null;
+}
+
+/** 1~5 두 값의 유사도 (0~1). 한쪽이라도 없으면 null */
+function likertSimilarity(a: unknown, b: unknown): number | null {
+  const x = likertOrNull(a);
+  const y = likertOrNull(b);
+  if (x == null || y == null) return null;
+  return clamp01(1 - Math.abs(x - y) / 4);
 }
 
 function average(values: (number | null)[]): number | null {
-  const present = values.filter((v): v is number => v != null);
+  const present = values.filter((v): v is number => v != null && Number.isFinite(v));
   if (present.length === 0) return null;
   return present.reduce((s, v) => s + v, 0) / present.length;
 }
@@ -43,17 +65,30 @@ function harmonicMean(a: number, b: number): number {
   return (2 * a * b) / (a + b);
 }
 
-/** 만 나이 근사 (출생연도 기준) */
+/** 만 나이 근사 (출생연도 기준) — 성인 여부 판단에는 쓰지 않는다 (그건 서버 본인확인 age_verified) */
 export function approximateAge(birthYear: number, nowYear: number): number {
   return nowYear - birthYear;
 }
 
-/** axis 별 평균 응답값 (역채점 반영, 1~5) */
+/** 중요도 1~5 정수로 정규화 — 잘못된 값은 기본 3 (응답을 만드는 것이 아니라 가중치 기본값) */
+export const DEFAULT_IMPORTANCE = 3;
+export function sanitizeImportance(raw: Partial<Record<string, unknown>> | null | undefined): ImportanceWeights {
+  const out = {} as ImportanceWeights;
+  for (const dim of ACTIVE_DIMENSIONS) {
+    const n = finiteOrNull(raw?.[dim]);
+    out[dim] = n != null && n >= 1 && n <= 5 ? Math.round(n) : DEFAULT_IMPORTANCE;
+  }
+  return out;
+}
+
+/** axis 별 평균 응답값 (역채점 반영, 1~5). 잘못된 응답은 무시 */
 function axisMeans(responses: QuestionnaireResponse[], category: QuestionnaireResponse['category']) {
   const byAxis = new Map<string, number[]>();
   for (const r of responses) {
     if (r.category !== category) continue;
-    const v = r.reverse ? 6 - r.value : r.value;
+    const raw = likertOrNull(r.value);
+    if (raw == null) continue;
+    const v = r.reverse ? 6 - raw : raw;
     const arr = byAxis.get(r.axis) ?? [];
     arr.push(v);
     byAxis.set(r.axis, arr);
@@ -65,7 +100,7 @@ function axisMeans(responses: QuestionnaireResponse[], category: QuestionnaireRe
   return means;
 }
 
-/** 두 사용자의 axis 평균 유사도 (0~1) */
+/** 두 사용자의 axis 평균 유사도 (0~1). 공통 축이 없으면 null */
 function categorySimilarity(
   a: QuestionnaireResponse[],
   b: QuestionnaireResponse[],
@@ -81,23 +116,6 @@ function categorySimilarity(
   return average(sims);
 }
 
-/** 코사인 유사도 (공통 키 기준, 0~1 로 정규화) */
-function vectorAffinity(pref: StyleVector | null, style: StyleVector | null): number | null {
-  if (!pref || !style) return null;
-  const keys = Object.keys(pref).filter((k) => style[k] != null);
-  if (keys.length === 0) return null;
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  for (const k of keys) {
-    dot += pref[k] * style[k];
-    na += pref[k] ** 2;
-    nb += style[k] ** 2;
-  }
-  if (na === 0 || nb === 0) return null;
-  return clamp01(dot / (Math.sqrt(na) * Math.sqrt(nb)));
-}
-
 function overlapRatio(a: string[], b: string[]): number | null {
   if (a.length === 0 || b.length === 0) return null;
   const setB = new Set(b);
@@ -106,7 +124,11 @@ function overlapRatio(a: string[], b: string[]): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// Dealbreaker — 조건이 맞지 않으면 제외
+// Dealbreaker — 필수 조건. 맞지 않으면 제외 (점수 아님)
+//   평가에 필요한 값이 없으면 통과시키지 않고 실패로 본다 (조용한 통과 금지):
+//     - marriage_intent 규칙: 후보의 marriageIntent 가 없으면 실패 (unknown)
+//     - children_intent 규칙: 양쪽 childrenIntent 중 하나라도 없으면 실패 (unknown)
+//   나이·키·흡연·음주·지역은 profiles 의 not null 컬럼이라 항상 평가 가능하다.
 // ---------------------------------------------------------------------------
 
 export function checkDealbreakers(
@@ -119,17 +141,17 @@ export function checkDealbreakers(
   const candAge = approximateAge(cand.birthYear, nowYear);
 
   for (const rule of viewer.dealbreakers) {
-    const v = rule.value as Record<string, number | string[] | boolean | null | undefined>;
+    const v = (rule.value ?? {}) as Record<string, unknown>;
     switch (rule.kind) {
       case 'age_range': {
-        const min = (v.min as number | null) ?? null;
-        const max = (v.max as number | null) ?? null;
+        const min = finiteOrNull(v.min);
+        const max = finiteOrNull(v.max);
         if ((min != null && candAge < min) || (max != null && candAge > max)) failed.push(rule.kind);
         break;
       }
       case 'height_range': {
-        const min = (v.min as number | null) ?? null;
-        const max = (v.max as number | null) ?? null;
+        const min = finiteOrNull(v.min);
+        const max = finiteOrNull(v.max);
         if ((min != null && cand.heightCm < min) || (max != null && cand.heightCm > max)) failed.push(rule.kind);
         break;
       }
@@ -139,31 +161,32 @@ export function checkDealbreakers(
       case 'drinking': {
         const order = { none: 0, sometimes: 1, often: 2 } as const;
         const max = v.max as keyof typeof order | undefined;
-        if (max != null && order[cand.drinking] > order[max]) failed.push(rule.kind);
+        if (max != null && order[max] != null && (order[cand.drinking] ?? 2) > order[max]) failed.push(rule.kind);
         break;
       }
       case 'regions': {
-        const codes = (v.codes as string[] | undefined) ?? [];
+        const codes = Array.isArray(v.codes) ? (v.codes as string[]) : [];
         if (codes.length > 0 && !codes.includes(cand.regionCode)) failed.push(rule.kind);
         break;
       }
       case 'marriage_intent': {
-        const min = v.min as number | undefined;
-        const intent = candidate.values.marriageIntent;
-        if (min != null && intent != null && intent < min) failed.push(rule.kind);
+        const min = finiteOrNull(v.min);
+        const intent = likertOrNull(candidate.values.marriageIntent);
+        // 값이 없으면 판단 불가 → 필수 조건을 확인할 수 없으므로 통과시키지 않는다
+        if (min != null && (intent == null || intent < min)) failed.push(rule.kind);
         break;
       }
       case 'children_intent': {
-        const maxGap = v.maxGap as number | undefined;
-        const mine = viewer.values.childrenIntent;
-        const theirs = candidate.values.childrenIntent;
-        if (maxGap != null && mine != null && theirs != null && Math.abs(mine - theirs) > maxGap) {
+        const maxGap = finiteOrNull(v.maxGap);
+        const mine = likertOrNull(viewer.values.childrenIntent);
+        const theirs = likertOrNull(candidate.values.childrenIntent);
+        if (maxGap != null && (mine == null || theirs == null || Math.abs(mine - theirs) > maxGap)) {
           failed.push(rule.kind);
         }
         break;
       }
       case 'religion': {
-        const exclude = (v.exclude as string[] | undefined) ?? [];
+        const exclude = Array.isArray(v.exclude) ? (v.exclude as string[]) : [];
         if (cand.religion && exclude.includes(cand.religion)) failed.push(rule.kind);
         break;
       }
@@ -173,16 +196,17 @@ export function checkDealbreakers(
 }
 
 // ---------------------------------------------------------------------------
-// 차원별 점수 (모두 0~1) — viewer 가 candidate 를 좋아할 가능성 예측
+// 차원별 점수 (0~1 또는 null) — viewer 가 candidate 를 좋아할 가능성의 단순 규칙 예측
+//   null = 이 쌍에서 해당 차원을 비교할 정보가 없다. 중립값으로 대체하지 않는다.
 // ---------------------------------------------------------------------------
 
-function personalityScore(viewer: UserSnapshot, candidate: UserSnapshot): number {
+function personalityScore(viewer: UserSnapshot, candidate: UserSnapshot): number | null {
   const similarity = categorySimilarity(viewer.responses, candidate.responses, 'personality');
   const keywordFit = overlapRatio(viewer.preferences.personalityKeywords, candidate.profile.personalityKeywords);
-  return average([similarity, keywordFit != null ? 0.4 + 0.6 * keywordFit : null]) ?? 0.5;
+  return average([similarity, keywordFit != null ? 0.4 + 0.6 * keywordFit : null]);
 }
 
-function valuesScore(viewer: UserSnapshot, candidate: UserSnapshot): number {
+function valuesScore(viewer: UserSnapshot, candidate: UserSnapshot): number | null {
   const v = viewer.values;
   const c = candidate.values;
   // 결혼/자녀는 어긋날 때 갈등 비용이 커서 가중치를 높인다
@@ -202,12 +226,13 @@ function valuesScore(viewer: UserSnapshot, candidate: UserSnapshot): number {
       wsum += w;
     }
   }
-  return wsum > 0 ? sum / wsum : 0.5;
+  return wsum > 0 ? sum / wsum : null;
 }
 
-function lifestyleScore(viewer: UserSnapshot, candidate: UserSnapshot): number {
+function lifestyleScore(viewer: UserSnapshot, candidate: UserSnapshot): number | null {
   const similarity = categorySimilarity(viewer.responses, candidate.responses, 'lifestyle');
   const hobbyFit = overlapRatio(viewer.profile.hobbies, candidate.profile.hobbies);
+  // 지역은 profiles 의 필수 공개 값이라 항상 비교 가능하다 (광역 코드 일치 여부만 — 실제 거리가 아니다)
   const sameRegion = viewer.profile.regionCode === candidate.profile.regionCode ? 1 : 0.4;
   const smokingFit =
     viewer.preferences.smokingPref === 'prefer_non'
@@ -217,30 +242,38 @@ function lifestyleScore(viewer: UserSnapshot, candidate: UserSnapshot): number {
           ? 0.5
           : 0.2
       : null;
-  return average([similarity, hobbyFit, sameRegion, smokingFit]) ?? 0.5;
+  return average([similarity, hobbyFit, sameRegion, smokingFit]);
 }
 
-function relationshipScore(viewer: UserSnapshot, candidate: UserSnapshot): number {
+function relationshipScore(viewer: UserSnapshot, candidate: UserSnapshot): number | null {
   const similarity = categorySimilarity(viewer.responses, candidate.responses, 'relationship');
   const contactFit = likertSimilarity(viewer.values.contactFrequency, candidate.values.contactFrequency);
   const dateFit = likertSimilarity(viewer.values.dateFrequency, candidate.values.dateFrequency);
   const timeFit = likertSimilarity(viewer.values.personalTimeNeed, candidate.values.personalTimeNeed);
-  return average([similarity, contactFit, dateFit, timeFit]) ?? 0.5;
+  return average([similarity, contactFit, dateFit, timeFit]);
 }
 
-function appearanceScore(viewer: UserSnapshot, candidate: UserSnapshot): number {
-  // 데이터가 없으면 중립(0.5) — 외모 정보 부재가 벌점이 되어서는 안 된다
-  return vectorAffinity(viewer.appearancePreferenceVector, candidate.appearanceStyleVector) ?? 0.5;
-}
+const DIMENSION_FNS: Record<ActiveDimension, (v: UserSnapshot, c: UserSnapshot) => number | null> = {
+  personality: personalityScore,
+  values: valuesScore,
+  lifestyle: lifestyleScore,
+  relationship: relationshipScore,
+};
 
-/** 선호 조건(나이/키) 충족 시의 보정 (제외가 아니라 가감점) */
-function preferenceFitAdjustment(viewer: UserSnapshot, candidate: UserSnapshot, nowYear: number): number {
+/**
+ * soft preference(나이 범위·연상연하·키·지역 "선호") 충족 시의 가감점 — 제외가 아니라 보정.
+ * 필수 조건(Dealbreaker)과 구분된다: 선호 불일치는 여기서 감점만 받고 후보에서 빠지지 않는다.
+ * base 가 있을 때만 score 에 더한다 (conditions_only 후보의 순위에는 쓰지 않는다 — 단순성 우선).
+ */
+export function preferenceFitAdjustment(viewer: UserSnapshot, candidate: UserSnapshot, nowYear: number): number {
   const p = viewer.preferences;
   const cand = candidate.profile;
   const candAge = approximateAge(cand.birthYear, nowYear);
   let adjustment = 0;
-  if (p.ageMin != null || p.ageMax != null) {
-    const inRange = (p.ageMin == null || candAge >= p.ageMin) && (p.ageMax == null || candAge <= p.ageMax);
+  const ageMin = finiteOrNull(p.ageMin);
+  const ageMax = finiteOrNull(p.ageMax);
+  if (ageMin != null || ageMax != null) {
+    const inRange = (ageMin == null || candAge >= ageMin) && (ageMax == null || candAge <= ageMax);
     adjustment += inRange ? 0.03 : -0.05;
   }
   if (p.ageDirection && p.ageDirection !== 'any') {
@@ -253,10 +286,10 @@ function preferenceFitAdjustment(viewer: UserSnapshot, candidate: UserSnapshot, 
           : candAge === myAge;
     adjustment += fits ? 0.03 : -0.03;
   }
-  if (p.heightMin != null || p.heightMax != null) {
-    const inRange =
-      (p.heightMin == null || cand.heightCm >= p.heightMin) &&
-      (p.heightMax == null || cand.heightCm <= p.heightMax);
+  const hMin = finiteOrNull(p.heightMin);
+  const hMax = finiteOrNull(p.heightMax);
+  if (hMin != null || hMax != null) {
+    const inRange = (hMin == null || cand.heightCm >= hMin) && (hMax == null || cand.heightCm <= hMax);
     adjustment += inRange ? 0.03 : -0.05;
   }
   if (p.regions.length > 0) {
@@ -269,33 +302,32 @@ function preferenceFitAdjustment(viewer: UserSnapshot, candidate: UserSnapshot, 
 // 방향 점수 + 종합
 // ---------------------------------------------------------------------------
 
-export function directionalScore(
-  viewer: UserSnapshot,
-  candidate: UserSnapshot,
-  nowYear: number,
-): { score: number; dimensions: DimensionScores } {
-  const dimensions: DimensionScores = {
-    appearance: appearanceScore(viewer, candidate),
-    personality: personalityScore(viewer, candidate),
-    values: valuesScore(viewer, candidate),
-    lifestyle: lifestyleScore(viewer, candidate),
-    relationship: relationshipScore(viewer, candidate),
-  };
+export function directionalScore(viewer: UserSnapshot, candidate: UserSnapshot, nowYear: number): DirectionalScore {
+  const dimensions = {} as DimensionScores;
+  const available: ActiveDimension[] = [];
+  for (const dim of ACTIVE_DIMENSIONS) {
+    const raw = DIMENSION_FNS[dim](viewer, candidate);
+    const v = raw != null && Number.isFinite(raw) ? clamp01(raw) : null;
+    dimensions[dim] = v;
+    if (v != null) available.push(dim);
+  }
 
-  // viewer 의 중요도(1~5)를 가중치로 정규화
-  const imp = viewer.importance;
-  const weights: [number, number][] = [
-    [dimensions.appearance ?? 0.5, imp.appearance],
-    [dimensions.personality, imp.personality],
-    [dimensions.values, imp.values],
-    [dimensions.lifestyle, imp.lifestyle],
-    [dimensions.relationship, imp.relationship],
-  ];
-  const wsum = weights.reduce((s, [, w]) => s + w, 0);
-  const base = weights.reduce((s, [d, w]) => s + d * w, 0) / (wsum || 1);
+  // 유효 차원만으로 재정규화: base = Σ(score×importance) / Σ(importance)
+  const imp = sanitizeImportance(viewer.importance);
+  let sum = 0;
+  let wsum = 0;
+  for (const dim of available) {
+    sum += (dimensions[dim] as number) * imp[dim];
+    wsum += imp[dim];
+  }
+  const base = wsum > 0 ? sum / wsum : null;
+  const adjustment = preferenceFitAdjustment(viewer, candidate, nowYear);
+  const score = base == null ? null : clamp01(base + adjustment);
+  return { base, adjustment, score, dimensions, availableDimensions: available };
+}
 
-  const score = clamp01(base + preferenceFitAdjustment(viewer, candidate, nowYear));
-  return { score, dimensions };
+function averageDimension(a: number | null, b: number | null): number | null {
+  return average([a, b]);
 }
 
 export function computeMatch(a: UserSnapshot, b: UserSnapshot, nowYear: number): MatchResult {
@@ -323,102 +355,126 @@ export function computeMatch(a: UserSnapshot, b: UserSnapshot, nowYear: number):
   const aToB = directionalScore(a, b, nowYear);
   const bToA = directionalScore(b, a, nowYear);
 
-  const dimensions: DimensionScores = {
-    appearance: average([aToB.dimensions.appearance ?? null, bToA.dimensions.appearance ?? null]) ?? undefined,
-    personality: (aToB.dimensions.personality + bToA.dimensions.personality) / 2,
-    values: (aToB.dimensions.values + bToA.dimensions.values) / 2,
-    lifestyle: (aToB.dimensions.lifestyle + bToA.dimensions.lifestyle) / 2,
-    relationship: (aToB.dimensions.relationship + bToA.dimensions.relationship) / 2,
-  };
+  const dimensions = {} as DimensionScores;
+  for (const dim of ACTIVE_DIMENSIONS) {
+    dimensions[dim] = averageDimension(aToB.dimensions[dim], bToA.dimensions[dim]);
+  }
 
-  const score: MatchScore = {
-    total: harmonicMean(aToB.score, bToA.score),
-    aToB: aToB.score,
-    bToA: bToA.score,
-    dimensions,
-  };
+  const scored = aToB.score != null && bToA.score != null;
+  const score: MatchScore = scored
+    ? {
+        basis: 'scored',
+        total: harmonicMean(aToB.score as number, bToA.score as number),
+        aToB: aToB.score,
+        bToA: bToA.score,
+        dimensions,
+      }
+    : { basis: 'conditions_only', total: null, aToB: aToB.score, bToA: bToA.score, dimensions };
 
-  return { eligible: true, failedDealbreakers: [], score, reasons: buildReasons(a, b, dimensions) };
+  return { eligible: true, failedDealbreakers: [], score, reasons: buildReasons(a, b) };
 }
 
 // ---------------------------------------------------------------------------
-// 카드 설명 문구 — 원시 점수 대신 사람이 읽을 이유를 보여준다
+// 카드 설명 문구 — 공개된 사실만. 비공개 응답·점수 기반 문구 없음. 근거 없으면 [].
 // ---------------------------------------------------------------------------
 
-// 실제 응답 데이터(설문 유사도)가 있을 때만 붙는 문구. "잘 맞는다/궁합" 처럼 결과를 보장하는 표현은 쓰지 않는다.
-// 외모 차원은 MVP 에서 문구를 만들지 않는다 (#39 — 외모 추천 없음).
-const DIMENSION_PHRASES: Record<string, string> = {
-  personality: '성격 질문에 비슷하게 답했어요',
-  values: '연애에서 중요하게 생각하는 부분이 비슷해요',
-  lifestyle: '생활 패턴 질문에 비슷하게 답했어요',
-  relationship: '연애 스타일 질문에 비슷하게 답했어요',
+const PROMPT_SHARED_PHRASES: Record<string, string> = {
+  day_off: '쉬는 날 보내는 방식이 겹쳐요',
+  together: '함께 해보고 싶은 일이 겹쳐요',
+  important: '연애에서 중요하게 생각하는 것이 같아요',
 };
 
-/** 카드 설명 문구 — 확인된 공통점만 적는다. 근거가 없으면 빈 배열 (지어내지 않는다). */
-export function buildReasons(a: UserSnapshot, b: UserSnapshot, dimensions: DimensionScores): string[] {
+/**
+ * 공개 사실 기반 이유 (최대 3개):
+ *   공통 취미 · 같은 지역 코드 선택 · 같은 공개 연애 목적 · 공개 질문의 공통 선택지(허용 코드만) · 겹치는 자기 키워드
+ * 문구는 데이터 수준을 넘지 않는다 ("가깝다", "잘 맞는다", "궁합" 표현 없음).
+ * 공개 프로필이 같으면 비공개 응답이 달라도 결과가 같다.
+ */
+export function buildReasons(a: UserSnapshot, b: UserSnapshot): string[] {
   const reasons: string[] = [];
 
-  const ranked = (Object.entries(DIMENSION_PHRASES) as [keyof DimensionScores, string][])
-    .map(([key, phrase]) => ({ key, phrase, value: (dimensions[key] as number | undefined) ?? 0 }))
-    .sort((x, y) => y.value - x.value);
-  for (const item of ranked.slice(0, 2)) {
-    if (item.value >= 0.55) reasons.push(item.phrase);
-  }
-
   const sharedHobbies = a.profile.hobbies.filter((h) => b.profile.hobbies.includes(h));
-  if (sharedHobbies.length > 0) {
-    reasons.push('공통 관심사가 있어요');
-  }
-  if (a.profile.regionCode === b.profile.regionCode) {
-    reasons.push('가까운 지역에 살고 있어요');
-  }
+  if (sharedHobbies.length > 0) reasons.push('공통 관심사가 있어요');
+
+  if (a.profile.regionCode === b.profile.regionCode) reasons.push('같은 지역을 선택했어요');
+
   if (a.profile.relationshipGoal && a.profile.relationshipGoal === b.profile.relationshipGoal) {
     reasons.push('연애 목적이 같아요');
   }
+
+  const aAnswers = (a.profile.publicAnswers ?? {}) as Record<string, unknown>;
+  const bAnswers = (b.profile.publicAnswers ?? {}) as Record<string, unknown>;
+  for (const prompt of PUBLIC_PROMPTS) {
+    const va = pickAllowedValues(prompt, aAnswers[prompt.id]);
+    const vb = pickAllowedValues(prompt, bAnswers[prompt.id]);
+    if (va.length > 0 && va.some((v) => vb.includes(v))) {
+      const phrase = PROMPT_SHARED_PHRASES[prompt.id];
+      if (phrase) reasons.push(phrase);
+    }
+  }
+
+  const sharedKeywords = a.profile.personalityKeywords.filter((k) => b.profile.personalityKeywords.includes(k));
+  if (sharedKeywords.length > 0) reasons.push('스스로 고른 키워드가 겹쳐요');
+
   return reasons.slice(0, 3);
 }
 
 // ---------------------------------------------------------------------------
-// 추천 전략 — Exploit / Explore / Fallback (§30)
+// 추천 전략 라벨 — DB check 제약(0003)·analytics 계약 호환용. 탐색 정책·정확도를 뜻하지 않는다.
 // ---------------------------------------------------------------------------
 
-export function pickStrategy(total: number, rank: number): RecommendationStrategy {
-  if (total >= 0.62 && rank === 0) return 'high_confidence';
-  if (total >= 0.5) return 'exploration';
+export function pickStrategy(score: MatchScore | null, rank: number): RecommendationStrategy {
+  if (!score || score.basis !== 'scored' || score.total == null) return 'fallback';
+  if (score.total >= 0.62 && rank === 0) return 'high_confidence';
+  if (score.total >= 0.5) return 'exploration';
   return 'fallback';
 }
 
 // ---------------------------------------------------------------------------
-// 외모 취향/스타일 벡터 헬퍼 — MVP(#39) 에서는 입력이 생성되지 않아 항상 null 이다.
-// 기존 데이터 호환용으로만 유지. 외모 차원 자체를 계산에서 제외하는 작업은 #40.
+// 결정적 tie-break — 외모·인기 점수 없이 (viewer, KST 날짜, 후보 id) 해시로 순서를 고정한다.
 // ---------------------------------------------------------------------------
 
-/** A/B 테스트 선택 기록 → 취향 벡터 (선택 자산 벡터의 평균) */
-export function preferenceVectorFromChoices(chosen: StyleVector[]): StyleVector | null {
-  if (chosen.length === 0) return null;
-  const sum: StyleVector = {};
-  for (const vec of chosen) {
-    for (const [k, v] of Object.entries(vec)) {
-      sum[k] = (sum[k] ?? 0) + v;
-    }
+/** FNV-1a 32bit — 재현 가능한 순서용 (암호학적 용도 아님) */
+export function tieBreakKey(viewerId: string, dateKST: string, candidateId: string): number {
+  const s = `${viewerId}|${dateKST}|${candidateId}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
   }
-  const out: StyleVector = {};
-  for (const [k, v] of Object.entries(sum)) {
-    out[k] = v / chosen.length;
-  }
-  return out;
+  return h;
+}
+
+export interface RankedCandidate<T> {
+  id: string;
+  result: MatchResult;
+  payload: T;
 }
 
 /**
- * 사용자별 결정적 모의 스타일 벡터.
- * 얼굴 임베딩 모델 도입 전까지 face_verifications.feature_vector 를 시드로 사용한다.
+ * 후보 정렬 — scored 후보(총점 내림차순) → conditions_only 후보. 같은 총점·같은 basis 는 tieBreakKey 오름차순.
+ * 입력 순서에 의존하지 않는다 (동점 후보의 순서를 바꿔도 결과가 같다).
  */
-export function styleVectorFromFeature(feature: number[] | null): StyleVector | null {
-  if (!feature || feature.length < 4) return null;
-  return {
-    soft: feature[0],
-    warm: feature[1],
-    bold: feature[2],
-    playful: feature[3],
-  };
+export function rankCandidates<T>(
+  candidates: RankedCandidate<T>[],
+  viewerId: string,
+  dateKST: string,
+): RankedCandidate<T>[] {
+  const keyOf = (c: RankedCandidate<T>) => tieBreakKey(viewerId, dateKST, c.id);
+  return [...candidates]
+    .filter((c) => c.result.eligible && c.result.score)
+    .sort((x, y) => {
+      const sx = x.result.score!;
+      const sy = y.result.score!;
+      const bx = sx.basis === 'scored' ? 0 : 1;
+      const by = sy.basis === 'scored' ? 0 : 1;
+      if (bx !== by) return bx - by;
+      const tx = sx.total ?? 0;
+      const ty = sy.total ?? 0;
+      if (Number.isFinite(tx) && Number.isFinite(ty) && tx !== ty) return ty - tx;
+      const kx = keyOf(x);
+      const ky = keyOf(y);
+      if (kx !== ky) return kx - ky;
+      return x.id < y.id ? -1 : x.id > y.id ? 1 : 0;
+    });
 }

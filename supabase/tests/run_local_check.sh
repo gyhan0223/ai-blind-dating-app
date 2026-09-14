@@ -51,4 +51,13 @@ if [[ "${WITH_FACE_CONCURRENCY_TESTS:-1}" == "1" && -f face_liveness_concurrency
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash face_liveness_concurrency_test.sh
 fi
 
+if [[ "${WITH_RECOMMENDATION_DB_TEST:-1}" == "1" && -f recommendation_db_test.mjs ]]; then
+  if command -v node >/dev/null 2>&1; then
+    echo "running recommendation db test (#40 — DB → snapshot → engine → card, 외모 데이터 없이)"
+    PGDATABASE="$DB_NAME" node --experimental-strip-types recommendation_db_test.mjs
+  else
+    echo "SKIP recommendation db test: node not found"
+  fi
+fi
+
 echo "OK: schema check passed on $DB_NAME"

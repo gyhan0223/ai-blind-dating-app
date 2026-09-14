@@ -14,6 +14,10 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#39) 얼굴 인증 화면 문구가 "실제 사람 확인" 목적만 설명하고 이상형 추천처럼 설명하지 않는다 ("서로의 얼굴은 AI만 먼저 봅니다" 없음)
 - [ ] (#39/#29) 내 정보 화면에 **Plus/결제/플랜 표시가 없다**. 앱 어디에도 결제 라우트·"결제 준비 중" 문구가 없다
 - [ ] (#39) 추천 카드에 고른 항목으로 만든 소개 문장(연애 목적·공개 질문 선택)만 보이고, 가치관 설문·민감 응답은 카드/API 응답에 없다
+- [ ] (#40) `daily-recommendation`·`icebreaker` 가 이 저장소의 최신 코드로 재배포되어 있다 (외모 데이터 미조회·인증 플래그 후보 필터·안전 조회 실패 시 500)
+- [ ] (#40) 배포 후 새로 생성된 `recommendations.dimensions` 에 `appearance` 키가 없고 `basis` 가 있다:
+      `select count(*) from recommendations where created_at > '<배포 시각>' and dimensions ? 'appearance'` → 0
+- [ ] (#40) 인증 미완료(`face_verified=false` 등) 사용자로 daily-recommendation 을 호출하면 403 `not_verified` 다
 - [ ] (#39) 번들 grep: `외모 취향|이상형|AI만 먼저|본심 Plus|결제는 준비` → 0건 (아래 secret grep 과 함께 확인)
 - [ ] production 빌드 환경(EAS 등)에 `EXPO_PUBLIC_DEV_LOGIN` 이 설정되어 있지 **않다**
       (설정돼 있어도 release 빌드에선 무효지만, 아예 제거한다)
@@ -111,6 +115,7 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       `cd apps/admin && npx tsc --noEmit`
       `cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.mjs`
       `cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs` (#39 — 외모 데이터 없는 완료·인증 미완료 홈 차단)
-      `cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts` (#39 — 카드 공개 필드 allowlist·근거 없는 추천 이유 없음)
+      `cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts` (#39/#40 — 외모 제외·재정규화·안전 필터·공개 이유·tie-break, 실패 시 exit 1)
+      `bash supabase/tests/run_local_check.sh` 에 포함된 `recommendation_db_test.mjs` (#40 — 실제 DB 위에서 외모 데이터 없이 추천 생성)
 - [ ] 마이그레이션 `0015_no_appearance_onboarding.sql` 이 production DB 에 적용되어 있다 (`profiles.relationship_goal/public_answers(/intro)` 컬럼, `users_guard_onboarding_completion` 트리거)
       — **앱 배포보다 먼저** 적용한다 (새 앱은 이 컬럼에 저장한다)
