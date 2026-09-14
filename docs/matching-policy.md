@@ -85,16 +85,22 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 ## 7. 후보 순회·동점·하루 한 명
 
 - 후보는 `profiles.user_id` 오름차순으로 100명씩 페이지를 돌며, 제외 목록을 뺀 뒤 계정 조건을 한 번 더 확인하고 양방향 계산한다.
-  끝까지(최대 500명 평가) 훑은 뒤에야 "후보 없음" 으로 판단한다 — 앞의 N명만 보고 오판하지 않는다. 그 이상 규모의 풀 정책은 #23.
+  끝까지(최대 500명 평가) 훑은 뒤에야 "후보 없음" 으로 판단한다 — 앞의 N명만 보고 오판하지 않는다.
+  상한에 걸리면 `capReached=true` 로 응답·`recommendation_runs.cap_reached` 에 기록된다 (#23 — 풀이 500명을 넘는 규모의 정렬·샤딩은 이 값이 실제로 나타날 때 정한다).
 - 순위: `scored`(총점 내림차순) → `conditions_only`. 같은 총점·같은 basis 는 `FNV-1a(요청자 id | KST 날짜 | 후보 id)` 오름차순.
   입력 순서와 무관하며, 외모·인기 점수는 쓰지 않는다. 날짜가 바뀌면 순서가 바뀔 수 있어 특정 후보가 영구 고정 우선순위를 갖지 않는다.
 - 하루 1명. Plus +1 은 `PLUS_EXTRA_RECOMMENDATION_ENABLED=false` 로 비활성 (#29).
 - 후보가 없으면 필수 조건을 완화하지 않는다. 신규끼리 배정 금지·첫 만남 외모 우대(#38)는 없다.
-- 재추천 제외는 "과거에 추천된 적 있는 상대 전체 기간" 이다. 재추천 주기·대기 정책은 #23.
+- 재추천 주기 (#23, `RECOMMENDATION_COOLDOWN_DAYS = 30`): 과거 추천 상대 중 `pending`/`accepted` 는 영구 제외(좋아요·매치 이력도 영구 제외),
+  `skipped`/`expired` 는 30일이 지나면 다시 후보가 된다 — 좁은 cohort 에서 풀이 마르지 않게 한다. 0017 이 `unique(user_id, candidate_id)` 를
+  `(user_id, candidate_id, for_date)` + "같은 쌍의 pending 은 하나" 로 바꿨다.
 - `strategy` 값(`high_confidence`/`exploration`/`fallback`)은 DB check 제약·analytics 호환용 라벨이다:
   scored 총점 ≥0.62 인 1순위 / ≥0.5 / 그 외(conditions_only 포함). 탐색 정책이나 정확도를 뜻하지 않는다.
-- **알려진 한계 (#22)**: 같은 사용자의 동시 요청이 각각 "오늘 추천 없음" 을 보고 서로 다른 후보를 저장하면 하루 한 명이 깨질 수 있다.
-  `unique(user_id, candidate_id)` 는 같은 후보 중복만 막는다. 스케줄러·멱등 키는 #22 에서 처리한다.
+- **멱등성 (#22)**: `recommendation_run_claim(user_id, KST 날짜)` 가 (사용자, 날짜) 당 한 실행만 코어를 돌린다 (`recommendation_runs` 행 잠금 + lease 90초).
+  동시 요청은 `busy` 를 받고 잠시 기다렸다가 저장된 오늘 추천을 읽는다. 실행이 죽으면 lease 만료 후 다른 요청이 다시 맡는다.
+  코어의 insert 가 충돌해도 빈 응답 대신 오늘 저장된 행을 다시 읽어 돌려준다. 검증: `recommendation_runs_tests.sql` · `recommendation_claim_concurrency_test.sh` · selftest.
+- **후보 부족 재시도 주기 (#23)**: `exhausted` 로 끝난 뒤 1시간 안의 재요청은 후보를 다시 훑지 않고 같은 답을 돌려준다(`skip`). 앱은
+  "오늘은 소개할 분이 없어요 — 새로운 분이 가입하거나 시간이 지나면 다시 찾아본다, 조건을 임의로 넓히지 않는다" 를 보여준다. 배치도 같은 규칙으로 건너뛴다.
 
 ## 8. 추천 이유는 공개된 사실만
 
@@ -119,7 +125,29 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 - pending 추천: 보존하되 반환 시 6절 재검증을 거친다. accepted/skipped/매치·채팅·좋아요: 보존.
 - 새 계산은 배포 시점 이후 생성되는 추천부터 적용된다. 과거 결과까지 외모와 무관했다고 주장하지 않는다.
 
-## 10. 검증
+## 10. 스케줄러 (#22) — `daily-recommendation-batch`
+
+- service role 로만 호출되는 Edge Function. `recommendation_batch_targets(오늘)` 로 "자격 있고 오늘 추천이 없고 진행 중/최근 exhausted 가 아닌" 사용자를
+  id 순으로 최대 `max_users`(기본 100) 명 읽어 사용자별 claim → 코어 → finish 를 돈다. `next_after` 를 돌려주고 다음 호출이 이어간다.
+  같은 날 몇 번을 호출해도 새 행이 생기지 않는다. 앱의 `daily-recommendation` 과 같은 잠금을 쓰므로 둘이 겹쳐도 하루 한 명이다.
+- 스케줄 등록 예 (Supabase pg_cron + pg_net, service role key 는 Vault 에 두고 SQL 에 직접 쓰지 않는다):
+
+  ```sql
+  -- 매일 KST 09:00~09:45 15분 간격 = UTC 00:00~00:45 (한 번에 100명씩, 4회면 400명. 더 크면 간격/횟수 조정)
+  select cron.schedule('daily-recommendation-batch', '*/15 0 * * *', $$
+    select net.http_post(
+      url := 'https://<project-ref>.supabase.co/functions/v1/daily-recommendation-batch',
+      headers := jsonb_build_object('Content-Type', 'application/json',
+                                    'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'service_role_key')),
+      body := '{"max_users": 100}'::jsonb);
+  $$);
+  select cron.schedule('recommendation-runs-prune', '0 18 * * *', $$ select public.recommendation_runs_prune(interval '30 days') $$);
+  ```
+- 배치가 아직 안 돌았어도 앱을 열면 `daily-recommendation` 이 바로 생성한다. 배치는 "아침에 미리 준비" 용이다 (Push 는 #17).
+- 배포: `0017_recommendation_runs.sql` → `supabase functions deploy daily-recommendation daily-recommendation-batch` → cron 등록.
+  0017 은 `recommendations` 의 unique 제약을 바꾸므로 seed 의 `on conflict (user_id, candidate_id, for_date)` 와 같이 배포한다.
+
+## 11. 검증
 
 - `supabase/functions/_shared/matching/selftest.ts` — 엔진·코어 단위 (in-memory DataSource). 실패 시 exit 1.
 - `supabase/tests/recommendation_db_test.mjs` — 실제 Postgres(마이그레이션+seed) 위에서 DB → 스냅샷 → 엔진 → 저장 → 카드 반환.

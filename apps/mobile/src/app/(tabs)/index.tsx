@@ -185,15 +185,31 @@ export default function TodayScreen() {
         </>
       )}
 
-      {!isLoading && !isError && !pending && !matchedNickname && (
+      {!isLoading && !isError && !pending && !matchedNickname && data?.inProgress && (
+        <Card>
+          <Text variant="heading" style={{ marginBottom: spacing.sm }}>오늘 소개할 분을 준비하고 있어요</Text>
+          <Text variant="body" color={colors.sub} style={{ marginBottom: spacing.md }}>
+            잠시 후 다시 확인해 주세요.
+          </Text>
+          <Button kind="secondary" title="다시 확인" onPress={() => refetch()} />
+        </Card>
+      )}
+
+      {!isLoading && !isError && !pending && !matchedNickname && !data?.inProgress && (
         <Card>
           <Text variant="heading" style={{ marginBottom: spacing.sm }}>
-            {acceptedToday.length > 0 ? '오늘의 소개를 확인했어요' : '오늘 소개할 수 있는 분이 없어요'}
+            {acceptedToday.length > 0
+              ? '오늘의 소개를 확인했어요'
+              : data?.exhausted
+                ? '오늘은 소개할 분이 없어요'
+                : '오늘의 소개를 확인했어요'}
           </Text>
           <Text variant="body" color={colors.sub}>
             {acceptedToday.length > 0
               ? '상대도 알아가고 싶다고 하면 대화가 열려요.\n내일 새로운 한 분을 소개해 드릴게요.'
-              : '조건에 맞는 분이 아직 없어요.\n내일 다시 확인해 주세요.'}
+              : data?.exhausted
+                ? '지금은 조건에 맞는 분이 없어요. 새로운 분이 가입하거나 시간이 지나면 다시 찾아볼게요.\n하루 한 분만 소개하는 서비스라 조건을 임의로 넓히지는 않아요.'
+                : '내일 새로운 한 분을 소개해 드릴게요.'}
           </Text>
         </Card>
       )}

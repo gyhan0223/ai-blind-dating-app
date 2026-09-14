@@ -185,7 +185,7 @@ begin
      '{"nickname":"서연","age":31,"region_code":"seoul","height_cm":163,"job_group":"creative","smoking":"none","drinking":"sometimes","hobbies":["travel","cafe"],"personality_keywords":["positive","curious"],"identity_verified":true,"face_verified":true,"reasons":["생활 패턴이 비슷해요","공통 관심사가 있어요"]}'),
     (f1, m1, current_date - 1, 'high_confidence', 'accepted',
      '{"nickname":"지훈","age":33,"region_code":"seoul","height_cm":178,"job_group":"it","smoking":"none","drinking":"sometimes","hobbies":["travel","sports"],"personality_keywords":["calm","honest"],"identity_verified":true,"face_verified":true,"reasons":["연애에서 중요하게 생각하는 부분이 비슷해요","공통 관심사가 있어요"]}')
-  on conflict (user_id, candidate_id) do nothing;
+  on conflict (user_id, candidate_id, for_date) do nothing;
 
   -- 상호 좋아요 → handle_mutual_like 트리거가 매치/대화방/이벤트 생성
   insert into public.likes (from_user_id, to_user_id) values (f1, m1) on conflict do nothing;
@@ -208,7 +208,7 @@ begin
   insert into public.recommendations (user_id, candidate_id, for_date, strategy, status, card) values
     (m1, f2, current_date, 'high_confidence', 'pending',
      '{"nickname":"지우","age":30,"region_code":"seoul","height_cm":158,"job_group":"education","smoking":"none","drinking":"none","hobbies":["reading","pets"],"personality_keywords":["calm","detailed"],"identity_verified":true,"face_verified":true,"reasons":["성격의 결이 잘 맞아요","가까운 지역에 살고 있어요"]}')
-  on conflict (user_id, candidate_id) do nothing;
+  on conflict (user_id, candidate_id, for_date) do nothing;
 end;
 $$;
 

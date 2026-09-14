@@ -18,7 +18,8 @@ import {
   tieBreakKey,
 } from './MatchingEngine.ts';
 import { buildPublicAnswerCards, composeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
-import { accountEligible, CARD_FIELDS, runDailyRecommendation } from './recommend.ts';
+import { accountEligible, addDays, CARD_FIELDS, excludedByRecommendationHistory, MAX_CANDIDATES_SCANNED, RECOMMENDATION_COOLDOWN_DAYS, runDailyRecommendation } from './recommend.ts';
+import { runDailyRecommendationWithClaim, type ClaimClient } from './runWithClaim.ts';
 import { loadSnapshots } from './snapshot.ts';
 import { buildStarterCache, GENERAL_QUESTIONS, generateStarterQuestions, parseStarterCache, STARTER_MAX, STARTER_MIN } from './starterQuestions.ts';
 import type { QuestionnaireResponse, UserSnapshot } from './types.ts';
@@ -425,7 +426,7 @@ function memoryDataSource(f: Fixture): DataSource & { inserted: NewRecommendatio
     async reportPairs(userId) { fail('reports'); return f.reports.filter((r) => r.reporter_id === userId || r.reported_id === userId); },
     async likedUserIds(userId) { fail('likes'); return f.likes.filter((l) => l.from === userId).map((l) => l.to); },
     async matchedUserIds(userId) { fail('matches'); return f.matches.filter((m) => m.a === userId || m.b === userId).map((m) => (m.a === userId ? m.b : m.a)); },
-    async pastRecommendationCandidateIds(userId) { fail('recs'); return f.recs.filter((r) => r.user_id === userId).map((r) => r.candidate_id); },
+    async pastRecommendations(userId) { fail('recs'); return f.recs.filter((r) => r.user_id === userId).map((r) => ({ candidate_id: r.candidate_id, status: r.status, for_date: r.for_date })); },
     async recommendationsForDate(userId, forDate) { fail('recs'); return f.recs.filter((r) => r.user_id === userId && r.for_date === forDate); },
     async candidateIdsPage(gender, seekingGender, offset, limit) {
       fail('candidates');
@@ -572,6 +573,103 @@ await (async () => {
   const f11r = { ...f11, profiles: [...f11.profiles].reverse(), users: [...f11.users].reverse(), recs: [] };
   const pick2 = await runDailyRecommendation(memoryDataSource(f11r), RUN);
   check('동점 후보 입력 순서를 바꿔도 같은 후보 선택', pick1.kind === 'ok' && pick2.kind === 'ok' && pick1.recommendations[0].candidate_id === pick2.recommendations[0].candidate_id);
+
+  // ===========================================================================
+  // #23 재추천 주기 · 후보 상한 관측 / #22 실행권(claim) 멱등성
+  // ===========================================================================
+  check('addDays', addDays('2026-09-14', -30) === '2026-08-15' && addDays('2026-03-01', -1) === '2026-02-28');
+  {
+    const past = [
+      { candidate_id: 'p-pending', status: 'pending', for_date: '2026-01-01' },
+      { candidate_id: 'p-accepted', status: 'accepted', for_date: '2026-01-01' },
+      { candidate_id: 'p-skip-old', status: 'skipped', for_date: addDays('2026-09-14', -RECOMMENDATION_COOLDOWN_DAYS - 1) },
+      { candidate_id: 'p-skip-edge', status: 'skipped', for_date: addDays('2026-09-14', -RECOMMENDATION_COOLDOWN_DAYS) },
+      { candidate_id: 'p-skip-recent', status: 'skipped', for_date: '2026-09-10' },
+      { candidate_id: 'p-expired-old', status: 'expired', for_date: '2026-01-01' },
+    ];
+    const ex = excludedByRecommendationHistory(past, '2026-09-14');
+    check('pending/accepted 는 영구 제외', ex.has('p-pending') && ex.has('p-accepted'));
+    check('최근 skipped 는 제외, 30일 지난 skipped/expired 는 다시 후보', ex.has('p-skip-recent') && ex.has('p-skip-edge') && !ex.has('p-skip-old') && !ex.has('p-expired-old'));
+  }
+  {
+    // 31일 전에 스킵한 f1 이 다시 후보가 된다 / 10일 전 스킵은 여전히 제외
+    const f = baseFixture();
+    f.users = [account(ME), account('f1')];
+    f.profiles = [profileRow(ME, 'male'), profileRow('f1', 'female')];
+    f.recs = [{ id: 'old', status: 'skipped', strategy: 'high_confidence', card: {}, candidate_id: 'f1', user_id: ME, for_date: addDays(RUN.today, -31) }];
+    const o = await runDailyRecommendation(memoryDataSource(f), RUN);
+    check('31일 전 스킵한 상대는 다시 추천된다', o.kind === 'ok' && o.recommendations.length === 1 && o.recommendations[0].candidate_id === 'f1');
+    const f2 = { ...f, recs: [{ ...f.recs[0], for_date: addDays(RUN.today, -10) }] };
+    const o2 = await runDailyRecommendation(memoryDataSource(f2), RUN);
+    check('10일 전 스킵한 상대는 아직 제외 → exhausted', o2.kind === 'ok' && o2.exhausted);
+    check('exhausted 결과에 capReached=false', o2.kind === 'ok' && o2.capReached === false);
+  }
+  {
+    // 상한 도달 관측: 후보가 MAX+50명이고 모두 필수 조건 불일치 → 500명만 보고 capReached=true
+    const fc = baseFixture();
+    fc.users = [account(ME)];
+    fc.profiles = [profileRow(ME, 'male', { smoking: 'regular' })];
+    for (let i = 0; i < MAX_CANDIDATES_SCANNED + 50; i += 1) {
+      const id = `c${String(i).padStart(4, '0')}`;
+      fc.users.push(account(id));
+      fc.profiles.push(profileRow(id, 'female'));
+    }
+    const dsc = memoryDataSource(fc);
+    dsc.dealbreakers = async (ids) => ids.filter((i) => i !== ME).map((i) => ({ user_id: i, kind: 'smoking', value: { allow: false } }));
+    const oc = await runDailyRecommendation(dsc, RUN);
+    check('상한(500)에 걸리면 capReached=true 로 알린다', oc.kind === 'ok' && oc.exhausted && oc.capReached && oc.scanned === MAX_CANDIDATES_SCANNED);
+  }
+  {
+    // insert 충돌(다른 실행이 먼저 저장) → 오늘 저장된 행을 다시 읽어 돌려준다
+    const fr = baseFixture();
+    const dsr = memoryDataSource(fr);
+    const origInsert = dsr.insertRecommendation;
+    dsr.insertRecommendation = async (row) => {
+      // 경쟁 실행이 먼저 저장한 상황을 흉내 낸다
+      await origInsert({ ...row, candidate_id: 'f1' });
+      throw new Error('duplicate key');
+    };
+    const orr = await runDailyRecommendation(dsr, RUN);
+    check('insert 충돌 시 빈 응답 대신 오늘 저장된 추천을 돌려준다', orr.kind === 'ok' && orr.recommendations.length === 1 && orr.recommendations[0].candidate_id === 'f1');
+  }
+  {
+    // claim 래퍼: claimed → 실행 + finish / busy → 대기 후 저장된 행 / skip(exhausted) → 재훑기 없음
+    const calls: string[] = [];
+    const mk = (script: ('claimed' | 'busy' | 'skip')[], result?: string): ClaimClient => ({
+      async claim() { const c = script.shift() ?? 'busy'; calls.push(`claim:${c}`); return { claim: c, result }; },
+      async finish(_u, _d, r, scanned, cap) { calls.push(`finish:${r}:${scanned}:${cap}`); },
+    });
+    const f = baseFixture();
+    const ds = memoryDataSource(f);
+    const o1 = await runDailyRecommendationWithClaim(ds, mk(['claimed']), RUN, { retries: 2, waitMs: 1 });
+    check('claimed → 코어 실행 → finish(ok)', o1.kind === 'ok' && o1.recommendations.length === 1 && calls.join() === 'claim:claimed,finish:ok:3:false');
+
+    calls.length = 0;
+    const o2 = await runDailyRecommendationWithClaim(ds, mk(['busy', 'busy', 'busy']), RUN, { retries: 2, waitMs: 1 });
+    check('끝까지 busy → 저장된 오늘 추천을 읽는다 (새 생성 없음)', o2.kind === 'ok' && o2.recommendations.length === 1 && ds.inserted.length === 1 && calls.filter((c) => c.startsWith('finish')).length === 0);
+
+    calls.length = 0;
+    const fe = baseFixture();
+    fe.users = [account(ME)];
+    fe.profiles = [profileRow(ME, 'male')];
+    const dse = memoryDataSource(fe);
+    const o3 = await runDailyRecommendationWithClaim(dse, mk(['skip'], 'exhausted'), RUN, { retries: 0 });
+    check('skip(exhausted) → 후보를 다시 훑지 않고 exhausted', o3.kind === 'ok' && o3.exhausted && !dse.touched.has('profiles') && calls.join() === 'claim:skip');
+
+    calls.length = 0;
+    const o4 = await runDailyRecommendationWithClaim(dse, mk(['claimed']), RUN, { retries: 0 });
+    check('claimed + 후보 없음 → finish(exhausted)', o4.kind === 'ok' && o4.exhausted && calls[1] === 'finish:exhausted:0:false');
+
+    calls.length = 0;
+    const dsx = memoryDataSource(baseFixture());
+    dsx.userAccounts = async () => { throw new Error('boom'); };
+    const o5 = await runDailyRecommendationWithClaim(dsx, mk(['claimed']), RUN, { retries: 0 });
+    check('코어가 lookup_failed 면 finish(lookup_failed) 로 lease 를 닫는다', o5.kind === 'lookup_failed' && calls[1] === 'finish:lookup_failed:0:false');
+
+    calls.length = 0;
+    const o6 = await runDailyRecommendationWithClaim(memoryDataSource(baseFixture()), mk(['busy']), RUN, { retries: 0 });
+    check('busy + 저장된 행 없음 → inProgress', o6.kind === 'ok' && 'inProgress' in o6 && o6.inProgress === true && o6.recommendations.length === 0);
+  }
 
   // loadSnapshots: 얼굴 벡터·외모 이벤트 없이 스냅샷 생성
   const snaps = await loadSnapshots(memoryDataSource(baseFixture()), [ME]);

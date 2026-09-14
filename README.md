@@ -57,7 +57,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0016 순서대로 — 0015/0016 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
+# 마이그레이션 적용 (0001 → 0017 순서대로 — 0015/0016/0017 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -79,6 +79,7 @@ supabase functions deploy start-face-liveness           # 실제 얼굴 라이�
 supabase functions deploy didit-webhook --no-verify-jwt # Didit V3 결과 웹훅 (서명 검증) — 반드시 --no-verify-jwt
 supabase functions deploy admin-face-review             # 관리자 얼굴 인증 검토 (service role 전용 — 관리자 웹이 호출)
 supabase functions deploy daily-recommendation
+supabase functions deploy daily-recommendation-batch  # 스케줄러용 (service role 전용) — pg_cron 등록은 docs/matching-policy.md 10절
 supabase functions deploy icebreaker
 
 # SMS OTP 실발송 (Issue #4) — Supabase Auth "Send SMS" HTTP Hook → SOLAPI.
@@ -244,7 +245,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
   비공개 응답만 바꾸면 내부 순위는 달라질 수 있어도 이유는 같다. 근거가 없으면 비운다.
 - `strategy` 는 DB/analytics 호환 라벨이며 탐색 정책·정확도를 뜻하지 않는다. Plus +1 은 플래그로 비활성 (#29).
 - 안전 조회 실패(500 `lookup_failed`)와 후보 부족(200 `exhausted`)은 다른 결과다. 후보가 없어도 조건을 완화하지 않는다.
-- 하루 한 명의 동시 요청 멱등성은 #22, 재추천 주기·후보 부족 대기 정책은 #23.
+- 하루 한 명의 동시 요청 멱등성은 `recommendation_run_claim`(#22, `docs/matching-policy.md` 7·10절), skipped/expired 상대의 30일 재추천 주기와 후보 부족 시 1시간 재시도 주기는 #23 (같은 문서).
 
 ## 온보딩 순서 (#39)
 
@@ -363,7 +364,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 
 ## 다음 개발 우선순위 (#30)
 
-1. #22 하루 한 명 스케줄러·멱등성(동시 요청) · #23 후보 부족 정책·재추천 주기 · #24 퍼널 측정 대시보드 (이벤트·집계 뷰는 #41 에서 제공 — `docs/meetup-flow.md` 5절)
+1. #24 퍼널 측정 대시보드 (이벤트·집계 뷰는 #41 에서 제공 — `docs/meetup-flow.md` 5절). #22 멱등성·배치와 #23 재추천/재시도 주기는 구현됨 — 남은 것은 실제 프로젝트에 pg_cron 등록·운영 확인
 2. #17 Push 발송기(outbox 연결) · #15/#16 신고 운영·스팸 방지 · #13 삭제 파이프라인 (#41 데이터는 cascade 로 연결됨)
 3. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기), #11 얼굴 데이터 보관 정책
 4. #21 실기기 E2E (두 계정으로 소개 수락 → 대화 → 상호 의향 → 만남 확인 → 피드백 — #41 은 로컬 DB/순수 로직 검증까지만 마침)

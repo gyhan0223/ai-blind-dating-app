@@ -31,6 +31,13 @@ export interface StoredRecommendation {
   candidate_id: string;
 }
 
+export interface PastRecommendation {
+  candidate_id: string;
+  status: string;
+  /** YYYY-MM-DD */
+  for_date: string;
+}
+
 export interface NewRecommendationRow {
   user_id: string;
   candidate_id: string;
@@ -61,7 +68,11 @@ export interface DataSource {
   likedUserIds(userId: string): Promise<string[]>;
   /** 상태와 무관한 모든 매치 상대 (closed/blocked 포함) */
   matchedUserIds(userId: string): Promise<string[]>;
-  pastRecommendationCandidateIds(userId: string): Promise<string[]>;
+  /**
+   * 요청자에게 저장된 모든 과거 추천 (상태·날짜 포함). 재추천 주기 판단은 코어(recommend.ts)가 한다 (#23):
+   * pending/accepted 는 영구 제외, skipped/expired 는 RECOMMENDATION_COOLDOWN_DAYS 뒤에 다시 후보가 된다.
+   */
+  pastRecommendations(userId: string): Promise<PastRecommendation[]>;
 
   // --- 추천 ---
   recommendationsForDate(userId: string, forDate: string): Promise<StoredRecommendation[]>;

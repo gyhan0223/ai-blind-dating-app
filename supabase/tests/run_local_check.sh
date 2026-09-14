@@ -61,6 +61,12 @@ if [[ "${WITH_MEETUP_CONCURRENCY_TESTS:-1}" == "1" && -f meetup_concurrency_test
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash meetup_concurrency_test.sh
 fi
 
+if [[ "${WITH_RECOMMENDATION_RUNS_TESTS:-1}" == "1" && -f recommendation_runs_tests.sql ]]; then
+  echo "running recommendation runs tests (#22 — claim/busy/skip · lease 만료 재획득 · 서버 전용)"
+  $PSQL -d "$DB_NAME" -f recommendation_runs_tests.sql
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash recommendation_claim_concurrency_test.sh
+fi
+
 if [[ "${WITH_RECOMMENDATION_DB_TEST:-1}" == "1" && -f recommendation_db_test.mjs ]]; then
   if command -v node >/dev/null 2>&1; then
     echo "running recommendation db test (#40 — DB → snapshot → engine → card, 외모 데이터 없이)"

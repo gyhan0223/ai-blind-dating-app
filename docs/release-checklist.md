@@ -121,6 +121,9 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       — **앱 배포보다 먼저** 적용한다 (새 앱은 이 컬럼에 저장한다)
 - [ ] (#41) 마이그레이션 `0016_meetup_flow.sql` 이 production DB 에 적용되어 있다 (`send_message`/`meetup_set_intent`/`meetup_report_outcome`/`meetup_submit_feedback`/`conversation_access` RPC,
       `meetup_outcomes`·`notification_events` 테이블, `messages.client_message_id`, `matches.mutual_interest_at/meetup_confirmed_at`) — 앱과 **같은 릴리스 창**에서 (예전 앱의 만남 화면 저장은 이 시점부터 실패한다)
+- [ ] (#22/#23) 마이그레이션 `0017_recommendation_runs.sql` 이 적용되어 있고(`recommendation_runs`, `recommendation_run_claim/finish`, `recommendation_batch_targets`, recommendations unique 변경),
+      `daily-recommendation` · `daily-recommendation-batch` 가 재배포되어 있으며 pg_cron 에 배치 스케줄이 등록되어 있다 (`select * from cron.job`)
+- [ ] (#22) 같은 계정으로 `daily-recommendation` 을 동시에 두 번 호출해도 오늘 `recommendations` 행이 1건이다. `daily-recommendation-batch` 를 사용자 JWT 로 호출하면 401 이다
 - [ ] (#41) `icebreaker` Edge Function 이 최신 코드로 재배포되어 있다 (v2 캐시 · 공개 필드만 조회). 배포 후 `select count(*) from conversations where icebreaker ? 'lead'` 가 줄어든다 (과거 캐시 덮어쓰기)
 - [ ] (#41) 사용자 JWT 로 `matches` 의 `meetup_state`/`meetup_completed_at` 을 update 하면 0행이고, `meetup_intentions`/`meetup_outcomes`/`meetup_feedback` 에 insert 하면 거부된다
 - [ ] (#41) 두 테스트 계정으로 A 만 yes 일 때 B 의 `meetup_intentions` 조회가 0행이고 매치 `meetup_state` 가 `none` 이다. B 도 yes 면 `mutual_interest` 가 되고 `analytics_events.meetup_mutual_interest` 가 참가자당 1행이다
