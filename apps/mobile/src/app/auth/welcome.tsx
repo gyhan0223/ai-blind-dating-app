@@ -41,13 +41,13 @@ export default function Welcome() {
           본심
         </Text>
         <Text variant="display" style={{ marginBottom: spacing.md }}>
-          얼굴부터 보지 않는{'\n'}소개팅
+          사진 없이 대화로{'\n'}먼저 알아가는 소개팅
         </Text>
         <Text variant="body" color={colors.inkSoft}>
           사진을 고를 필요가 없어요.{'\n'}
-          평소의 당신 그대로 시작하세요.{'\n\n'}
-          우리는 얼굴 한 장보다{'\n'}
-          서로 잘 맞을 가능성을 먼저 봅니다.
+          짧은 소개와 대화로 서로를 알아가요.{'\n\n'}
+          하루 한 명, 본인확인을 마친 분만{'\n'}
+          소개해 드려요.
         </Text>
       </View>
       <View style={{ gap: spacing.sm, paddingBottom: spacing.lg }}>

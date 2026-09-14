@@ -10,6 +10,11 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] `app.json` 에 `ios.bundleIdentifier` / `android.package` 가 실제 스토어 값으로 들어 있다 (저장소 기본값에는 없음)
 - [ ] iOS 권한 문구가 카메라·마이크 두 개뿐이고 한국어다. 사진첩/NFC 권한을 요청하지 않는다
 - [ ] release 빌드 본인확인 화면에 "테스트로 통과하기" 버튼이 **없다**
+- [ ] (#39) 온보딩에 **외모 취향 테스트·외모 중요도·이상형 얼굴 선택 화면이 없다** — 순서: 본인확인 → 얼굴 인증 → 기본 정보 → 공개 소개 고르기 → 설문 → 가치관 → 선호 조건 → 홈
+- [ ] (#39) 얼굴 인증 화면 문구가 "실제 사람 확인" 목적만 설명하고 이상형 추천처럼 설명하지 않는다 ("서로의 얼굴은 AI만 먼저 봅니다" 없음)
+- [ ] (#39/#29) 내 정보 화면에 **Plus/결제/플랜 표시가 없다**. 앱 어디에도 결제 라우트·"결제 준비 중" 문구가 없다
+- [ ] (#39) 추천 카드에 고른 항목으로 만든 소개 문장(연애 목적·공개 질문 선택)만 보이고, 가치관 설문·민감 응답은 카드/API 응답에 없다
+- [ ] (#39) 번들 grep: `외모 취향|이상형|AI만 먼저|본심 Plus|결제는 준비` → 0건 (아래 secret grep 과 함께 확인)
 - [ ] production 빌드 환경(EAS 등)에 `EXPO_PUBLIC_DEV_LOGIN` 이 설정되어 있지 **않다**
       (설정돼 있어도 release 빌드에선 무효지만, 아예 제거한다)
 - [ ] `EXPO_PUBLIC_SUPABASE_URL` / `EXPO_PUBLIC_SUPABASE_ANON_KEY` 가 **production 프로젝트** 값이다
@@ -92,7 +97,8 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] reference image 가 없으면 승인되지 않고 `in_review`(`reference_image_unavailable`) 로 남았다가 재확인으로 복구된다
 - [ ] Storage `faces/<uid>/liveness/reference.jpg` 가 사용자 JWT 로 읽히지 않는다
 - [ ] Android release 빌드에서 얼굴 확인 1회 후 `adb logcat | grep -iE 'token=|vendorData=|workflowId='` 가 0줄이다 (SDK patch 적용 — `npm run sdk:verify-no-token-log` 가 OK)
-- [ ] 개인정보처리방침에 생체정보(민감정보) 처리·국외 이전·외모 매칭 목적 별도 동의가 반영되어 있다 (`docs/face-liveness-didit.md` 10절 TODO — 출시 차단)
+- [ ] 개인정보처리방침에 생체정보(민감정보) 처리·국외 이전이 **인증(라이브니스·중복 가입 방지) 목적으로** 반영되어 있다 (`docs/face-liveness-didit.md` 10절 TODO — 출시 차단).
+      MVP 는 외모 매칭을 하지 않으므로 외모 매칭 목적 동의는 받지 않는다 — 향후 #8 채택 시 별도 동의 필요
 - [ ] 서버 selftest 통과:
       `cd supabase/functions/_shared/env && node --experimental-strip-types selftest.ts`
       `cd supabase/functions/_shared/identity && node --experimental-strip-types selftest.ts`
@@ -104,3 +110,7 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       `cd apps/mobile && npm run sdk:verify-no-token-log`
       `cd apps/admin && npx tsc --noEmit`
       `cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.mjs`
+      `cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs` (#39 — 외모 데이터 없는 완료·인증 미완료 홈 차단)
+      `cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts` (#39 — 카드 공개 필드 allowlist·근거 없는 추천 이유 없음)
+- [ ] 마이그레이션 `0015_no_appearance_onboarding.sql` 이 production DB 에 적용되어 있다 (`profiles.relationship_goal/public_answers(/intro)` 컬럼, `users_guard_onboarding_completion` 트리거)
+      — **앱 배포보다 먼저** 적용한다 (새 앱은 이 컬럼에 저장한다)

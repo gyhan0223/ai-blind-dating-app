@@ -41,6 +41,11 @@ if [[ "${WITH_FACE_LIVENESS_TESTS:-1}" == "1" && -f face_liveness_tests.sql ]]; 
   $PSQL -d "$DB_NAME" -f face_liveness_tests.sql
 fi
 
+if [[ "${WITH_ONBOARDING_GUARD_TESTS:-1}" == "1" && -f onboarding_guard_tests.sql ]]; then
+  echo "running onboarding guard tests (#39 — 외모 데이터 없는 완료 / 인증 전 완료 차단 / 공개 자기소개 제약)"
+  $PSQL -d "$DB_NAME" -f onboarding_guard_tests.sql
+fi
+
 if [[ "${WITH_FACE_CONCURRENCY_TESTS:-1}" == "1" && -f face_liveness_concurrency_test.sh ]]; then
   echo "running face liveness concurrency tests (approve RPC — two sessions)"
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash face_liveness_concurrency_test.sh

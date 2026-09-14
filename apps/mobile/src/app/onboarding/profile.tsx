@@ -93,10 +93,10 @@ export default function ProfileStep() {
       setError('저장하지 못했어요. 입력값을 확인해 주세요.');
       return;
     }
-    await advanceOnboarding('questionnaire');
+    await advanceOnboarding('intro');
     await refreshAppUser();
     setBusy(false);
-    router.replace('/onboarding/questionnaire');
+    router.replace('/onboarding/intro');
   };
 
   return (
@@ -104,7 +104,7 @@ export default function ProfileStep() {
       <OnboardingHeader
         step="profile"
         title="기본 정보"
-        subtitle="상대에게는 여기서 입력한 정보 중 일부만, 사진 없이 소개돼요."
+        subtitle="사진 없이 소개돼요. 닉네임·나이·지역·키·직업·흡연·음주·취미·키워드는 소개받는 상대에게 공개되고, 성별·학력·종교·MBTI·운동은 공개되지 않아요."
       />
 
       <Field label="닉네임" placeholder="2~12자" maxLength={12} value={nickname} onChangeText={setNickname} />

@@ -106,7 +106,16 @@ begin
       on conflict (user_id, question_id) do nothing;
     end loop;
 
-    -- 외모 취향 이벤트 3건
+    -- 공개 소개 (#39 — 사진 없는 카드의 대화 소재). 선택지 코드만 저장하고 문장은 서버가 조합한다.
+    update public.profiles set
+      relationship_goal = case when demo.marriage >= 4 then 'marriage_minded' else 'serious' end,
+      public_answers = jsonb_build_object(
+        'day_off', case when demo.gender = 'male' then jsonb_build_array('rest_home', 'exercise') else jsonb_build_array('cafe', 'walk') end,
+        'together', jsonb_build_array('food_tour'),
+        'important', case when demo.spending >= 4 then 'humor' else 'honest_talk' end)
+    where user_id = demo.id and relationship_goal is null;
+
+    -- 외모 취향 이벤트 3건 (MVP 미사용 — 기존 데이터 호환·#40 회귀 테스트용으로만 유지)
     insert into public.appearance_preference_events (user_id, option_a, option_b, selected) values
       (demo.id, 'ft01', 'ft02', case when abs(hashtext(demo.id::text || '1')) % 2 = 0 then 'ft01' else 'ft02' end),
       (demo.id, 'ft03', 'ft08', case when abs(hashtext(demo.id::text || '2')) % 2 = 0 then 'ft03' else 'ft08' end),

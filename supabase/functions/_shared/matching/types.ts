@@ -22,6 +22,12 @@ export interface ProfileInput {
   religion: string | null;
   hobbies: string[];
   personalityKeywords: string[];
+  /** 공개 자기소개 (#39) — 추천 카드에 그대로 실린다. 없으면 null */
+  intro?: string | null;
+  /** 연애 목적 (#39, 공개) — serious | marriage_minded | take_it_slow | undecided */
+  relationshipGoal?: string | null;
+  /** 공개 질문 답변 {prompt_id: 답변} (#39) — 허용된 prompt 만 카드에 실린다 */
+  publicAnswers?: Record<string, unknown> | null;
 }
 
 /** private_profiles 의 가치관 축 (1~5) */
@@ -82,9 +88,8 @@ export interface Dealbreaker {
 
 /**
  * 외모 취향/스타일 벡터 (0~1 축들).
- * MVP: 취향 벡터 = A/B 테스트 선택 자산 벡터의 평균,
- *      스타일 벡터 = 사용자별 결정적 모의 벡터.
- * 실서비스: 얼굴 임베딩 기반으로 교체 (구조 동일).
+ * MVP(#39/#40) 에서는 사용하지 않는다 — 온보딩이 외모 취향을 입력받지 않고 얼굴 임베딩도 생성하지 않으므로
+ * 실제 가입 경로에서는 항상 null 이다. 타입은 기존 데이터·후속 검토(#8/#9/#10) 호환을 위해 유지한다.
  */
 export type StyleVector = Record<string, number>;
 

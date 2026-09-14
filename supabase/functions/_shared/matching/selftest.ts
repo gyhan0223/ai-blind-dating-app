@@ -12,6 +12,7 @@ import {
   styleVectorFromFeature,
 } from './MatchingEngine.ts';
 import { generateIcebreaker } from './icebreaker.ts';
+import { buildPublicAnswerCards, composeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
 import type { QuestionnaireResponse, UserSnapshot } from './types.ts';
 
 let failures = 0;
@@ -180,8 +181,64 @@ check('공통 취미 기반 icebreaker', ib.lead.includes('여행') || ib.lead.i
 const noCommon = generateIcebreaker(male, lukewarmTarget);
 check('공통점 없어도 질문 생성', noCommon.question.length > 0);
 
-if (failures > 0) {
-  console.error(`\n${failures} test(s) failed`);
-  process.exit(1);
-}
-console.log('\nAll MatchingEngine tests passed');
+// --- #39: 비공개 가치관 응답은 icebreaker 문구에 새지 않는다 ---
+const privateHeavyA = makeUser({
+  profile: { hobbies: [] },
+  values: { spendingStyle: 5, personalTimeNeed: 5 },
+});
+const privateHeavyB = makeUser({
+  profile: { userId: 'u9', gender: 'female', seekingGender: 'male', hobbies: [] },
+  values: { spendingStyle: 5, personalTimeNeed: 5 },
+});
+const leak = generateIcebreaker(privateHeavyA, privateHeavyB);
+check('icebreaker 가 비공개 소비/개인시간 응답을 언급하지 않는다', !leak.lead.includes('경험에') && !leak.lead.includes('자기만의 시간'));
+const sameGoalA = makeUser({ profile: { hobbies: [], relationshipGoal: 'serious' } });
+const sameGoalB = makeUser({ profile: { userId: 'u10', gender: 'female', seekingGender: 'male', hobbies: [], relationshipGoal: 'serious' } });
+check('공개 연애 목적이 같으면 그 사실만 언급', generateIcebreaker(sameGoalA, sameGoalB).lead.includes('연애 목적'));
+
+// --- #39: 추천 이유는 확인된 데이터에서만 — 근거 없으면 빈 배열 ---
+const strangerA = makeUser({
+  profile: { hobbies: [], regionCode: 'seoul' },
+  responses: responses({ p01: ['personality', 'personality.extraversion', 1] }),
+  values: { marriageIntent: 1, childrenIntent: 1, spendingStyle: 1, contactFrequency: 1, dateFrequency: 1, personalTimeNeed: 1 },
+});
+const strangerB = makeUser({
+  profile: { userId: 'u11', gender: 'female', seekingGender: 'male', hobbies: [], regionCode: 'busan' },
+  responses: responses({ p01: ['personality', 'personality.extraversion', 5] }),
+  values: { marriageIntent: 5, childrenIntent: 5, spendingStyle: 5, contactFrequency: 5, dateFrequency: 5, personalTimeNeed: 5 },
+});
+const strangerResult = computeMatch(strangerA, strangerB, NOW_YEAR);
+check('공통점이 확인되지 않으면 이유를 지어내지 않는다', strangerResult.eligible && strangerResult.reasons.length === 0);
+check('추천 이유에 보장/궁합 표현 없음', !result.reasons.some((r) => r.includes('잘 맞아요') || r.includes('어울릴')));
+const goalMatch = computeMatch(
+  makeUser({ ...strangerA, profile: { ...strangerA.profile, relationshipGoal: 'marriage_minded' } }),
+  makeUser({ ...strangerB, profile: { ...strangerB.profile, relationshipGoal: 'marriage_minded' } }),
+  NOW_YEAR,
+);
+check('연애 목적이 같으면 공개 사실로 이유 생성', goalMatch.reasons.includes('연애 목적이 같아요'));
+
+// --- #39: 외모 응답·벡터가 없어도(신규 가입 경로) 추천 계산이 된다 ---
+check('외모 벡터 null 이어도 eligible + 점수', result.eligible && result.score != null && male.appearancePreferenceVector == null);
+
+// --- #39: 카드 공개 답변 allowlist (선택지 코드 → 라벨) ---
+const cards = buildPublicAnswerCards({
+  day_off: ['cafe', 'not_an_option', 'rest_home', 'walk'], // 허용 코드만, max 2
+  together: 'food_tour', // 문자열 하나도 허용
+  important: ['honest_talk', 'honest_talk'], // 중복 제거, max 1
+  unknown_key: ['cafe'], // 알 수 없는 질문은 버림
+  hidden: '노출되면 안 되는 자유 텍스트',
+});
+check('허용된 질문만 카드에 실린다', cards.length === 3 && !cards.some((c) => c.id === 'unknown_key' || c.id === 'hidden'));
+check('허용 코드만 · 최대 개수 적용', cards[0].id === 'day_off' && cards[0].values.join(',') === 'cafe,rest_home');
+check('라벨로 변환', cards[0].answer === '카페 가기 · 집에서 푹 쉬기');
+check('문자열 하나도 허용', cards[1].values.join(',') === 'food_tour' && cards[1].answer === '맛집 탐방');
+check('중복 제거 + max 1', cards[2].values.length === 1);
+check('질문 문구가 함께 실린다', cards[0].question.length > 0);
+check('배열/비객체 답변은 빈 배열', buildPublicAnswerCards(['x']).length === 0 && buildPublicAnswerCards(null).length === 0);
+check('relationship_goal 허용값만', normalizeRelationshipGoal('serious') === 'serious' && normalizeRelationshipGoal('x') == null);
+
+// --- #39: 소개 문장 조합 (규칙 기반) ---
+const intro = composeIntro('serious', { day_off: ['rest_home', 'cafe'], important: 'honest_talk' });
+check('소개 문장 조합', intro === '진지한 연애를 원해요. 쉬는 날엔 주로 집에서 푹 쉬기 · 카페 가기. 연애에서 중요하게 생각하는 건 솔직한 대화.');
+check('고른 것이 없으면 null', composeIntro(null, {}) == null && composeIntro('bogus', { hidden: 'x' }) == null);
+check('자유 텍스트는 문장에 들어가지 않는다', !(composeIntro('serious', { day_off: '내 맘대로 쓴 글' }) ?? '').includes('내 맘대로'));

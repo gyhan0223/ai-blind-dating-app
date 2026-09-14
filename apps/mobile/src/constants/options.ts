@@ -112,21 +112,30 @@ export function keywordLabel(code: string): string {
   return PERSONALITY_KEYWORDS.find((k) => k.value === code)?.label ?? code;
 }
 
-/** 온보딩 단계 순서 — users.onboarding_step 값과 일치 */
+/**
+ * 온보딩 단계 순서 — users.onboarding_step 값과 일치.
+ * MVP(#39): 외모 취향 단계('appearance') 는 제거되었고, 공개 자기소개('intro') 가 추가되었다.
+ * 저장된 단계는 참고값일 뿐이며, 실제 진입 위치는 lib/onboardingCore 의 resolver 가
+ * 인증 상태 + 남은 필수 입력으로 결정한다 (기존 사용자 재진입·앱 재시작·오래된 라우트 대응).
+ */
 export const ONBOARDING_STEPS = [
   'welcome',
   'identity',
   'face',
   'profile',
+  'intro',
   'questionnaire',
   'values',
   'preferences',
-  'appearance',
   'done',
 ] as const;
 
 export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
 
+/** 예전 앱 버전이 저장했을 수 있는 단계 값 (더 이상 화면이 없다) */
+export const LEGACY_ONBOARDING_STEPS = ['appearance'] as const;
+
+/** 저장된 단계 → 라우트. resolver 를 쓸 수 없을 때(네트워크 오류 등)의 보수적 fallback 전용. */
 export function nextOnboardingRoute(step: string): string {
   switch (step) {
     case 'welcome':
@@ -136,14 +145,15 @@ export function nextOnboardingRoute(step: string): string {
       return '/onboarding/face';
     case 'profile':
       return '/onboarding/profile';
+    case 'intro':
+      return '/onboarding/intro';
     case 'questionnaire':
       return '/onboarding/questionnaire';
     case 'values':
       return '/onboarding/values';
     case 'preferences':
+    case 'appearance': // legacy — 외모 단계는 사라졌으므로 직전 단계(선호 조건)에서 완료로 이어진다
       return '/onboarding/preferences';
-    case 'appearance':
-      return '/onboarding/appearance';
     default:
       return '/onboarding/identity';
   }

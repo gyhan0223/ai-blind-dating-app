@@ -79,7 +79,7 @@ export default function TodayScreen() {
         <View style={{ paddingVertical: spacing.xxl, alignItems: 'center' }}>
           <ActivityIndicator color={colors.accent} />
           <Text variant="caption" color={colors.sub} style={{ marginTop: spacing.md }}>
-            잘 맞을 가능성이 높은 분을 찾고 있어요
+            오늘 소개할 분을 찾고 있어요
           </Text>
         </View>
       )}
@@ -193,7 +193,7 @@ export default function TodayScreen() {
           <Text variant="body" color={colors.sub}>
             {acceptedToday.length > 0
               ? '상대도 알아가고 싶다고 하면 대화가 열려요.\n내일 새로운 한 분을 소개해 드릴게요.'
-              : '조건에 맞는 분을 찾는 중이에요.\n내일 다시 확인해 주세요.'}
+              : '조건에 맞는 분이 아직 없어요.\n내일 다시 확인해 주세요.'}
           </Text>
         </Card>
       )}

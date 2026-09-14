@@ -7,7 +7,10 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { preferenceVectorFromChoices, styleVectorFromFeature } from './MatchingEngine.ts';
 import type { Dealbreaker, StyleVector, UserSnapshot } from './types.ts';
 
-/** 외모 취향 테스트 자산 벡터 — 모바일 앱 constants/faceTestAssets.ts 와 동기 유지 */
+/**
+ * 외모 취향 테스트 자산 벡터 — MVP(#39) 에서는 앱이 외모 취향을 입력받지 않으므로 신규 사용자는 항상 빈 값이다.
+ * 기존 appearance_preference_events 행 호환을 위해 로더만 남긴다. 매칭 계산에서의 제외는 #40.
+ */
 const FACE_TEST_VECTORS: Record<string, StyleVector> = {
   ft01: { soft: 0.9, warm: 0.8, bold: 0.2, playful: 0.4 },
   ft02: { soft: 0.2, warm: 0.3, bold: 0.9, playful: 0.3 },
@@ -91,6 +94,9 @@ export async function loadSnapshots(db: SupabaseClient, userIds: string[]): Prom
         religion: profile.religion,
         hobbies: profile.hobbies ?? [],
         personalityKeywords: profile.personality_keywords ?? [],
+        intro: profile.intro ?? null,
+        relationshipGoal: profile.relationship_goal ?? null,
+        publicAnswers: profile.public_answers ?? null,
       },
       values: {
         marriageIntent: priv.marriage_intent,

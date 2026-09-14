@@ -345,13 +345,16 @@ export function computeMatch(a: UserSnapshot, b: UserSnapshot, nowYear: number):
 // 카드 설명 문구 — 원시 점수 대신 사람이 읽을 이유를 보여준다
 // ---------------------------------------------------------------------------
 
+// 실제 응답 데이터(설문 유사도)가 있을 때만 붙는 문구. "잘 맞는다/궁합" 처럼 결과를 보장하는 표현은 쓰지 않는다.
+// 외모 차원은 MVP 에서 문구를 만들지 않는다 (#39 — 외모 추천 없음).
 const DIMENSION_PHRASES: Record<string, string> = {
-  personality: '성격의 결이 잘 맞아요',
+  personality: '성격 질문에 비슷하게 답했어요',
   values: '연애에서 중요하게 생각하는 부분이 비슷해요',
-  lifestyle: '생활 패턴이 비슷해요',
-  relationship: '연애 스타일이 잘 맞아요',
+  lifestyle: '생활 패턴 질문에 비슷하게 답했어요',
+  relationship: '연애 스타일 질문에 비슷하게 답했어요',
 };
 
+/** 카드 설명 문구 — 확인된 공통점만 적는다. 근거가 없으면 빈 배열 (지어내지 않는다). */
 export function buildReasons(a: UserSnapshot, b: UserSnapshot, dimensions: DimensionScores): string[] {
   const reasons: string[] = [];
 
@@ -369,8 +372,8 @@ export function buildReasons(a: UserSnapshot, b: UserSnapshot, dimensions: Dimen
   if (a.profile.regionCode === b.profile.regionCode) {
     reasons.push('가까운 지역에 살고 있어요');
   }
-  if (reasons.length === 0) {
-    reasons.push('서로 다른 매력이 잘 어울릴 수 있는 조합이에요');
+  if (a.profile.relationshipGoal && a.profile.relationshipGoal === b.profile.relationshipGoal) {
+    reasons.push('연애 목적이 같아요');
   }
   return reasons.slice(0, 3);
 }
@@ -386,7 +389,8 @@ export function pickStrategy(total: number, rank: number): RecommendationStrateg
 }
 
 // ---------------------------------------------------------------------------
-// 외모 취향/스타일 벡터 헬퍼 (MVP 모의 — 임베딩으로 교체 예정)
+// 외모 취향/스타일 벡터 헬퍼 — MVP(#39) 에서는 입력이 생성되지 않아 항상 null 이다.
+// 기존 데이터 호환용으로만 유지. 외모 차원 자체를 계산에서 제외하는 작업은 #40.
 // ---------------------------------------------------------------------------
 
 /** A/B 테스트 선택 기록 → 취향 벡터 (선택 자산 벡터의 평균) */

@@ -1,6 +1,11 @@
 import { track } from './analytics';
 import { supabase } from './supabase';
 
+/**
+ * 추천 카드 스냅샷 — 서버(daily-recommendation)가 공개 가능한 profiles 필드만 담아 만든다.
+ * 비공개 가치관 응답·설문·인증 원본·외모 데이터는 여기에 없다 (#39).
+ * intro/relationship_goal/public_answers 는 0015 이후 생성된 카드에만 있다 (예전 카드는 undefined).
+ */
 export type RecommendationCard = {
   nickname: string;
   age: number;
@@ -11,10 +16,27 @@ export type RecommendationCard = {
   drinking: string;
   hobbies: string[];
   personality_keywords: string[];
+  intro?: string | null;
+  relationship_goal?: string | null;
+  public_answers?: { id: string; question: string; answer: string }[];
   identity_verified: boolean;
   face_verified: boolean;
   reasons: string[];
 };
+
+/**
+ * 예전 서버가 저장한 카드에 남아 있을 수 있는, 실제 데이터로 뒷받침되지 않는 이유 문구.
+ * 서버는 더 이상 만들지 않지만 저장된 스냅샷은 그대로이므로 표시 단계에서 걸러낸다.
+ */
+const UNSUPPORTED_LEGACY_REASONS = new Set(['서로 다른 매력이 잘 어울릴 수 있는 조합이에요']);
+
+function sanitizeCard(card: RecommendationCard): RecommendationCard {
+  return {
+    ...card,
+    reasons: (card.reasons ?? []).filter((r) => !UNSUPPORTED_LEGACY_REASONS.has(r)),
+    public_answers: Array.isArray(card.public_answers) ? card.public_answers : [],
+  };
+}
 
 export type Recommendation = {
   id: string;
@@ -32,8 +54,12 @@ export async function fetchTodayRecommendations(): Promise<{
 }> {
   const { data, error } = await supabase.functions.invoke('daily-recommendation', { body: {} });
   if (error) throw new Error('추천을 불러오지 못했습니다.');
+  const recommendations = ((data?.recommendations ?? []) as Recommendation[]).map((r) => ({
+    ...r,
+    card: sanitizeCard(r.card),
+  }));
   return {
-    recommendations: (data?.recommendations ?? []) as Recommendation[],
+    recommendations,
     dailyLimit: data?.daily_limit ?? 1,
     exhausted: data?.exhausted ?? false,
   };
