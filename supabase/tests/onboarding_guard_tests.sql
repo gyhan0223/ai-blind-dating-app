@@ -77,11 +77,10 @@ begin
   select count(*) into n from public.face_verifications where user_id = uy and feature_vector is not null;
   if n <> 0 then raise exception 'FAIL fixture: feature_vector should be absent'; end if;
 
-  -- 공개 자기소개 저장 (허용 값)
+  -- 공개 소개 저장 (선택지 코드 — 문자열 또는 배열). intro 는 MVP 에서 쓰지 않는다 (null)
   update public.profiles
-     set intro = '주말엔 동네 산책하고 집에서 요리해요. 잔잔한 대화 좋아합니다.',
-         relationship_goal = 'serious',
-         public_answers = '{"day_off":"동네 카페에서 책 읽어요","important":"솔직한 대화"}'::jsonb
+     set relationship_goal = 'serious',
+         public_answers = '{"day_off":["rest_home","cafe"],"together":["food_tour"],"important":"honest_talk"}'::jsonb
    where user_id = uy;
 
   -- 외모 데이터 없이 온보딩 완료 가능
@@ -117,19 +116,38 @@ begin
   exception when others then denied := true; end;
   if not denied then raise exception 'FAIL non-object public_answers accepted'; end if;
 
-  -- 제약: 문자열이 아닌 답변 값
+  -- 제약: 문자열/배열이 아닌 답변 값
   denied := false;
   begin
     update public.profiles set public_answers = '{"day_off": 3}'::jsonb where user_id = uy;
   exception when others then denied := true; end;
   if not denied then raise exception 'FAIL non-string answer accepted'; end if;
 
-  -- 제약: 200자 초과 답변
+  -- 제약: 배열 안에 문자열이 아닌 값
   denied := false;
   begin
-    update public.profiles set public_answers = jsonb_build_object('day_off', repeat('가', 201)) where user_id = uy;
+    update public.profiles set public_answers = '{"day_off": ["cafe", 1]}'::jsonb where user_id = uy;
   exception when others then denied := true; end;
-  if not denied then raise exception 'FAIL 201-char answer accepted'; end if;
+  if not denied then raise exception 'FAIL non-string array element accepted'; end if;
+
+  -- 제약: 배열 4개 초과 / 빈 배열
+  denied := false;
+  begin
+    update public.profiles set public_answers = '{"day_off": ["a","b","c","d"]}'::jsonb where user_id = uy;
+  exception when others then denied := true; end;
+  if not denied then raise exception 'FAIL 4-element answer array accepted'; end if;
+  denied := false;
+  begin
+    update public.profiles set public_answers = '{"day_off": []}'::jsonb where user_id = uy;
+  exception when others then denied := true; end;
+  if not denied then raise exception 'FAIL empty answer array accepted'; end if;
+
+  -- 제약: 40자 초과 코드 (자유 텍스트를 코드 자리에 넣는 것 방지)
+  denied := false;
+  begin
+    update public.profiles set public_answers = jsonb_build_object('day_off', repeat('가', 41)) where user_id = uy;
+  exception when others then denied := true; end;
+  if not denied then raise exception 'FAIL 41-char answer accepted'; end if;
 
   -- 제약: 항목 수 초과 (9개)
   denied := false;

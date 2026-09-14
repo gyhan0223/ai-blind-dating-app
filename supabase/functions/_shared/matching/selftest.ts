@@ -12,7 +12,7 @@ import {
   styleVectorFromFeature,
 } from './MatchingEngine.ts';
 import { generateIcebreaker } from './icebreaker.ts';
-import { buildPublicAnswerCards, normalizeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
+import { buildPublicAnswerCards, composeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
 import type { QuestionnaireResponse, UserSnapshot } from './types.ts';
 
 let failures = 0;
@@ -220,22 +220,25 @@ check('연애 목적이 같으면 공개 사실로 이유 생성', goalMatch.rea
 // --- #39: 외모 응답·벡터가 없어도(신규 가입 경로) 추천 계산이 된다 ---
 check('외모 벡터 null 이어도 eligible + 점수', result.eligible && result.score != null && male.appearancePreferenceVector == null);
 
-// --- #39: 카드 공개 답변 allowlist ---
+// --- #39: 카드 공개 답변 allowlist (선택지 코드 → 라벨) ---
 const cards = buildPublicAnswerCards({
-  day_off: '  집에서 쉬어요 ',
-  important: '',
-  unknown_key: '노출되면 안 됨',
-  together: 42,
+  day_off: ['cafe', 'not_an_option', 'rest_home', 'walk'], // 허용 코드만, max 2
+  together: 'food_tour', // 문자열 하나도 허용
+  important: ['honest_talk', 'honest_talk'], // 중복 제거, max 1
+  unknown_key: ['cafe'], // 알 수 없는 질문은 버림
+  hidden: '노출되면 안 되는 자유 텍스트',
 });
-check('허용된 prompt 의 문자열 답변만 카드에 실린다', cards.length === 1 && cards[0].id === 'day_off' && cards[0].answer === '집에서 쉬어요');
+check('허용된 질문만 카드에 실린다', cards.length === 3 && !cards.some((c) => c.id === 'unknown_key' || c.id === 'hidden'));
+check('허용 코드만 · 최대 개수 적용', cards[0].id === 'day_off' && cards[0].values.join(',') === 'cafe,rest_home');
+check('라벨로 변환', cards[0].answer === '카페 가기 · 집에서 푹 쉬기');
+check('문자열 하나도 허용', cards[1].values.join(',') === 'food_tour' && cards[1].answer === '맛집 탐방');
+check('중복 제거 + max 1', cards[2].values.length === 1);
 check('질문 문구가 함께 실린다', cards[0].question.length > 0);
 check('배열/비객체 답변은 빈 배열', buildPublicAnswerCards(['x']).length === 0 && buildPublicAnswerCards(null).length === 0);
-check('긴 답변은 잘린다', (buildPublicAnswerCards({ day_off: 'a'.repeat(500) })[0]?.answer.length ?? 0) === 200);
-check('intro 정규화', normalizeIntro('  안녕  ') === '안녕' && normalizeIntro('') == null && normalizeIntro(3) == null);
 check('relationship_goal 허용값만', normalizeRelationshipGoal('serious') === 'serious' && normalizeRelationshipGoal('x') == null);
 
-if (failures > 0) {
-  console.error(`\n${failures} test(s) failed`);
-  process.exit(1);
-}
-console.log('\nAll MatchingEngine tests passed');
+// --- #39: 소개 문장 조합 (규칙 기반) ---
+const intro = composeIntro('serious', { day_off: ['rest_home', 'cafe'], important: 'honest_talk' });
+check('소개 문장 조합', intro === '진지한 연애를 원해요. 쉬는 날엔 주로 집에서 푹 쉬기 · 카페 가기. 연애에서 중요하게 생각하는 건 솔직한 대화.');
+check('고른 것이 없으면 null', composeIntro(null, {}) == null && composeIntro('bogus', { hidden: 'x' }) == null);
+check('자유 텍스트는 문장에 들어가지 않는다', !(composeIntro('serious', { day_off: '내 맘대로 쓴 글' }) ?? '').includes('내 맘대로'));

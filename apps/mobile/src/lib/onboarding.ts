@@ -1,5 +1,5 @@
 import type { OnboardingStep } from '@/constants/options';
-import { QUESTIONS } from '@/constants/questions';
+import { hasRequiredPublicAnswers, QUESTIONS, relationshipGoalLabel } from '@/constants/questions';
 import { type OnboardingProgress, type ResumeStep, resolveOnboardingStep } from './onboardingCore';
 import type { AppUser } from './session';
 import { supabase } from './supabase';
@@ -27,7 +27,7 @@ export async function advanceOnboarding(next: OnboardingStep) {
  */
 export async function loadOnboardingProgress(user: AppUser): Promise<OnboardingProgress> {
   const [profileRes, responsesRes, privateRes, prefsRes] = await Promise.all([
-    supabase.from('profiles').select('user_id, intro, relationship_goal').eq('user_id', user.id).maybeSingle(),
+    supabase.from('profiles').select('user_id, relationship_goal, public_answers').eq('user_id', user.id).maybeSingle(),
     supabase
       .from('questionnaire_responses')
       .select('question_id', { count: 'exact', head: true })
@@ -38,12 +38,13 @@ export async function loadOnboardingProgress(user: AppUser): Promise<OnboardingP
   if (profileRes.error || responsesRes.error || privateRes.error || prefsRes.error) {
     throw new Error('온보딩 상태를 확인하지 못했습니다.');
   }
-  const profile = profileRes.data as { intro: string | null; relationship_goal: string | null } | null;
+  const profile = profileRes.data as { relationship_goal: string | null; public_answers: unknown } | null;
   return {
     identityVerified: user.identity_verified,
     faceVerified: user.face_verified,
     hasProfile: profile != null,
-    hasIntro: !!profile?.intro && !!profile?.relationship_goal,
+    // 소개 = 연애 목적 + 필수 질문(쉬는 날) 선택. 자유 텍스트는 조건이 아니다
+    hasIntro: relationshipGoalLabel(profile?.relationship_goal) != null && hasRequiredPublicAnswers(profile?.public_answers),
     questionnaireAnswered: responsesRes.count ?? 0,
     questionnaireTotal: QUESTIONS.length,
     hasValues: (privateRes.data as { marriage_intent: number | null } | null)?.marriage_intent != null,

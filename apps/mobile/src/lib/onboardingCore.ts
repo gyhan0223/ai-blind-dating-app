@@ -18,7 +18,7 @@ export type OnboardingProgress = {
   faceVerified: boolean;
   /** profiles 행 존재 (기본 정보) */
   hasProfile: boolean;
-  /** profiles.intro + relationship_goal 존재 (공개 자기소개) */
+  /** profiles.relationship_goal + 필수 공개 질문 선택 존재 (고르기형 소개) */
   hasIntro: boolean;
   /** questionnaire_responses 응답 수 / 전체 문항 수 */
   questionnaireAnswered: number;

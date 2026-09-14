@@ -4,7 +4,7 @@ import React from 'react';
 import { Alert, View } from 'react-native';
 import { Button, Card, Divider, Screen, Text } from '@/components/ui';
 import { jobLabel, regionLabel } from '@/constants/options';
-import { PUBLIC_PROMPTS, relationshipGoalLabel } from '@/constants/questions';
+import { composeIntro } from '@/constants/questions';
 import { useSession } from '@/lib/session';
 import { supabase } from '@/lib/supabase';
 import { colors, radius, spacing } from '@/theme/tokens';
@@ -13,7 +13,7 @@ import { colors, radius, spacing } from '@/theme/tokens';
  * 내 정보.
  * Plus/결제 관련 UI 는 MVP(#29/#39) 에서 제거 — 결제가 없으므로 진입점·플랜 표시·"준비 중" 안내를 두지 않는다.
  * (subscriptions 테이블과 재도입용 구조는 서버에 그대로 남아 있다.)
- * 소개글·선호조건 수정은 #25 에서 제공한다 — 여기서는 상대에게 보이는 내용을 확인만 한다.
+ * 소개 항목·선호조건 수정은 #25 에서 제공한다 — 여기서는 상대에게 보이는 문장을 확인만 한다.
  */
 async function fetchMe() {
   const { data: auth } = await supabase.auth.getUser();
@@ -21,7 +21,7 @@ async function fetchMe() {
   if (!userId) throw new Error('로그인이 필요합니다.');
   const { data: profile } = await supabase
     .from('profiles')
-    .select('nickname, region_code, job_group, intro, relationship_goal, public_answers')
+    .select('nickname, region_code, job_group, relationship_goal, public_answers')
     .eq('user_id', userId)
     .maybeSingle();
   return { profile };
@@ -31,9 +31,8 @@ export default function MeScreen() {
   const { appUser, signOut } = useSession();
   const { data } = useQuery({ queryKey: ['me'], queryFn: fetchMe });
   const profile = data?.profile;
-  const savedAnswers = (profile?.public_answers ?? {}) as Record<string, unknown>;
-  const answers = PUBLIC_PROMPTS.filter((p) => typeof savedAnswers[p.id] === 'string' && (savedAnswers[p.id] as string).trim());
-  const goal = relationshipGoalLabel(profile?.relationship_goal);
+  // 카드에 실리는 문장과 같은 규칙으로 고른 항목을 문장으로 만든다 (서버 composeIntro 와 동일)
+  const intro = profile ? composeIntro(profile.relationship_goal, profile.public_answers) : null;
 
   const confirmSignOut = () => {
     Alert.alert('로그아웃할까요?', undefined, [
@@ -95,22 +94,11 @@ export default function MeScreen() {
       <Card>
         <Text variant="heading" style={{ marginBottom: spacing.xs }}>상대에게 보이는 소개</Text>
         <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.md }}>
-          사진 대신 이 내용으로 소개돼요.
+          사진 대신 고른 항목으로 만든 이 문장이 소개돼요.
         </Text>
-        {goal ? <Text variant="caption" color={colors.accent} style={{ marginBottom: spacing.sm }}>{goal}</Text> : null}
         <Text variant="body" style={{ lineHeight: 24 }}>
-          {profile?.intro ?? '아직 자기소개가 없어요.'}
+          {intro ?? '아직 고른 소개가 없어요.'}
         </Text>
-        {answers.length > 0 && (
-          <View style={{ gap: spacing.md, marginTop: spacing.md }}>
-            {answers.map((p) => (
-              <View key={p.id}>
-                <Text variant="label" color={colors.inkSoft}>{p.question}</Text>
-                <Text variant="body" style={{ marginTop: 2 }}>{savedAnswers[p.id] as string}</Text>
-              </View>
-            ))}
-          </View>
-        )}
       </Card>
 
       <View style={{ height: spacing.md }} />

@@ -27,8 +27,9 @@ function Chip({ text }: { text: string }) {
 }
 
 /**
- * 사진 없는 소개 카드 — 자기소개와 대화 소재가 첫인상을 만든다.
- * 서버가 만든 공개 필드 스냅샷만 표시한다. 원시 매칭 점수·비공개 응답은 어디에도 없다 (#39).
+ * 사진 없는 소개 카드 — 고른 항목으로 만든 소개 문장과 대화 소재가 첫인상을 만든다.
+ * 서버가 만든 공개 필드 스냅샷만 표시한다 (intro 는 서버가 선택지로 조합한 문장).
+ * 원시 매칭 점수·비공개 응답은 어디에도 없다 (#39).
  */
 export function RecommendationCard({ card }: { card: CardData }) {
   const goal = relationshipGoalLabel(card.relationship_goal);
@@ -57,14 +58,10 @@ export function RecommendationCard({ card }: { card: CardData }) {
       </View>
 
       {card.intro ? (
+        // 서버가 고른 항목(연애 목적 포함)으로 조합한 소개 문장 — 연애 목적을 따로 또 표시하지 않는다
         <>
           <Divider />
           <Text variant="body" style={{ lineHeight: 24 }}>{card.intro}</Text>
-          {goal ? (
-            <Text variant="caption" color={colors.accent} style={{ marginTop: spacing.sm }}>
-              {goal}
-            </Text>
-          ) : null}
         </>
       ) : goal ? (
         <>
@@ -73,7 +70,7 @@ export function RecommendationCard({ card }: { card: CardData }) {
         </>
       ) : null}
 
-      {answers.length > 0 && (
+      {!card.intro && answers.length > 0 && (
         <>
           <Divider />
           <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.sm }}>이야기해 볼 만한 것</Text>

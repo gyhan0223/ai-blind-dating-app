@@ -154,7 +154,7 @@ export function Field({
       </Text>
       <TextInput
         placeholderTextColor={colors.faint}
-        style={[styles.input, inputProps.multiline && styles.inputMultiline]}
+        style={styles.input}
         {...inputProps}
       />
       {hint ? (
@@ -292,7 +292,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: colors.ink,
   },
-  inputMultiline: { minHeight: 112, textAlignVertical: 'top' },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   chip: {
     paddingHorizontal: 14,

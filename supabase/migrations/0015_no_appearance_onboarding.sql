@@ -7,7 +7,10 @@
 --   상대를 알아갈 수 있도록 공개 프로필에 짧은 자기소개·연애 목적·공개 질문 답변을 추가한다.
 --
 -- 이 마이그레이션 (additive — 기존 데이터/컬럼 삭제 없음)
---   1) profiles: intro(짧은 자기소개) · relationship_goal(연애 목적) · public_answers(공개 질문 답변) 추가.
+--   1) profiles: relationship_goal(연애 목적) · public_answers(공개 질문 "선택지" 답변) · intro 추가.
+--        자기소개는 글쓰기가 아니라 고르기다 — public_answers 는 {prompt_id: 선택지 코드 | 코드[]} 이고,
+--        카드 문장은 서버가 고른 항목으로 조합한다. intro(자유 텍스트) 컬럼은 MVP 온보딩에서 쓰지 않는다
+--        (null 유지 — 후속 #25 에서 한 줄 소개 등으로 쓸 수 있도록 제약만 둔다).
 --        세 컬럼은 모두 "상대에게 공개되는" 정보다 (profiles = 공개 테이블). 민감/가치관 응답은 계속 private_profiles.
 --   2) users 보호 트리거 보강: 클라이언트(JWT) 가 onboarding_completed 를 true 로 바꾸려면
 --        identity_verified 와 face_verified 가 모두 true 여야 한다.
@@ -19,7 +22,7 @@
 -- 기존 사용자 호환
 --   * onboarding_step='appearance' 에 멈춘 사용자는 이 마이그레이션이 임의로 완료 처리하지 않는다.
 --     앱의 Gate 가 인증 상태와 남은 필수 입력(자기소개 등)을 확인해 적절한 단계로 보낸다.
---   * 기존 profiles 행은 intro/relationship_goal 이 null — 앱이 'intro' 단계로 안내한다.
+--   * 기존 profiles 행은 relationship_goal/public_answers 가 비어 있다 — 앱이 'intro'(소개 고르기) 단계로 안내한다.
 
 -- ---------------------------------------------------------------------------
 -- 1) profiles 공개 자기소개 컬럼
@@ -30,11 +33,11 @@ alter table public.profiles
   add column if not exists public_answers    jsonb not null default '{}'::jsonb;
 
 comment on column public.profiles.intro is
-  '짧은 자기소개 (공개 — 추천 카드에 표시). 최대 300자';
+  '자유 텍스트 한 줄 소개 (공개). MVP 온보딩(#39)에서는 입력받지 않아 null — 카드 소개 문장은 서버가 public_answers 로 조합한다. 최대 300자';
 comment on column public.profiles.relationship_goal is
   '연애 목적 (공개 — 추천 카드에 표시): serious | marriage_minded | take_it_slow | undecided';
 comment on column public.profiles.public_answers is
-  '공개 질문 답변 {prompt_id: text} (공개 — 추천 카드에 표시). 허용 prompt_id 는 서버(_shared/matching/publicPrompts.ts)와 앱 상수가 동기';
+  '공개 질문 선택 답변 {prompt_id: 선택지 코드 | 코드[]} (공개 — 추천 카드에 표시). 허용 id/코드는 서버(_shared/matching/publicPrompts.ts)와 앱 상수가 동기';
 
 alter table public.profiles drop constraint if exists profiles_intro_length;
 alter table public.profiles add constraint profiles_intro_length
@@ -44,7 +47,8 @@ alter table public.profiles drop constraint if exists profiles_relationship_goal
 alter table public.profiles add constraint profiles_relationship_goal_check
   check (relationship_goal is null or relationship_goal in ('serious', 'marriage_minded', 'take_it_slow', 'undecided'));
 
--- 답변은 객체여야 하고, 전체 크기·항목 수·각 답변 길이를 제한한다 (카드 스냅샷 비대화 방지)
+-- 답변은 객체여야 하고 값은 선택지 코드(문자열) 또는 코드 배열(최대 3개)만 허용한다.
+-- 전체 크기·항목 수·코드 길이를 제한한다 (카드 스냅샷 비대화 방지). 허용 코드 목록 자체는 서버가 검사한다.
 create or replace function public.public_answers_valid(v jsonb)
 returns boolean
 language sql
@@ -53,12 +57,21 @@ as $$
   select v is not null
      and jsonb_typeof(v) = 'object'
      and (select count(*) from jsonb_object_keys(v)) <= 8
-     and char_length(v::text) <= 2000
+     and char_length(v::text) <= 1000
      and not exists (
        select 1 from jsonb_each(v) e
-       where jsonb_typeof(e.value) <> 'string'
-          or char_length(e.value #>> '{}') > 200
-          or char_length(e.key) > 40
+       where char_length(e.key) > 40
+          or not (
+            (jsonb_typeof(e.value) = 'string' and char_length(e.value #>> '{}') <= 40)
+            or (
+              jsonb_typeof(e.value) = 'array'
+              and jsonb_array_length(e.value) between 1 and 3
+              and not exists (
+                select 1 from jsonb_array_elements(e.value) a
+                where jsonb_typeof(a.value) <> 'string' or char_length(a.value #>> '{}') > 40
+              )
+            )
+          )
      );
 $$;
 

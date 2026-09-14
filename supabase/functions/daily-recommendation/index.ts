@@ -16,7 +16,7 @@ import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.t
 import { computeMatch, pickStrategy } from '../_shared/matching/MatchingEngine.ts';
 import {
   buildPublicAnswerCards,
-  normalizeIntro,
+  composeIntro,
   normalizeRelationshipGoal,
 } from '../_shared/matching/publicPrompts.ts';
 import { loadSnapshots } from '../_shared/matching/snapshot.ts';
@@ -54,7 +54,8 @@ function buildCard(candidate: UserSnapshot, badges: { identity: boolean; face: b
     drinking: p.drinking,
     hobbies: p.hobbies,
     personality_keywords: p.personalityKeywords,
-    intro: normalizeIntro(p.intro),
+    // 소개 문장은 고른 선택지로 서버가 조합한다 (자유 텍스트 아님, 분석 아님)
+    intro: composeIntro(p.relationshipGoal, p.publicAnswers),
     relationship_goal: normalizeRelationshipGoal(p.relationshipGoal),
     public_answers: buildPublicAnswerCards(p.publicAnswers),
     identity_verified: badges.identity,
