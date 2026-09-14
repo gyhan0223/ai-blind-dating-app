@@ -106,7 +106,19 @@ begin
       on conflict (user_id, question_id) do nothing;
     end loop;
 
-    -- 외모 취향 이벤트 3건
+    -- 공개 자기소개 (#39 — 사진 없는 카드의 대화 소재). 상대에게 공개되는 정보만.
+    update public.profiles set
+      intro = case demo.gender
+                when 'male' then '주말엔 취미 위주로 시간을 보내요. 차분하게 대화하면서 서로 알아가는 걸 좋아합니다.'
+                else '평일엔 일에 집중하고 주말엔 좋아하는 걸 하며 충전해요. 편하게 이야기 나눌 수 있는 분이면 좋겠어요.'
+              end,
+      relationship_goal = case when demo.marriage >= 4 then 'marriage_minded' else 'serious' end,
+      public_answers = jsonb_build_object(
+        'day_off', '집 근처 카페에 가거나 늦잠 자요',
+        'important', '서로 솔직하게 이야기하는 것')
+    where user_id = demo.id and intro is null;
+
+    -- 외모 취향 이벤트 3건 (MVP 미사용 — 기존 데이터 호환·#40 회귀 테스트용으로만 유지)
     insert into public.appearance_preference_events (user_id, option_a, option_b, selected) values
       (demo.id, 'ft01', 'ft02', case when abs(hashtext(demo.id::text || '1')) % 2 = 0 then 'ft01' else 'ft02' end),
       (demo.id, 'ft03', 'ft08', case when abs(hashtext(demo.id::text || '2')) % 2 = 0 then 'ft03' else 'ft08' end),

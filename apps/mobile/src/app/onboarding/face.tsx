@@ -39,6 +39,7 @@ import { colors, spacing } from '@/theme/tokens';
  * SDK 가 화면에서 Approved 를 돌려줘도 그것만으로는 절대 진행하지 않는다.
  * 라이브니스는 "실제 사람" 만 확인하며 실명·나이는 본인확인(identity) 단계가 담당한다.
  * 얼굴 이미지는 앱에 저장되지 않고 상대에게도 절대 공개되지 않는다.
+ * 인증 목적으로만 쓰이며 외모 평가·이상형 추천에는 사용하지 않는다 (#39 — 얼굴 임베딩은 MVP 이후 별도 검토).
  */
 export default function FaceStep() {
   const { session, refreshAppUser } = useSession();
@@ -283,8 +284,8 @@ export default function FaceStep() {
       <Screen>
         <OnboardingHeader
           step="face"
-          title="실제 본인인지 확인할게요"
-          subtitle={'서로의 얼굴은 AI만 먼저 봅니다.\n확인에 쓰인 얼굴 정보는 상대에게 절대 공개되지 않아요.'}
+          title="안전한 만남을 위한 얼굴 인증"
+          subtitle={'실제 사람이 이용하는지 확인하는 과정이에요.\n인증 사진은 상대에게 공개되지 않고, 소개 상대를 고르는 데도 쓰이지 않아요.'}
         />
         <Card style={{ marginBottom: spacing.lg }}>
           <Text variant="label" style={{ marginBottom: spacing.sm }}>
@@ -298,9 +299,9 @@ export default function FaceStep() {
           </Text>
         </Card>
         <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.lg }}>
-          얼굴 정보는 실제 사람인지 확인하고 중복 가입을 막는 데만 사용해요. 영상 원본은 저장하지 않으며,
-          확인이 끝난 얼굴 이미지는 본인만 접근할 수 있는 비공개 저장소에 보관돼요. 이 확인은 실명이나 나이를
-          증명하지 않아요.
+          얼굴 정보는 실제 사람인지 확인하고 중복 가입을 막는 데만 사용해요. 앱은 영상 원본을 저장하지 않으며,
+          확인이 끝난 얼굴 이미지는 앱 서버만 접근할 수 있는 비공개 저장소에 보관돼요. 외모를 평가하거나
+          이상형을 찾는 데 쓰이지 않아요. 이 확인은 실명이나 나이를 증명하지 않아요.
         </Text>
         <View style={{ gap: spacing.sm }}>
           <Button title="얼굴 확인 시작" onPress={start} loading={busy} />

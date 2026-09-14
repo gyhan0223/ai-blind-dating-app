@@ -4,17 +4,31 @@
  * POST {} → { recommendations: [{ id, status, strategy, card }] }
  *
  * 원칙
- *  * 하루 기본 1명 (Plus 는 2명) — 무한 스와이프 없음
- *  * Plus 여부는 "추천 개수"에만 영향, 매칭 품질/순서에는 영향 없음
- *  * 원시 점수는 클라이언트에 내려주지 않는다 (card 스냅샷만)
+ *  * 하루 1명 — 무한 스와이프 없음
+ *  * Plus 추천 개수 차등은 MVP 에서 비활성 (#29/#39 — PLUS_EXTRA_RECOMMENDATION_ENABLED).
+ *    켜지더라도 "추천 개수"에만 영향, 매칭 품질/순서에는 영향 없음
+ *  * 원시 점수·비공개 응답(private_profiles/설문)은 클라이언트에 내려주지 않는다 — card 스냅샷의 공개 필드만
  *  * 차단 쌍, 기존 매치, 이미 추천된 상대는 제외
+ *  * 외모 취향 응답·얼굴 벡터가 없어도 추천이 생성된다 (신규 가입 경로에는 둘 다 없다).
+ *    외모 차원을 계산 자체에서 제외·재정규화하는 작업은 #40.
  */
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
 import { computeMatch, pickStrategy } from '../_shared/matching/MatchingEngine.ts';
+import {
+  buildPublicAnswerCards,
+  normalizeIntro,
+  normalizeRelationshipGoal,
+} from '../_shared/matching/publicPrompts.ts';
 import { loadSnapshots } from '../_shared/matching/snapshot.ts';
 import type { MatchResult, RecommendationStrategy, UserSnapshot } from '../_shared/matching/types.ts';
 
 const POOL_LIMIT = 60;
+
+/**
+ * Plus(하루 +1 추천) feature flag — MVP 베타에서는 결제가 없으므로 끈다 (#29).
+ * subscriptions 테이블과 기존 행은 그대로 두며, 재도입 시 이 플래그만 켠다.
+ */
+const PLUS_EXTRA_RECOMMENDATION_ENABLED = false;
 
 function seoulToday(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' });
@@ -24,6 +38,10 @@ function nowYearSeoul(): number {
   return Number(new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' }).slice(0, 4));
 }
 
+/**
+ * 카드 스냅샷 — 상대에게 공개해도 되는 profiles 필드만 담는다 (allowlist).
+ * private_profiles(가치관 축·민감 응답)·설문 응답·인증 원본·외모 데이터는 어떤 형태로도 싣지 않는다.
+ */
 function buildCard(candidate: UserSnapshot, badges: { identity: boolean; face: boolean }, reasons: string[], nowYear: number) {
   const p = candidate.profile;
   return {
@@ -36,6 +54,9 @@ function buildCard(candidate: UserSnapshot, badges: { identity: boolean; face: b
     drinking: p.drinking,
     hobbies: p.hobbies,
     personality_keywords: p.personalityKeywords,
+    intro: normalizeIntro(p.intro),
+    relationship_goal: normalizeRelationshipGoal(p.relationshipGoal),
+    public_answers: buildPublicAnswerCards(p.publicAnswers),
     identity_verified: badges.identity,
     face_verified: badges.face,
     reasons,
@@ -61,13 +82,16 @@ Deno.serve(async (req) => {
     return json({ error: 'not_ready' }, 403);
   }
 
-  // 오늘 추천 한도 (Plus 는 +1 — 품질이 아니라 개수만)
-  const { data: sub } = await db
-    .from('subscriptions')
-    .select('plan, status')
-    .eq('user_id', auth.userId)
-    .maybeSingle();
-  const dailyLimit = sub?.plan === 'plus' && sub?.status === 'active' ? 2 : 1;
+  // 오늘 추천 한도 — MVP 는 모두 1명. (Plus +1 은 플래그가 켜진 경우에만, 품질이 아니라 개수만)
+  let dailyLimit = 1;
+  if (PLUS_EXTRA_RECOMMENDATION_ENABLED) {
+    const { data: sub } = await db
+      .from('subscriptions')
+      .select('plan, status')
+      .eq('user_id', auth.userId)
+      .maybeSingle();
+    if (sub?.plan === 'plus' && sub?.status === 'active') dailyLimit = 2;
+  }
 
   const { data: todayRecs } = await db
     .from('recommendations')

@@ -4,6 +4,7 @@ import { Pressable, View } from 'react-native';
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, Card, ChipGroup, Divider, Field, InlineNotice, LikertScale, Screen, Text } from '@/components/ui';
 import { PERSONALITY_KEYWORDS, REGIONS } from '@/constants/options';
+import { track } from '@/lib/analytics';
 import { advanceOnboarding } from '@/lib/onboarding';
 import { useSession } from '@/lib/session';
 import { supabase } from '@/lib/supabase';
@@ -61,17 +62,21 @@ function AnyOption({
   );
 }
 
+/**
+ * 소개 기준 중요도 — MVP(#39) 에서는 외모 중요도(appearance_importance)를 입력받지 않는다.
+ * (DB 컬럼은 기본값 그대로 두고 저장 요청에서 제외. 매칭 가중치에서의 제외는 #40)
+ */
 const IMPORTANCE_AXES = [
-  { key: 'appearance_importance', title: '외적인 끌림' },
-  { key: 'personality_importance', title: '성격 궁합' },
+  { key: 'personality_importance', title: '성격' },
   { key: 'values_importance', title: '가치관' },
   { key: 'lifestyle_importance', title: '생활 패턴' },
   { key: 'relationship_importance', title: '연애 스타일' },
 ] as const;
 
 /**
- * 이상형 설정.
+ * 선호 조건 설정 — 온보딩 마지막 단계.
  * Preference(맞으면 가산점)와 Dealbreaker(맞지 않으면 제외)를 명확히 분리한다.
+ * 저장이 끝나면 온보딩 완료(done) → 홈. 외모 취향 단계는 없다 (#39).
  */
 export default function PreferencesStep() {
   const { session, refreshAppUser } = useSession();
@@ -89,7 +94,6 @@ export default function PreferencesStep() {
   const [childrenStrict, setChildrenStrict] = useState(false);
   const [keywords, setKeywords] = useState<string[]>([]);
   const [importance, setImportance] = useState<Record<string, number>>({
-    appearance_importance: 3,
     personality_importance: 3,
     values_importance: 3,
     lifestyle_importance: 3,
@@ -175,10 +179,18 @@ export default function PreferencesStep() {
       return;
     }
 
-    await advanceOnboarding('appearance');
+    // 마지막 단계 — 완료 기록 (인증이 끝나지 않았다면 DB 트리거가 거부한다)
+    try {
+      await advanceOnboarding('done');
+    } catch {
+      setBusy(false);
+      setError('온보딩을 마치지 못했어요. 본인확인과 얼굴 인증이 끝났는지 확인해 주세요.');
+      return;
+    }
+    track('onboarding_completed');
     await refreshAppUser();
     setBusy(false);
-    router.replace('/onboarding/appearance');
+    router.replace('/(tabs)');
   };
 
   return (
@@ -305,7 +317,7 @@ export default function PreferencesStep() {
 
       <Text variant="title" style={{ marginBottom: spacing.sm }}>무엇이 더 중요한가요?</Text>
       <Text variant="body" color={colors.sub} style={{ marginBottom: spacing.md }}>
-        사람마다 중요한 게 달라요. 답해주시면 소개 기준에 반영돼요.
+        사람마다 중요한 게 달라요. 답해주시면 소개 기준에 참고돼요. 상대에게 공개되지 않아요.
       </Text>
       <View style={{ gap: spacing.md }}>
         {IMPORTANCE_AXES.map((axis) => (
@@ -328,7 +340,7 @@ export default function PreferencesStep() {
       )}
 
       <View style={{ marginTop: spacing.xl }}>
-        <Button title="다음" onPress={save} loading={busy} disabled={!agesValid || !heightsValid} />
+        <Button title="이대로 시작하기" onPress={save} loading={busy} disabled={!agesValid || !heightsValid} />
       </View>
     </Screen>
   );

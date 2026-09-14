@@ -1,12 +1,43 @@
-# 본심 — 사진 없는 AI 블라인드 소개팅 (MVP)
+# 본심 — 사진 없이 대화로 먼저 알아가는 소개팅 (MVP)
 
-> **"서로의 얼굴은 AI만 먼저 봅니다."**
+> **"사진 없이 대화로 먼저 알아가는 소개팅"**
 >
-> 사용자끼리 사진을 직접 공개하지 않고, AI가 외모 취향·성격·가치관·행동 데이터를
-> 기반으로 **하루 한 명**, 서로 잘 맞을 가능성이 높은 상대를 소개하는 소개팅 앱입니다.
+> 사용자끼리 사진을 공개하지 않습니다. 본인확인과 얼굴 라이브니스(실제 사람 확인)를 마친 사용자에게
+> **하루 한 명**, 나이·지역·연애 목적·기본 조건·가치관을 기준으로 상대를 소개하고,
+> 짧은 자기소개와 텍스트 대화로 서로를 알아가게 합니다.
 >
 > 이 MVP 의 목표는 하나의 가설 검증입니다 —
-> **"사진을 직접 보지 않아도, AI 가 골라준 상대와 실제로 대화하고 만나러 나갈 것인가?"**
+> **"사진 없이 알아간 상대에게 호감이 생기고, 실제 만남과 재만남 의향으로 이어지는가?"**
+>
+> 사진이 없다는 사실만으로 진정성이나 좋은 만남이 보장된다고 말하지 않습니다.
+> 프로필·대화 소재·안전·만남 후 경험을 함께 확인합니다 (로드맵: GitHub #30).
+
+## MVP 범위 (2026-09-14 기준 — #30/#39)
+
+**지금 활성인 기능**
+
+- 전화번호 SMS OTP 로그인 → 본인확인(1인 1계정) → **인증용** 얼굴 라이브니스(Didit) → 기본 정보 → 공개 자기소개 → 설문 → 가치관 → 선호 조건 → 홈
+- 하루 한 명 추천 (텍스트 카드: 닉네임·나이·지역·키·직업·흡연·음주·취미·키워드·**자기소개·연애 목적·공개 질문 답변**·인증 배지)
+- 상호 수락 → 텍스트 채팅 → 만남 의사 → 만남 후 비공개 피드백 (흐름 보완은 #41)
+- 신고·차단·정지·탈퇴, 관리자 웹
+
+**MVP 에서 제공하지 않는 것 (앱·문서에서 약속하지 않음)**
+
+- 외모 취향 테스트, 이상형 얼굴/인상 선택, 외모 중요도 설정, 외모 적합도·궁합 표시
+- 얼굴 임베딩·외모 취향 기반 추천 (#8/#9/#10 — 베타에서 구체적 문제가 확인되고 별도 채택된 뒤 검토)
+- 프로필 사진 공개, 영상통화, 무한 스와이프, AI 대화 분석(#28), Plus/인앱 결제(#29 — UI 진입점은 숨김)
+
+**얼굴 인증과 외모 추천의 구분**
+
+| | 인증용 얼굴 라이브니스 (활성) | 외모 추천 (MVP 이후 검토) |
+|---|---|---|
+| 목적 | 실제 사람 확인 · 중복 가입 의심 검토 (#7) | 이상형/외모 취향 매칭 (#8/#9/#10) |
+| 데이터 | Didit 세션 상태·점수·사유 코드 + 서버 전용 reference image | 얼굴 임베딩·취향 벡터 — **생성하지 않음 (null)** |
+| 노출 | 상대에게 공개되지 않음, 추천 계산에 쓰이지 않음 | — |
+| 동의 | 인증 목적 생체정보 고지 (#11/#12) | 채택 시 별도 동의 필요 |
+
+**개발 순서**: **#39**(이 저장소 상태 — 외모 단계 없는 온보딩·공개 프로필·문구·Plus 숨김) → **#40**(매칭 엔진에서 외모 차원 제외·가중치 재정규화) → **#41**(대화 → 상호 만남 동의 → 만남 후 피드백).
+#39 이후 남은 의존성: `MatchingEngine` 은 아직 `appearance` 차원을 계산에 포함한다 (데이터가 없으면 중립 0.5 × 기본 중요도 3 으로 총점을 희석) — 추천 생성은 막히지 않지만 순위 왜곡 제거는 #40 에서 처리한다.
 
 ## 구성
 
@@ -26,7 +57,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0014 순서대로)
+# 마이그레이션 적용 (0001 → 0015 순서대로 — 0015 는 앱 배포 전에 적용)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -168,13 +199,16 @@ deno test --allow-env supabase/functions/send-sms/hook_test.ts
 cd apps/mobile && node --experimental-strip-types scripts/devtools-selftest.mjs
 # 클라이언트 OTP 재전송 60초 쿨다운 테스트 (번호별 · 화면 이동/재시작 후 유지 · 저장값 검증)
 cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.mjs
+# 온보딩 재진입 판정 테스트 (#39 — 외모 데이터 없는 완료 · 'appearance' 단계 사용자 복귀 · 인증 미완료 홈 차단)
+cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs
+# DB: 인증 전 온보딩 완료 차단 트리거 · 공개 자기소개 제약 (onboarding_guard_tests.sql — 위 run_local_check.sh 에 포함)
 
 # 타입체크 / 빌드
 cd apps/mobile && npx tsc --noEmit && npx expo export --platform web
 
 # release 번들 개발 기능 제거 확인 (web + iOS + Android — dist/ 에서 개발 문구/credential grep 0건)
 cd apps/mobile && npx expo export --platform web --platform ios --platform android --no-bytecode \
-  && ! grep -rqE "테스트로 시작하기|촬영 건너뛰기|bonsim-dev-password|dev-login|service_role" dist/
+  && ! grep -rqE "테스트로 시작하기|촬영 건너뛰기|bonsim-dev-password|dev-login|service_role|외모 취향|AI만 먼저|본심 Plus|결제는 준비" dist/
 cd apps/admin && npm run build
 ```
 
@@ -183,20 +217,41 @@ cd apps/admin && npm run build
 `supabase/functions/_shared/matching/MatchingEngine.ts` — 알고리즘 교체가 가능한 단일 모듈.
 
 ```
-UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·외모 벡터)
+UserSnapshot(프로필·공개 자기소개·가치관·설문·중요도·선호 조건·Dealbreaker)
   ├─ checkDealbreakers()   조건 불일치 → 추천 자체에서 제외 (점수 아님)
-  ├─ directionalScore()    A→B 예측 (차원: appearance/personality/values/lifestyle/relationship)
+  ├─ directionalScore()    A→B 예측 (차원: personality/values/lifestyle/relationship — appearance 제외는 #40)
   │                        └ 개인화 중요도(1~5)로 가중 평균
   └─ computeMatch()        A→B, B→A 를 각각 계산 → 조화 평균
                            (한쪽만 좋아하는 조합은 우선순위 하락)
 ```
 
-- **절대적 외모 점수 없음** — 외모 차원은 "내 취향 벡터 × 상대 스타일 벡터" 유사도만 사용
-- 카드에는 원시 점수 대신 `buildReasons()` 가 만든 설명 문구만 노출
+- **외모 점수 없음** — MVP 는 외모 취향 응답·얼굴 벡터를 만들지 않는다. 엔진에 남아 있는 `appearance` 차원은
+  입력이 없어 중립값으로만 계산되며, 차원 제거·가중치 재정규화는 #40 에서 처리한다.
+- 카드에는 원시 점수 대신 `buildReasons()` 가 만든 문구만 노출 — **확인된 데이터가 있을 때만** (설문 유사도·공통 취미·같은 지역·같은 연애 목적).
+  근거가 없으면 문구를 지어내지 않고 비운다. "잘 맞는다/궁합 보장" 표현은 쓰지 않는다.
+- 카드 스냅샷(`recommendations.card`)은 `profiles` 의 공개 필드 allowlist 로만 만든다 —
+  `private_profiles`(가치관·민감 응답), 설문 응답, 인증 원본은 어떤 형태로도 실리지 않는다.
 - `recommendationStrategy`: `high_confidence` / `exploration` / `fallback` (§30 탐색 정책 확장용)
 - `ConversationSignals` 타입이 입력 계약에 포함되어 있어 대화 행동 신호를 이후 버전에서 반영 가능
 - 추천 생성은 `daily-recommendation` Edge Function(service role)에서만 수행 —
   클라이언트는 타인의 원본 데이터에 접근하지 않고 서버가 만든 카드 스냅샷만 받음
+- Plus(하루 +1) 는 `PLUS_EXTRA_RECOMMENDATION_ENABLED=false` 로 비활성 — 모두 하루 1명 (#29)
+
+## 온보딩 순서 (#39)
+
+```text
+전화번호 OTP → 본인확인(identity) → 얼굴 인증(face) → 기본 정보(profile) → 자기소개(intro)
+  → 설문(questionnaire) → 가치관(values) → 선호 조건(preferences) → 완료(done) → 홈
+```
+
+- 저장된 `users.onboarding_step` 은 참고값이다. 앱 진입 게이트(`apps/mobile/src/app/index.tsx`)는
+  `lib/onboardingCore.resolveOnboardingStep` 로 **인증 상태 + 남은 필수 입력** 을 확인해 알맞은 단계로 보낸다.
+  예전 앱이 저장한 `appearance` 단계, 앱 재시작, 뒤로 가기, `/onboarding/appearance` 직접 진입 모두 같은 규칙으로 처리된다.
+- 홈은 `onboarding_completed && identity_verified && face_verified` 일 때만 열린다. 완료 플래그만으로는 들어갈 수 없다.
+- DB 트리거(`users_guard_onboarding_completion`, 0015)가 클라이언트의 "인증 전 완료" 기록을 거부한다.
+- 외모 취향 응답·얼굴 벡터는 완료 조건이 아니다. 가짜 벡터·기본 응답을 만들지 않는다.
+- 공개/비공개 경계: `profiles.intro / relationship_goal / public_answers` 는 **상대에게 공개** (작성 화면에 명시).
+  `private_profiles` 가치관·민감 응답, 설문, 인증 데이터는 카드·API 응답에 실리지 않는다.
 
 ## 인증 구조 — 전화번호 로그인 + 1인 1계정
 
@@ -218,7 +273,7 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
         ├ 삭제된 계정의 identity → 새 계정에 재연결 (재가입)
         ├ 다른 활성 계정        → "기존 계정을 찾았습니다" → 복구(새 번호 연결) flow
         └ banned identity       → 가입 차단 (번호를 바꿔도 우회 불가)
-  → 얼굴 인증 → 프로필 → 온보딩 (기존 flow 유지)
+  → 얼굴 인증(라이브니스 — 인증 목적) → 기본 정보 → 자기소개 → 설문 → 가치관 → 선호 조건 → 홈
 ```
 
 - **1인 1계정 3중 방어**: ① 가입 전 hash 조회(UX 분기) ② insert 시 unique 위반
@@ -275,25 +330,28 @@ UserSnapshot(프로필·가치관·설문·중요도·이상형·Dealbreaker·�
 | OTP rate limit | 서버: `send-sms` 훅이 번호별 60초 쿨다운 + 시간당 5건 강제(429) + 대시보드 프로젝트 한도(30건/h) · 앱: 번호별 60초 버튼 잠금 | 실사용량 보고 한도 조정 + captcha 연동 |
 | IDENTITY_HASH_SECRET | 개발 기본값 (시드 fixture 와 공유) | `supabase secrets set` 으로 운영 secret 발급 (교체 시 기존 해시 재계산 불가 주의) |
 | 얼굴 라이브니스 | **Didit 네이티브 SDK 능동형 라이브니스 구현 완료** (`start-face-liveness` + `didit-webhook`, Development Build 필요). 개발 Mock 은 `complete-face-verification` (production 미배포) | Didit 콘솔 설정·secret·실기기 검증 (`docs/face-liveness-didit.md`) |
-| 얼굴 특징 벡터 | 미생성 (null) — 검증된 reference image 만 private 저장 | 얼굴 임베딩 모델 (reference image 입력, 별도 동의 필요) |
-| 외모 취향 테스트 | 추상 인상 일러스트 카드 | 합법적 synthetic face dataset |
-| Icebreaker | 규칙 기반 | LLM |
-| 결제 | 구조만 (subscriptions 테이블, Plus=추천 개수만) | 인앱 결제 / PG |
+| 얼굴 특징 벡터 | 미생성 (null) — 인증용 reference image 만 서버 전용 private 저장 | MVP 범위 밖 (#8 — 별도 채택·별도 동의 후 검토) |
+| 외모 취향 테스트 | **제거됨** (#39 — 온보딩·수정 화면에 없음, 기존 `appearance_preference_events` 행만 보존) | MVP 범위 밖 (#9/#10) |
+| Icebreaker | 규칙 기반 (공개 정보만 사용) | 공개 답변 기반 선택형 질문 (#41) |
+| 결제 | 구조만 (subscriptions 테이블) — **앱 진입점 숨김, 서버 Plus 플래그 off** (#29) | MVP 검증 이후 feature flag 로 재도입 |
 | 이메일 로그인 | 시드 데모 계정·관리자 웹 전용으로 분리 | 일반 사용자 앱은 전화번호 OTP 만 사용 (완료) |
 | 시드 데모 사용자 | `is_demo=true` 12명 | 실배포 시 제거 |
 
 ## 제품 원칙 (구현에 반영됨)
 
-- 무한 스와이프 없음 — 하루 1명 (Plus 는 2명, **개수만** 다름)
-- 유료여도 매칭 품질·순서·노출 우위 없음
-- 외모 점수/인기 순위/부스트/Super Like/SNS 피드 없음
-- 한쪽만 좋아요한 사실, 거절 사실은 상대에게 비공개
+- 무한 스와이프 없음 — 하루 1명 (MVP 는 유료 개수 차등 없음)
+- 유료여도 매칭 품질·순서·노출 우위 없음 (재도입 시에도 유지)
+- 외모 점수/외모 취향 추천/인기 순위/부스트/Super Like/SNS 피드 없음
+- 얼굴 데이터는 인증(실제 사람 확인·중복 가입 방지)에만 사용
+- 한쪽만 좋아요한 사실, 거절 사실, 개인 피드백은 상대에게 비공개
 - 채팅은 텍스트 전용 (사진 없는 경험 유지)
+- 추천 이유는 확인된 데이터에서만 — 궁합·적합도를 보장하는 표현 없음
 
-## 다음 개발 우선순위
+## 다음 개발 우선순위 (#30)
 
-1. 실제 본인인증(PASS/PortOne) 연동 (SMS 발송은 SOLAPI 훅 + 번호별 쿨다운/상한까지 구현 완료 — 운영 프로젝트 설정 남음)
-2. 얼굴 임베딩(검증된 reference image 입력) → 외모 취향 매칭 고도화 (라이브니스는 Didit 으로 구현 완료 — 콘솔 설정·실기기 검증 남음)
-3. ConversationSignals 를 MatchingEngine 가중치에 반영 (만남 후 피드백 학습 포함)
-4. 추천 탐색 정책(Exploit/Explore/Diversity) 본격 구현 + 추천 풀 공정성 모니터링
-5. 푸시 알림 (매치/메시지) · 계정 삭제 셀프서비스 · 결제
+1. **#40** 외모 데이터 없이 기본 조건·가치관으로 매칭 — `appearance` 차원 제외·가중치 재정규화·양방향 조건 테스트
+2. **#41** 텍스트 대화 → 상호 만남 동의 → 실제 만남 확인 → 비공개 피드백 흐름 완성
+3. #22 하루 한 명 스케줄러·멱등성 · #23 후보 부족 정책 · #24 퍼널 측정 (베타 시작 전)
+4. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기), #11 얼굴 데이터 보관 정책
+5. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)
+6. MVP 이후 별도 채택 시 검토: #8 얼굴 임베딩 · #9/#10 외모 취향 매칭 · #28 AI 대화 분석 · #29 Plus/결제 재도입

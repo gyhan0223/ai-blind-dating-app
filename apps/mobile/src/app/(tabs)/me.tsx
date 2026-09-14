@@ -4,24 +4,36 @@ import React from 'react';
 import { Alert, View } from 'react-native';
 import { Button, Card, Divider, Screen, Text } from '@/components/ui';
 import { jobLabel, regionLabel } from '@/constants/options';
+import { PUBLIC_PROMPTS, relationshipGoalLabel } from '@/constants/questions';
 import { useSession } from '@/lib/session';
 import { supabase } from '@/lib/supabase';
 import { colors, radius, spacing } from '@/theme/tokens';
 
+/**
+ * 내 정보.
+ * Plus/결제 관련 UI 는 MVP(#29/#39) 에서 제거 — 결제가 없으므로 진입점·플랜 표시·"준비 중" 안내를 두지 않는다.
+ * (subscriptions 테이블과 재도입용 구조는 서버에 그대로 남아 있다.)
+ * 소개글·선호조건 수정은 #25 에서 제공한다 — 여기서는 상대에게 보이는 내용을 확인만 한다.
+ */
 async function fetchMe() {
   const { data: auth } = await supabase.auth.getUser();
   const userId = auth.user?.id;
   if (!userId) throw new Error('로그인이 필요합니다.');
-  const [{ data: profile }, { data: sub }] = await Promise.all([
-    supabase.from('profiles').select('*').eq('user_id', userId).maybeSingle(),
-    supabase.from('subscriptions').select('plan, status').eq('user_id', userId).maybeSingle(),
-  ]);
-  return { profile, plan: sub?.status === 'active' ? (sub?.plan ?? 'free') : 'free' };
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('nickname, region_code, job_group, intro, relationship_goal, public_answers')
+    .eq('user_id', userId)
+    .maybeSingle();
+  return { profile };
 }
 
 export default function MeScreen() {
   const { appUser, signOut } = useSession();
   const { data } = useQuery({ queryKey: ['me'], queryFn: fetchMe });
+  const profile = data?.profile;
+  const savedAnswers = (profile?.public_answers ?? {}) as Record<string, unknown>;
+  const answers = PUBLIC_PROMPTS.filter((p) => typeof savedAnswers[p.id] === 'string' && (savedAnswers[p.id] as string).trim());
+  const goal = relationshipGoalLabel(profile?.relationship_goal);
 
   const confirmSignOut = () => {
     Alert.alert('로그아웃할까요?', undefined, [
@@ -58,27 +70,13 @@ export default function MeScreen() {
       <Text variant="title" style={{ marginBottom: spacing.lg }}>내 정보</Text>
 
       <Card>
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Text variant="display">{data?.profile?.nickname ?? '...'}</Text>
-          <View
-            style={{
-              backgroundColor: data?.plan === 'plus' ? colors.warmHighlight : colors.surfaceSubtle,
-              borderRadius: radius.full,
-              paddingHorizontal: 12,
-              paddingVertical: 5,
-            }}
-          >
-            <Text variant="caption" color={colors.inkSoft}>
-              {data?.plan === 'plus' ? 'Plus' : 'Free'}
-            </Text>
-          </View>
-        </View>
-        {data?.profile && (
+        <Text variant="display">{profile?.nickname ?? '...'}</Text>
+        {profile && (
           <Text variant="body" color={colors.sub} style={{ marginTop: spacing.xs }}>
-            {regionLabel(data.profile.region_code)} · {jobLabel(data.profile.job_group)}
+            {regionLabel(profile.region_code)} · {jobLabel(profile.job_group)}
           </Text>
         )}
-        <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md }}>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginTop: spacing.md }}>
           {appUser?.identity_verified && (
             <View style={{ backgroundColor: colors.accentSoft, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4 }}>
               <Text variant="caption" color={colors.accent}>본인 인증 ✓</Text>
@@ -95,14 +93,24 @@ export default function MeScreen() {
       <View style={{ height: spacing.md }} />
 
       <Card>
-        <Text variant="heading" style={{ marginBottom: spacing.sm }}>본심 Plus</Text>
-        <Text variant="body" color={colors.sub}>
-          하루 한 명의 추천이 더해지고, 지역을 넓혀 소개받을 수 있어요.{'\n'}
-          Plus 여도 매칭 기준은 똑같아요 — 더 좋은 상대를 돈으로 살 수는 없어요.
+        <Text variant="heading" style={{ marginBottom: spacing.xs }}>상대에게 보이는 소개</Text>
+        <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.md }}>
+          사진 대신 이 내용으로 소개돼요.
         </Text>
-        <Text variant="caption" color={colors.faint} style={{ marginTop: spacing.sm }}>
-          결제는 준비 중이에요.
+        {goal ? <Text variant="caption" color={colors.accent} style={{ marginBottom: spacing.sm }}>{goal}</Text> : null}
+        <Text variant="body" style={{ lineHeight: 24 }}>
+          {profile?.intro ?? '아직 자기소개가 없어요.'}
         </Text>
+        {answers.length > 0 && (
+          <View style={{ gap: spacing.md, marginTop: spacing.md }}>
+            {answers.map((p) => (
+              <View key={p.id}>
+                <Text variant="label" color={colors.inkSoft}>{p.question}</Text>
+                <Text variant="body" style={{ marginTop: 2 }}>{savedAnswers[p.id] as string}</Text>
+              </View>
+            ))}
+          </View>
+        )}
       </Card>
 
       <View style={{ height: spacing.md }} />
@@ -110,8 +118,8 @@ export default function MeScreen() {
       <Card>
         <Text variant="heading" style={{ marginBottom: spacing.sm }}>내 정보와 안전</Text>
         <Text variant="body" color={colors.sub}>
-          얼굴 사진은 상대에게 절대 공개되지 않아요.{'\n'}
-          설문과 피드백은 매칭에만 사용돼요.
+          인증에 쓴 얼굴 정보는 상대에게 공개되지 않고, 소개 상대를 고르는 데도 쓰이지 않아요.{'\n'}
+          가치관 설문과 피드백은 소개 기준에만 참고되고 상대에게 그대로 보이지 않아요.
         </Text>
         <Divider />
         <Text variant="caption" color={colors.sub}>

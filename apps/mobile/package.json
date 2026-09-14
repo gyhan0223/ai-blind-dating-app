@@ -52,7 +52,8 @@
     "lint": "expo lint",
     "postinstall": "patch-package",
     "face:selftest": "node --experimental-strip-types scripts/face-liveness-selftest.mjs",
-    "sdk:verify-no-token-log": "bash scripts/verify-sdk-no-token-log.sh"
+    "sdk:verify-no-token-log": "bash scripts/verify-sdk-no-token-log.sh",
+    "onboarding:selftest": "node --experimental-strip-types scripts/onboarding-resume-selftest.mjs"
   },
   "private": true
 }

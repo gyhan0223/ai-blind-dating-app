@@ -1,6 +1,7 @@
 /**
- * AI Icebreaker — 매칭 후 첫 대화 주제 추천.
- * 현재는 규칙 기반. 이 함수 시그니처를 유지한 채 LLM 호출로 교체할 수 있다.
+ * Icebreaker — 매칭 후 첫 대화 주제 제안 (규칙 기반).
+ * 공개 프로필 정보(취미·연애 목적)만 근거로 쓴다. 비공개 응답·인증 데이터는 사용하지 않는다.
+ * 공개 답변 기반 선택형 시작 질문 확장은 #41.
  */
 import type { UserSnapshot } from './types.ts';
 
@@ -67,22 +68,15 @@ export function generateIcebreaker(a: UserSnapshot, b: UserSnapshot): Icebreaker
     if (entry) return entry;
   }
 
-  // 취미가 겹치지 않으면 가치관/생활 축에서 화제를 찾는다
-  const aTravel = a.values.spendingStyle ?? 3;
-  const bTravel = b.values.spendingStyle ?? 3;
-  if (aTravel >= 4 && bTravel >= 4) {
+  // 공개 프로필의 연애 목적이 같으면 그 사실만 언급한다 (공개 정보)
+  if (a.profile.relationshipGoal && a.profile.relationshipGoal === b.profile.relationshipGoal) {
     return {
-      lead: '두 분 모두 경험에 아끼지 않는 편이에요.',
-      question: '최근에 해 본 것 중 가장 만족스러웠던 경험은 무엇인가요?',
-    };
-  }
-  if ((a.values.personalTimeNeed ?? 3) >= 4 && (b.values.personalTimeNeed ?? 3) >= 4) {
-    return {
-      lead: '두 분 모두 자기만의 시간을 소중히 여겨요.',
-      question: '혼자만의 시간에는 주로 무엇을 하며 보내나요?',
+      lead: '두 분 모두 연애 목적이 같아요.',
+      question: '요즘 하루 중 가장 기다려지는 시간은 언제인가요?',
     };
   }
 
+  // 비공개 가치관 응답(private_profiles)은 대화 문구에 쓰지 않는다 — 상대에게 응답 값이 간접 노출되기 때문 (#39)
   return {
     lead: '첫 인사를 어떻게 시작할지 고민된다면,',
     question: '요즘 하루 중 가장 기다려지는 시간은 언제인가요?',

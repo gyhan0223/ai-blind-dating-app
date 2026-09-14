@@ -300,7 +300,8 @@ npx expo start --dev-client                # 설치한 개발 빌드가 이 Metr
 - 로그에 API Key·session token·얼굴 URL·workflow id·application/environment 원문·전화번호를 남기지 않는다 (세션 id 축약 + 고정 코드). SDK Android 로그도 patch 로 제거.
 - `feature_vector` 는 만들지 않는다 (null). 얼굴 임베딩은 이번 작업 범위가 아니다.
 
-목적 분리: **라이브니스·중복계정 방지 목적** (현재) 과 **외모 매칭 목적** (향후 — reference image 를 임베딩 입력으로 쓰기 전 **별도 동의** 필수).
+목적 분리: 얼굴 데이터는 **라이브니스·중복계정 방지(인증) 목적** 으로만 쓴다. MVP(#30/#39) 는 외모 매칭·얼굴 임베딩을 하지 않는다.
+향후 #8 이 별도로 채택되어 reference image 를 임베딩 입력으로 쓰려면 **별도 동의** 와 #11 의 보관 범위 재검토가 먼저다.
 
 회원 탈퇴 시 삭제 경로 (후속 작업 TODO — `delete-account` 에 아직 연결되지 않음):
 1. storage `faces/<user_id>/liveness/*` 삭제 (service role). 2. `face_verifications` 행의 `reference_path` 제거/익명화.
@@ -311,7 +312,7 @@ npx expo start --dev-client                # 설치한 개발 빌드가 이 Metr
 
 - [ ] TODO: 민감정보(생체정보) 처리 항목·목적·보유기간 고지 및 **별도 동의** 문구
 - [ ] TODO: Didit(Provider) 에 대한 처리위탁·**국외 이전** 고지 (서버 위치·이전받는 자·항목·목적·보유기간)
-- [ ] TODO: 라이브니스 목적과 **외모 매칭 목적을 분리** 해 고지, 매칭 목적은 추가 동의
+- [ ] TODO: 처리 목적을 **인증(라이브니스·중복 가입 방지)** 으로 한정해 고지. 외모 매칭 목적은 MVP 에 없으므로 고지/동의 대상이 아니다 (#8 채택 시 추가 동의)
 - [ ] TODO: 탈퇴 시 Provider 데이터 삭제 절차·기간 고지
 - [ ] TODO: Didit 과의 DPA 및 보존 기간 설정 확인
 
@@ -359,6 +360,6 @@ cd apps/admin && npx tsc --noEmit
 - Didit 콘솔 설정(Liveness-only 워크플로 · 3D Action & Flash · Face Search · **V3 웹훅 destination**) + secret 4개 등록 — 운영자
 - Supabase staging: `0014` 마이그레이션 적용, `admin-face-review` 배포, 관리자 웹 `ADMIN_ACTOR_LABEL`(선택) — 운영자
 - `eas init` 으로 EAS 프로젝트 연결 후 `eas build --profile development` 실기기 체크리스트(12절) 통과 — 실제 Didit 응답 형태 1회 확인 포함
-- 개인정보처리방침 개정 + 외모 매칭 목적 별도 동의 (10절 TODO) — 출시 차단
+- 개인정보처리방침 개정 — 인증 목적 생체정보 처리·국외 이전 고지 (10절 TODO) — 출시 차단
 - `delete-account` 에 Didit 세션 삭제·storage 삭제 연결 (10절 TODO)
-- 얼굴 임베딩(다음 작업)은 `status='approved' and reference_path is not null` 행만 입력으로 사용한다
+- 얼굴 임베딩은 MVP 범위 밖이다 (#30 — #8 은 베타 이후 별도 채택 시 검토). 채택된다면 `status='approved' and reference_path is not null` 행만 입력으로 쓰고 별도 동의가 선행된다

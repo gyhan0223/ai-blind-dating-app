@@ -3,7 +3,8 @@ import { View } from 'react-native';
 import { Text } from '@/components/ui';
 import { colors, radius, spacing } from '@/theme/tokens';
 
-const STEPS = ['identity', 'face', 'profile', 'questionnaire', 'values', 'preferences', 'appearance'];
+/** 진행률 표시용 단계 — constants/options ONBOARDING_STEPS 에서 welcome/done 을 뺀 순서 (#39: appearance 제거, intro 추가) */
+const STEPS = ['identity', 'face', 'profile', 'intro', 'questionnaire', 'values', 'preferences'];
 
 export function OnboardingHeader({ step, title, subtitle }: { step: string; title: string; subtitle?: string }) {
   const index = Math.max(0, STEPS.indexOf(step));

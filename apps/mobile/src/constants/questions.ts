@@ -63,3 +63,32 @@ export const VALUE_AXES: {
   { key: 'spending_style', title: '소비 성향', lowLabel: '저축 우선', highLabel: '경험에 투자' },
   { key: 'religion_importance', title: '종교의 중요도', lowLabel: '중요하지 않아요', highLabel: '많이 중요해요' },
 ];
+
+/**
+ * 공개 자기소개 — 상대에게 그대로 보이는 정보 (#39).
+ * 서버 supabase/functions/_shared/matching/publicPrompts.ts 와 id·문구를 동기 유지한다.
+ * (카드 스냅샷에는 서버가 허용된 id 의 답변만 질문 문구와 함께 싣는다)
+ */
+export const RELATIONSHIP_GOALS = [
+  { value: 'serious', label: '진지한 연애를 원해요' },
+  { value: 'marriage_minded', label: '결혼을 생각하는 만남을 원해요' },
+  { value: 'take_it_slow', label: '천천히 알아가고 싶어요' },
+  { value: 'undecided', label: '아직 열어 두고 있어요' },
+] as const;
+
+export type RelationshipGoal = (typeof RELATIONSHIP_GOALS)[number]['value'];
+
+export function relationshipGoalLabel(value: string | null | undefined): string | null {
+  return RELATIONSHIP_GOALS.find((g) => g.value === value)?.label ?? null;
+}
+
+/** 짧은 공개 질문 — 모두 선택 응답. 긴 성격검사가 아니라 대화 소재용이다. */
+export const PUBLIC_PROMPTS = [
+  { id: 'day_off', question: '쉬는 날에는 주로 무엇을 하나요?' },
+  { id: 'together', question: '상대와 함께 해보고 싶은 일이 있나요?' },
+  { id: 'important', question: '연애에서 중요하게 생각하는 것은 무엇인가요?' },
+] as const;
+
+export const INTRO_MIN_LENGTH = 10;
+export const INTRO_MAX_LENGTH = 300;
+export const PUBLIC_ANSWER_MAX_LENGTH = 200;

@@ -12,6 +12,7 @@ import {
   styleVectorFromFeature,
 } from './MatchingEngine.ts';
 import { generateIcebreaker } from './icebreaker.ts';
+import { buildPublicAnswerCards, normalizeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
 import type { QuestionnaireResponse, UserSnapshot } from './types.ts';
 
 let failures = 0;
@@ -179,6 +180,59 @@ const ib = generateIcebreaker(male, female);
 check('공통 취미 기반 icebreaker', ib.lead.includes('여행') || ib.lead.includes('영화'));
 const noCommon = generateIcebreaker(male, lukewarmTarget);
 check('공통점 없어도 질문 생성', noCommon.question.length > 0);
+
+// --- #39: 비공개 가치관 응답은 icebreaker 문구에 새지 않는다 ---
+const privateHeavyA = makeUser({
+  profile: { hobbies: [] },
+  values: { spendingStyle: 5, personalTimeNeed: 5 },
+});
+const privateHeavyB = makeUser({
+  profile: { userId: 'u9', gender: 'female', seekingGender: 'male', hobbies: [] },
+  values: { spendingStyle: 5, personalTimeNeed: 5 },
+});
+const leak = generateIcebreaker(privateHeavyA, privateHeavyB);
+check('icebreaker 가 비공개 소비/개인시간 응답을 언급하지 않는다', !leak.lead.includes('경험에') && !leak.lead.includes('자기만의 시간'));
+const sameGoalA = makeUser({ profile: { hobbies: [], relationshipGoal: 'serious' } });
+const sameGoalB = makeUser({ profile: { userId: 'u10', gender: 'female', seekingGender: 'male', hobbies: [], relationshipGoal: 'serious' } });
+check('공개 연애 목적이 같으면 그 사실만 언급', generateIcebreaker(sameGoalA, sameGoalB).lead.includes('연애 목적'));
+
+// --- #39: 추천 이유는 확인된 데이터에서만 — 근거 없으면 빈 배열 ---
+const strangerA = makeUser({
+  profile: { hobbies: [], regionCode: 'seoul' },
+  responses: responses({ p01: ['personality', 'personality.extraversion', 1] }),
+  values: { marriageIntent: 1, childrenIntent: 1, spendingStyle: 1, contactFrequency: 1, dateFrequency: 1, personalTimeNeed: 1 },
+});
+const strangerB = makeUser({
+  profile: { userId: 'u11', gender: 'female', seekingGender: 'male', hobbies: [], regionCode: 'busan' },
+  responses: responses({ p01: ['personality', 'personality.extraversion', 5] }),
+  values: { marriageIntent: 5, childrenIntent: 5, spendingStyle: 5, contactFrequency: 5, dateFrequency: 5, personalTimeNeed: 5 },
+});
+const strangerResult = computeMatch(strangerA, strangerB, NOW_YEAR);
+check('공통점이 확인되지 않으면 이유를 지어내지 않는다', strangerResult.eligible && strangerResult.reasons.length === 0);
+check('추천 이유에 보장/궁합 표현 없음', !result.reasons.some((r) => r.includes('잘 맞아요') || r.includes('어울릴')));
+const goalMatch = computeMatch(
+  makeUser({ ...strangerA, profile: { ...strangerA.profile, relationshipGoal: 'marriage_minded' } }),
+  makeUser({ ...strangerB, profile: { ...strangerB.profile, relationshipGoal: 'marriage_minded' } }),
+  NOW_YEAR,
+);
+check('연애 목적이 같으면 공개 사실로 이유 생성', goalMatch.reasons.includes('연애 목적이 같아요'));
+
+// --- #39: 외모 응답·벡터가 없어도(신규 가입 경로) 추천 계산이 된다 ---
+check('외모 벡터 null 이어도 eligible + 점수', result.eligible && result.score != null && male.appearancePreferenceVector == null);
+
+// --- #39: 카드 공개 답변 allowlist ---
+const cards = buildPublicAnswerCards({
+  day_off: '  집에서 쉬어요 ',
+  important: '',
+  unknown_key: '노출되면 안 됨',
+  together: 42,
+});
+check('허용된 prompt 의 문자열 답변만 카드에 실린다', cards.length === 1 && cards[0].id === 'day_off' && cards[0].answer === '집에서 쉬어요');
+check('질문 문구가 함께 실린다', cards[0].question.length > 0);
+check('배열/비객체 답변은 빈 배열', buildPublicAnswerCards(['x']).length === 0 && buildPublicAnswerCards(null).length === 0);
+check('긴 답변은 잘린다', (buildPublicAnswerCards({ day_off: 'a'.repeat(500) })[0]?.answer.length ?? 0) === 200);
+check('intro 정규화', normalizeIntro('  안녕  ') === '안녕' && normalizeIntro('') == null && normalizeIntro(3) == null);
+check('relationship_goal 허용값만', normalizeRelationshipGoal('serious') === 'serious' && normalizeRelationshipGoal('x') == null);
 
 if (failures > 0) {
   console.error(`\n${failures} test(s) failed`);
