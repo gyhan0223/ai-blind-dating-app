@@ -30,7 +30,9 @@ PROD_FUNCTIONS=(
   didit-webhook
   admin-face-review
   daily-recommendation
+  daily-recommendation-batch
   icebreaker
+  send-push
   send-sms
 )
 

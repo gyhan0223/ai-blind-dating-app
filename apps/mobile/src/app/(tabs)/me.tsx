@@ -1,10 +1,19 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { router } from 'expo-router';
-import React from 'react';
-import { Alert, View } from 'react-native';
+import React, { useState } from 'react';
+import { Alert, Linking, Platform, Switch, View } from 'react-native';
 import { Button, Card, Divider, Screen, Text } from '@/components/ui';
 import { jobLabel, regionLabel } from '@/constants/options';
 import { composeIntro } from '@/constants/questions';
+import {
+  DEFAULT_PREFERENCES,
+  fetchNotificationPreferences,
+  type NotificationPreferences,
+  pushPermissionStatus,
+  registerPushToken,
+  saveNotificationPreferences,
+  unregisterPushToken,
+} from '@/lib/push';
 import { useSession } from '@/lib/session';
 import { supabase } from '@/lib/supabase';
 import { colors, radius, spacing } from '@/theme/tokens';
@@ -27,9 +36,32 @@ async function fetchMe() {
   return { profile };
 }
 
+const PREF_ITEMS: { key: keyof NotificationPreferences; label: string }[] = [
+  { key: 'daily_recommendation', label: '오늘의 소개 도착' },
+  { key: 'match_created', label: '새 대화가 열림' },
+  { key: 'new_message', label: '새 메시지' },
+  { key: 'mutual_meetup_interest', label: '만남 관련 소식' },
+];
+
 export default function MeScreen() {
   const { appUser, signOut } = useSession();
+  const queryClient = useQueryClient();
   const { data } = useQuery({ queryKey: ['me'], queryFn: fetchMe });
+  const { data: prefs } = useQuery({ queryKey: ['notification-preferences'], queryFn: fetchNotificationPreferences });
+  const { data: permission } = useQuery({ queryKey: ['push-permission'], queryFn: pushPermissionStatus });
+  const [prefError, setPrefError] = useState<string | null>(null);
+
+  const togglePref = async (key: keyof NotificationPreferences, value: boolean) => {
+    const next = { ...(prefs ?? DEFAULT_PREFERENCES), [key]: value };
+    queryClient.setQueryData(['notification-preferences'], next);
+    setPrefError(null);
+    try {
+      await saveNotificationPreferences(next);
+    } catch {
+      setPrefError('알림 설정을 저장하지 못했어요.');
+      queryClient.invalidateQueries({ queryKey: ['notification-preferences'] });
+    }
+  };
   const profile = data?.profile;
   // 카드에 실리는 문장과 같은 규칙으로 고른 항목을 문장으로 만든다 (서버 composeIntro 와 동일)
   const intro = profile ? composeIntro(profile.relationship_goal, profile.public_answers) : null;
@@ -55,6 +87,7 @@ export default function MeScreen() {
         text: '탈퇴하기',
         style: 'destructive',
         onPress: async () => {
+          await unregisterPushToken();
           // 콘텐츠/인증/identity 보존 정책은 서버(delete-account Edge Function)가 분리 처리
           await supabase.functions.invoke('delete-account', { body: { action: 'delete' } });
           await signOut();
@@ -99,6 +132,49 @@ export default function MeScreen() {
         <Text variant="body" style={{ lineHeight: 24 }}>
           {intro ?? '아직 고른 소개가 없어요.'}
         </Text>
+      </Card>
+
+      <View style={{ height: spacing.md }} />
+
+      <Card>
+        <Text variant="heading" style={{ marginBottom: spacing.xs }}>알림</Text>
+        <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.sm }}>
+          알림에는 메시지 내용이나 상대 이름이 들어가지 않아요. 앱을 열어야 볼 수 있어요.
+        </Text>
+        {permission === 'denied' && Platform.OS !== 'web' && (
+          <View style={{ marginBottom: spacing.sm }}>
+            <Text variant="caption" color={colors.danger} style={{ marginBottom: spacing.xs }}>
+              기기 설정에서 알림이 꺼져 있어요.
+            </Text>
+            <Button kind="secondary" title="기기 알림 설정 열기" onPress={() => Linking.openSettings()} />
+          </View>
+        )}
+        {permission === 'undetermined' && (
+          <View style={{ marginBottom: spacing.sm }}>
+            <Button
+              kind="secondary"
+              title="알림 켜기"
+              onPress={async () => {
+                await registerPushToken({ askPermission: true });
+                queryClient.invalidateQueries({ queryKey: ['push-permission'] });
+              }}
+            />
+          </View>
+        )}
+        {PREF_ITEMS.map((item) => (
+          <View key={item.key} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6 }}>
+            <Text variant="body">{item.label}</Text>
+            <Switch
+              value={(prefs ?? DEFAULT_PREFERENCES)[item.key]}
+              onValueChange={(v) => togglePref(item.key, v)}
+              trackColor={{ true: colors.accent }}
+              accessibilityLabel={`${item.label} 알림`}
+            />
+          </View>
+        ))}
+        {prefError && (
+          <Text variant="caption" color={colors.danger} style={{ marginTop: spacing.xs }}>{prefError}</Text>
+        )}
       </Card>
 
       <View style={{ height: spacing.md }} />

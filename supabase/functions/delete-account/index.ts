@@ -19,6 +19,8 @@ type Db = ReturnType<typeof serviceClient>;
  *  status='deleted' 가 되면 can_chat_in/meetup_set_intent 가 양쪽 계정 active 를 요구하므로 기존 매치로도 더 이상 연락되지 않는다. */
 async function deleteUserContent(db: Db, userId: string) {
   await db.from('users').update({ status: 'deleted' }).eq('id', userId);
+  // 탈퇴한 기기로 알림이 가지 않게 토큰을 지운다 (#17). 미발송 outbox 는 발송기가 recipient_inactive 로 닫는다
+  await db.from('push_tokens').delete().eq('user_id', userId);
   await db
     .from('recommendations')
     .update({ status: 'expired' })

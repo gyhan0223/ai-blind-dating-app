@@ -61,6 +61,11 @@ if [[ "${WITH_MEETUP_CONCURRENCY_TESTS:-1}" == "1" && -f meetup_concurrency_test
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash meetup_concurrency_test.sh
 fi
 
+if [[ "${WITH_PUSH_TESTS:-1}" == "1" && -f push_tests.sql ]]; then
+  echo "running push tests (#17 — 토큰/설정 RLS · outbox 트리거 · dequeue/mark 서버 전용)"
+  $PSQL -d "$DB_NAME" -f push_tests.sql
+fi
+
 if [[ "${WITH_RECOMMENDATION_RUNS_TESTS:-1}" == "1" && -f recommendation_runs_tests.sql ]]; then
   echo "running recommendation runs tests (#22 — claim/busy/skip · lease 만료 재획득 · 서버 전용)"
   $PSQL -d "$DB_NAME" -f recommendation_runs_tests.sql

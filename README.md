@@ -57,7 +57,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0017 순서대로 — 0015/0016/0017 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
+# 마이그레이션 적용 (0001 → 0018 순서대로 — 0015~0018 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -80,6 +80,7 @@ supabase functions deploy didit-webhook --no-verify-jwt # Didit V3 결과 웹훅
 supabase functions deploy admin-face-review             # 관리자 얼굴 인증 검토 (service role 전용 — 관리자 웹이 호출)
 supabase functions deploy daily-recommendation
 supabase functions deploy daily-recommendation-batch  # 스케줄러용 (service role 전용) — pg_cron 등록은 docs/matching-policy.md 10절
+supabase functions deploy send-push                     # Push 발송기 (service role 전용, cron 1분) — docs/push-notifications.md
 supabase functions deploy icebreaker
 
 # SMS OTP 실발송 (Issue #4) — Supabase Auth "Send SMS" HTTP Hook → SOLAPI.
@@ -347,7 +348,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 | 얼굴 특징 벡터 | 미생성 (null) — 인증용 reference image 만 서버 전용 private 저장 | MVP 범위 밖 (#8 — 별도 채택·별도 동의 후 검토) |
 | 외모 취향 테스트 | **제거됨** (#39 — 온보딩·수정 화면에 없음, 기존 `appearance_preference_events` 행만 보존) | MVP 범위 밖 (#9/#10) |
 | 대화 시작 질문 | **공개 답변·취미 기반 선택형 2~3개 구현 완료** (#41 — 규칙 기반, 자동 발송 없음, LLM 없음) | — (AI 대화 분석은 #28, MVP 범위 밖) |
-| Push 알림 | 서버 outbox(`notification_events`)만 — 새 메시지·상호 만남 관심을 중복 없이 기록 | 토큰 등록·발송기·deep link (#17) |
+| Push 알림 | **구현 완료, 실기기 미검증** (#17 — `expo-notifications` 토큰 등록·종류별 설정·outbox → `send-push` 발송기·알림 탭 딥링크. `docs/push-notifications.md`) | EAS projectId 연결(#18)·APNs 키·실기기 수신 확인·cron 등록 |
 | 결제 | 구조만 (subscriptions 테이블) — **앱 진입점 숨김, 서버 Plus 플래그 off** (#29) | MVP 검증 이후 feature flag 로 재도입 |
 | 이메일 로그인 | 시드 데모 계정·관리자 웹 전용으로 분리 | 일반 사용자 앱은 전화번호 OTP 만 사용 (완료) |
 | 시드 데모 사용자 | `is_demo=true` 12명 | 실배포 시 제거 |
@@ -365,7 +366,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 ## 다음 개발 우선순위 (#30)
 
 1. #24 퍼널 측정 대시보드 (이벤트·집계 뷰는 #41 에서 제공 — `docs/meetup-flow.md` 5절). #22 멱등성·배치와 #23 재추천/재시도 주기는 구현됨 — 남은 것은 실제 프로젝트에 pg_cron 등록·운영 확인
-2. #17 Push 발송기(outbox 연결) · #15/#16 신고 운영·스팸 방지 · #13 삭제 파이프라인 (#41 데이터는 cascade 로 연결됨)
+2. #15/#16 신고 운영·스팸 방지 · #13 삭제 파이프라인 (#41 데이터는 cascade 로 연결됨). #17 Push 는 구현됨 — 남은 것은 EAS 연결·APNs·실기기 수신
 3. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기), #11 얼굴 데이터 보관 정책
 4. #21 실기기 E2E (두 계정으로 소개 수락 → 대화 → 상호 의향 → 만남 확인 → 피드백 — #41 은 로컬 DB/순수 로직 검증까지만 마침)
 5. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)

@@ -132,4 +132,8 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#41) `meetup_pair_summary` 뷰와 `notification_events` 를 사용자 JWT 로 select 하면 권한 오류다
 - [ ] (#41) **실기기 두 대**로 상호 수락 → 첫 메시지 → 시작 질문 선택·수정·전송 → 상호 의향 → 만남 확인 → 피드백을 끝까지 확인했다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)
 - [ ] (#41) 실기기에서 네트워크 끊김 → 복귀 시 놓친 메시지가 복구되고, 전송 실패 메시지가 "다시 보내기" 로 중복 없이 전송된다 — **아직 미수행**
-- [ ] (#41/#17) Push 는 미구현이다 — 앱·문서에 "알림이 간다" 고 약속하지 않는다. `notification_events` outbox 만 쌓인다
+- [ ] (#17) 마이그레이션 `0018_push_notifications.sql` 적용 · `send-push` 배포 · cron 등록 (`select * from cron.job where jobname = 'send-push'`)
+- [ ] (#17) 사용자 JWT 로 `notification_events_dequeue` 를 호출하면 거부되고, `push_tokens` 는 본인 행만 보인다
+- [ ] (#17) **실기기(Android 우선)** 에서 알림 권한 허용 → `push_tokens` 행 생성 → 상대가 메시지 전송 → 1분 안에 "새 메시지가 도착했어요" 수신 → 탭하면 해당 채팅방 — **아직 미수행**
+- [ ] (#17) 알림 본문에 메시지 원문·상대 닉네임이 없다 (잠금화면 확인). 알림 설정 스위치를 끄면 오지 않는다 (`skipped_reason='pref_off'`)
+- [ ] (#17) 로그아웃 후 이전 계정의 알림이 오지 않는다 (`push_tokens` 에 행 없음). iOS 는 Apple Developer·APNs 키 등록 후 검증

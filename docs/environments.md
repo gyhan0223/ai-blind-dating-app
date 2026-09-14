@@ -55,6 +55,7 @@ Issue #3 기준 환경 모델. 핵심 원칙은 두 가지다.
 | `IDENTITY_HASH_SECRET` | 생략 가능 (dev fixture secret 사용) | **필수** — 32자+ 고유 값 | **필수** — 32자+ 고유 값 (staging 과 다른 값) | **예** | 미설정/개발 기본값/짧은 값 → verify-identity 기동 실패 |
 | `IDENTITY_PROVIDER` | 생략 가능 (`mock` 기본값) | 생략 가능 (`mock`) 또는 실제 provider | **필수** — 실제 provider 이름 (`mock` 금지) | 아니오 | 미설정/`mock`/미구현 이름 → verify-identity 기동 실패 |
 | `FACE_VERIFICATION_PROVIDER` | 생략 가능 (`mock` 기본값) | `didit` 권장 (실기기 테스트) 또는 생략(`mock`) | **필수** — `didit` (`mock` 금지) | 아니오 | 미설정/`mock`/미구현 이름 → start-face-liveness·didit-webhook 기동 실패. `mock` 은 complete-face-verification(개발용)만 기동 |
+| `EXPO_ACCESS_TOKEN` | 선택 | 선택 | 선택 | 예 | Expo Push API 토큰 (Expo 대시보드 Enhanced Security 를 켠 경우 필수). send-push 만 사용 (#17) |
 | `DIDIT_API_KEY` | didit 사용 시 필수 | **필수** (didit 시) | **필수** | **예** | Didit Sessions API **v3** 세션 생성·Decision 조회·삭제. 로그/응답 미노출 |
 | `DIDIT_WORKFLOW_ID` | didit 사용 시 필수 | **필수** (didit 시) | **필수** | 아니오 (비공개 취급) | Liveness-only 워크플로 ID (라이브니스 노드 1개, 3D Action & Flash, 최대 3회, Face Search). Decision/웹훅 `workflow_id` 대조 |
 | `DIDIT_WEBHOOK_SECRET` | didit 사용 시 필수 | **필수** (didit 시) — staging 앱의 secret | **필수** — production 앱의 secret | **예** | didit-webhook 의 `X-Signature-V2` 검증. 콘솔 웹훅 destination 은 **V3** 여야 한다. 없으면 모든 웹훅 500 |
