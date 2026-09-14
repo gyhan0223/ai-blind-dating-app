@@ -37,7 +37,7 @@
 | 동의 | 인증 목적 생체정보 고지 (#11/#12) | 채택 시 별도 동의 필요 |
 
 **개발 순서**: **#39**(이 저장소 상태 — 외모 단계 없는 온보딩·고르기형 공개 프로필·문구·Plus 숨김) → **#40**(매칭 엔진에서 외모 차원 제외·가중치 재정규화) → **#41**(대화 → 상호 만남 동의 → 만남 후 피드백).
-#39 이후 남은 의존성: `MatchingEngine` 은 아직 `appearance` 차원을 계산에 포함한다 (데이터가 없으면 중립 0.5 × 기본 중요도 3 으로 총점을 희석) — 추천 생성은 막히지 않지만 순위 왜곡 제거는 #40 에서 처리한다.
+#40 반영: `MatchingEngine` 에서 `appearance` 차원·중요도가 제거되어 유효한 비외모 차원만으로 재정규화한다 (`docs/matching-policy.md`).
 
 ## 구성
 
@@ -179,8 +179,10 @@ npm run dev                  # http://localhost:3100
 # DB 스키마 + 시드 + RLS 테스트 (Docker 없이 로컬 Postgres 로)
 cd supabase/tests && bash run_local_check.sh
 
-# MatchingEngine 단위 테스트 (19건)
+# MatchingEngine / 추천 코어 단위 테스트 (외모 제외·재정규화·필수 조건·안전 필터·공개 이유·tie-break)
 cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts
+# 실제 DB 연결 테스트 (마이그레이션+seed 위에서 DB → 스냅샷 → 엔진 → 카드) — run_local_check.sh 가 함께 실행
+#   PGDATABASE=blind_dating_check node --experimental-strip-types supabase/tests/recommendation_db_test.mjs
 
 # identity 로직 단위 테스트 (33건 — 전화번호 정규화 · 1인1계정 분기 · HMAC)
 cd supabase/functions/_shared/identity && node --experimental-strip-types selftest.ts
@@ -212,32 +214,33 @@ cd apps/mobile && npx expo export --platform web --platform ios --platform andro
 cd apps/admin && npm run build
 ```
 
-## MatchingEngine 구조
+## MatchingEngine 구조 (#40 — 외모 데이터 없음)
 
-`supabase/functions/_shared/matching/MatchingEngine.ts` — 알고리즘 교체가 가능한 단일 모듈.
+`supabase/functions/_shared/matching/` — 정책 상세: `docs/matching-policy.md`
 
 ```
-UserSnapshot(프로필·공개 소개 선택·가치관·설문·중요도·선호 조건·Dealbreaker)
-  ├─ checkDealbreakers()   조건 불일치 → 추천 자체에서 제외 (점수 아님)
-  ├─ directionalScore()    A→B 예측 (차원: personality/values/lifestyle/relationship — appearance 제외는 #40)
-  │                        └ 개인화 중요도(1~5)로 가중 평균
-  └─ computeMatch()        A→B, B→A 를 각각 계산 → 조화 평균
-                           (한쪽만 좋아하는 조합은 우선순위 하락)
+DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로컬 psql)
+  └─ recommend.ts  runDailyRecommendation()
+       ├─ 요청자·후보: active · 온보딩 완료 · identity/face/age_verified (users 행, 서버만 갱신)
+       ├─ 제외: 본인 · 양방향 차단 · 신고 당사자 쌍 · 좋아요/매치/과거 추천 상대
+       ├─ 오늘 저장된 추천 재검증 (차단·정지·미인증이면 pending → expired)
+       ├─ 후보 페이지 순회(100명씩, 최대 500명 평가) → snapshot.ts (외모 데이터 조회 없음)
+       ├─ MatchingEngine.computeMatch()
+       │    ├─ checkDealbreakers()  양방향 필수 조건 (판단 불가 값은 통과시키지 않음)
+       │    ├─ directionalScore()   personality/values/lifestyle/relationship — 유효 차원만 재정규화
+       │    │                       base = Σ(점수×중요도)/Σ(중요도), null 차원은 분자·분모 모두 제외
+       │    └─ 조화 평균 → total (한쪽이라도 유효 차원 없으면 conditions_only, total=null)
+       ├─ rankCandidates()  scored(총점) → conditions_only, 동점은 (요청자·KST 날짜·후보) 해시 tie-break
+       └─ buildCard()       공개 필드 allowlist + buildReasons() 공개 사실 기반 문구만
 ```
 
-- **외모 점수 없음** — MVP 는 외모 취향 응답·얼굴 벡터를 만들지 않는다. 엔진에 남아 있는 `appearance` 차원은
-  입력이 없어 중립값으로만 계산되며, 차원 제거·가중치 재정규화는 #40 에서 처리한다.
-- 카드에는 원시 점수 대신 `buildReasons()` 가 만든 문구만 노출 — **확인된 데이터가 있을 때만** (설문 유사도·공통 취미·같은 지역·같은 연애 목적).
-  근거가 없으면 문구를 지어내지 않고 비운다. "잘 맞는다/궁합 보장" 표현은 쓰지 않는다.
-- 카드 스냅샷(`recommendations.card`)은 `profiles` 의 공개 필드 allowlist 로만 만든다 —
-  `private_profiles`(가치관·민감 응답), 설문 응답, 인증 원본은 어떤 형태로도 실리지 않는다.
-- 카드의 소개 문장(`card.intro`)은 사용자가 쓴 글이 아니라, 고른 선택지(연애 목적·공개 질문)를
-  `publicPrompts.composeIntro()` 가 규칙대로 이어 붙인 것이다. 자유 텍스트·AI 분석 없음.
-- `recommendationStrategy`: `high_confidence` / `exploration` / `fallback` (§30 탐색 정책 확장용)
-- `ConversationSignals` 타입이 입력 계약에 포함되어 있어 대화 행동 신호를 이후 버전에서 반영 가능
-- 추천 생성은 `daily-recommendation` Edge Function(service role)에서만 수행 —
-  클라이언트는 타인의 원본 데이터에 접근하지 않고 서버가 만든 카드 스냅샷만 받음
-- Plus(하루 +1) 는 `PLUS_EXTRA_RECOMMENDATION_ENABLED=false` 로 비활성 — 모두 하루 1명 (#29)
+- **외모 차원 없음** — 타입·계산·로더 어디에도 없다. 과거 컬럼(`appearance_preference_events`, `appearance_importance`,
+  `feature_vector`)은 보존되지만 읽지 않으며, 값이 있어도 결과가 같다 (selftest + DB 연결 테스트로 검증).
+- 카드 이유는 공개 사실(공통 취미·같은 지역 코드·같은 연애 목적·공개 질문 공통 선택·겹치는 키워드)에서만 만든다.
+  비공개 응답만 바꾸면 내부 순위는 달라질 수 있어도 이유는 같다. 근거가 없으면 비운다.
+- `strategy` 는 DB/analytics 호환 라벨이며 탐색 정책·정확도를 뜻하지 않는다. Plus +1 은 플래그로 비활성 (#29).
+- 안전 조회 실패(500 `lookup_failed`)와 후보 부족(200 `exhausted`)은 다른 결과다. 후보가 없어도 조건을 완화하지 않는다.
+- 하루 한 명의 동시 요청 멱등성은 #22, 재추천 주기·후보 부족 대기 정책은 #23.
 
 ## 온보딩 순서 (#39)
 
@@ -353,9 +356,8 @@ UserSnapshot(프로필·공개 소개 선택·가치관·설문·중요도·선�
 
 ## 다음 개발 우선순위 (#30)
 
-1. **#40** 외모 데이터 없이 기본 조건·가치관으로 매칭 — `appearance` 차원 제외·가중치 재정규화·양방향 조건 테스트
-2. **#41** 텍스트 대화 → 상호 만남 동의 → 실제 만남 확인 → 비공개 피드백 흐름 완성
-3. #22 하루 한 명 스케줄러·멱등성 · #23 후보 부족 정책 · #24 퍼널 측정 (베타 시작 전)
-4. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기), #11 얼굴 데이터 보관 정책
-5. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)
-6. MVP 이후 별도 채택 시 검토: #8 얼굴 임베딩 · #9/#10 외모 취향 매칭 · #28 AI 대화 분석 · #29 Plus/결제 재도입
+1. **#41** 텍스트 대화 → 상호 만남 동의 → 실제 만남 확인 → 비공개 피드백 흐름 완성
+2. #22 하루 한 명 스케줄러·멱등성(동시 요청) · #23 후보 부족 정책·재추천 주기 · #24 퍼널 측정 (베타 시작 전)
+3. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기), #11 얼굴 데이터 보관 정책
+4. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)
+5. MVP 이후 별도 채택 시 검토: #8 얼굴 임베딩 · #9/#10 외모 취향 매칭 · #28 AI 대화 분석 · #29 Plus/결제 재도입

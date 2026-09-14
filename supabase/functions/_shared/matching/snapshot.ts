@@ -1,139 +1,116 @@
 /**
- * DB → UserSnapshot 로더 (Edge Function 전용, service role).
- * 클라이언트에는 이 데이터가 절대 그대로 내려가지 않는다 —
- * 추천 카드는 별도 스냅샷(card)으로만 전달된다.
+ * DB → UserSnapshot 로더 (서버 전용).
+ * 클라이언트에는 이 데이터가 절대 그대로 내려가지 않는다 — 추천 카드는 별도 스냅샷(card)으로만 전달된다.
+ *
+ * #40: 외모 데이터는 읽지 않는다.
+ *   * appearance_preference_events 조회 없음 (외모 취향 테스트는 MVP 에서 제거)
+ *   * face_verifications.feature_vector 조회 없음 (얼굴 임베딩은 생성하지 않으며 매칭 입력이 아니다)
+ *   * preference_settings.appearance_importance 는 읽지 않는다 (컬럼은 보존, 가중치에서 제외)
+ *   인증 플래그(identity/face/age_verified)는 users 행에서 별도로 읽는다 (dataSource.userAccounts) —
+ *   얼굴 벡터 유무로 인증 여부를 판단하지 않는다.
+ * 모든 조회는 DataSource 가 실패 시 throw 하므로, 일부 조회 실패가 "데이터 없음" 으로 둔갑하지 않는다.
  */
-import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
-import { preferenceVectorFromChoices, styleVectorFromFeature } from './MatchingEngine.ts';
-import type { Dealbreaker, StyleVector, UserSnapshot } from './types.ts';
+import type { DataSource } from './dataSource.ts';
+import { sanitizeImportance } from './MatchingEngine.ts';
+import type { Dealbreaker, UserSnapshot } from './types.ts';
 
-/**
- * 외모 취향 테스트 자산 벡터 — MVP(#39) 에서는 앱이 외모 취향을 입력받지 않으므로 신규 사용자는 항상 빈 값이다.
- * 기존 appearance_preference_events 행 호환을 위해 로더만 남긴다. 매칭 계산에서의 제외는 #40.
- */
-const FACE_TEST_VECTORS: Record<string, StyleVector> = {
-  ft01: { soft: 0.9, warm: 0.8, bold: 0.2, playful: 0.4 },
-  ft02: { soft: 0.2, warm: 0.3, bold: 0.9, playful: 0.3 },
-  ft03: { soft: 0.7, warm: 0.5, bold: 0.4, playful: 0.8 },
-  ft04: { soft: 0.4, warm: 0.7, bold: 0.6, playful: 0.2 },
-  ft05: { soft: 0.8, warm: 0.4, bold: 0.3, playful: 0.6 },
-  ft06: { soft: 0.3, warm: 0.6, bold: 0.8, playful: 0.5 },
-  ft07: { soft: 0.6, warm: 0.9, bold: 0.3, playful: 0.7 },
-  ft08: { soft: 0.5, warm: 0.2, bold: 0.7, playful: 0.2 },
-  ft09: { soft: 0.7, warm: 0.6, bold: 0.5, playful: 0.3 },
-  ft10: { soft: 0.4, warm: 0.5, bold: 0.4, playful: 0.9 },
-  ft11: { soft: 0.9, warm: 0.7, bold: 0.1, playful: 0.5 },
-  ft12: { soft: 0.2, warm: 0.4, bold: 0.9, playful: 0.6 },
-};
+function likert(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
 
-const DEFAULT_IMPORTANCE = { appearance: 3, personality: 3, values: 3, lifestyle: 3, relationship: 3 };
-
-/** 여러 사용자의 스냅샷을 한 번에 로드한다. */
-export async function loadSnapshots(db: SupabaseClient, userIds: string[]): Promise<Map<string, UserSnapshot>> {
+/** 여러 사용자의 스냅샷을 한 번에 로드한다. 조회 실패 시 throw. */
+export async function loadSnapshots(ds: DataSource, userIds: string[]): Promise<Map<string, UserSnapshot>> {
   if (userIds.length === 0) return new Map();
 
-  const [profilesRes, privatesRes, responsesRes, questionsRes, prefsRes, dealbreakersRes, appearanceRes, facesRes] =
-    await Promise.all([
-      db.from('profiles').select('*').in('user_id', userIds),
-      db.from('private_profiles').select('*').in('user_id', userIds),
-      db.from('questionnaire_responses').select('user_id, question_id, value').in('user_id', userIds),
-      db.from('questionnaire_questions').select('id, category, axis, reverse'),
-      db.from('preference_settings').select('*').in('user_id', userIds),
-      db.from('dealbreakers').select('user_id, kind, value').in('user_id', userIds),
-      db.from('appearance_preference_events').select('user_id, selected').in('user_id', userIds),
-      db
-        .from('face_verifications')
-        .select('user_id, feature_vector, created_at')
-        .in('user_id', userIds)
-        .eq('status', 'approved')
-        .order('created_at', { ascending: false }),
-    ]);
+  const [profiles, privates, responses, questions, prefsRows, dealbreakerRows] = await Promise.all([
+    ds.profiles(userIds),
+    ds.privateProfiles(userIds),
+    ds.questionnaireResponses(userIds),
+    ds.questionnaireQuestions(),
+    ds.preferenceSettings(userIds),
+    ds.dealbreakers(userIds),
+  ]);
 
-  const questionMeta = new Map(
-    (questionsRes.data ?? []).map((q) => [q.id as string, q as { id: string; category: string; axis: string; reverse: boolean }]),
-  );
+  const questionMeta = new Map(questions.map((q) => [q.id, q]));
+  const privateByUser = new Map(privates.map((p) => [p.user_id as string, p]));
+  const prefsByUser = new Map(prefsRows.map((p) => [p.user_id as string, p]));
 
   const snapshots = new Map<string, UserSnapshot>();
-  for (const profile of profilesRes.data ?? []) {
+  for (const profile of profiles) {
     const uid = profile.user_id as string;
-    const priv = (privatesRes.data ?? []).find((p) => p.user_id === uid) ?? {};
-    const prefs = (prefsRes.data ?? []).find((p) => p.user_id === uid);
-    const userResponses = (responsesRes.data ?? [])
+    const priv = privateByUser.get(uid) ?? {};
+    const prefs = prefsByUser.get(uid);
+    const userResponses = responses
       .filter((r) => r.user_id === uid)
       .flatMap((r) => {
-        const meta = questionMeta.get(r.question_id as string);
+        const meta = questionMeta.get(r.question_id);
         if (!meta) return [];
         return [
           {
-            questionId: r.question_id as string,
+            questionId: r.question_id,
             category: meta.category as 'personality' | 'lifestyle' | 'relationship',
             axis: meta.axis,
             reverse: meta.reverse,
-            value: r.value as number,
+            value: r.value,
           },
         ];
       });
-    const chosenVectors = (appearanceRes.data ?? [])
-      .filter((e) => e.user_id === uid)
-      .map((e) => FACE_TEST_VECTORS[e.selected as string])
-      .filter((v): v is StyleVector => v != null);
-    const face = (facesRes.data ?? []).find((f) => f.user_id === uid);
 
     snapshots.set(uid, {
       profile: {
         userId: uid,
-        nickname: profile.nickname,
-        birthYear: profile.birth_year,
-        gender: profile.gender,
-        seekingGender: profile.seeking_gender,
-        regionCode: profile.region_code,
-        heightCm: profile.height_cm,
-        jobGroup: profile.job_group,
-        smoking: profile.smoking,
-        drinking: profile.drinking,
-        religion: profile.religion,
-        hobbies: profile.hobbies ?? [],
-        personalityKeywords: profile.personality_keywords ?? [],
-        intro: profile.intro ?? null,
-        relationshipGoal: profile.relationship_goal ?? null,
-        publicAnswers: profile.public_answers ?? null,
+        nickname: profile.nickname as string,
+        birthYear: profile.birth_year as number,
+        gender: profile.gender as 'male' | 'female',
+        seekingGender: profile.seeking_gender as 'male' | 'female',
+        regionCode: profile.region_code as string,
+        heightCm: profile.height_cm as number,
+        jobGroup: profile.job_group as string,
+        smoking: profile.smoking as 'none' | 'sometimes' | 'regular',
+        drinking: profile.drinking as 'none' | 'sometimes' | 'often',
+        religion: (profile.religion as string | null) ?? null,
+        hobbies: (profile.hobbies as string[] | null) ?? [],
+        personalityKeywords: (profile.personality_keywords as string[] | null) ?? [],
+        intro: (profile.intro as string | null) ?? null,
+        relationshipGoal: (profile.relationship_goal as string | null) ?? null,
+        publicAnswers: (profile.public_answers as Record<string, unknown> | null) ?? null,
       },
       values: {
-        marriageIntent: priv.marriage_intent,
-        childrenIntent: priv.children_intent,
-        longDistanceOk: priv.long_distance_ok,
-        contactFrequency: priv.contact_frequency,
-        dateFrequency: priv.date_frequency,
-        personalTimeNeed: priv.personal_time_need,
-        oppositeSexFriendsOk: priv.opposite_sex_friends_ok,
-        spendingStyle: priv.spending_style,
-        religionImportance: priv.religion_importance,
+        marriageIntent: likert(priv.marriage_intent),
+        childrenIntent: likert(priv.children_intent),
+        longDistanceOk: likert(priv.long_distance_ok),
+        contactFrequency: likert(priv.contact_frequency),
+        dateFrequency: likert(priv.date_frequency),
+        personalTimeNeed: likert(priv.personal_time_need),
+        oppositeSexFriendsOk: likert(priv.opposite_sex_friends_ok),
+        spendingStyle: likert(priv.spending_style),
+        religionImportance: likert(priv.religion_importance),
       },
       responses: userResponses,
-      importance: prefs
-        ? {
-            appearance: prefs.appearance_importance,
-            personality: prefs.personality_importance,
-            values: prefs.values_importance,
-            lifestyle: prefs.lifestyle_importance,
-            relationship: prefs.relationship_importance,
-          }
-        : DEFAULT_IMPORTANCE,
-      preferences: {
-        ageMin: prefs?.age_min ?? null,
-        ageMax: prefs?.age_max ?? null,
-        ageDirection: prefs?.age_direction ?? 'any',
-        heightMin: prefs?.height_min ?? null,
-        heightMax: prefs?.height_max ?? null,
-        regions: prefs?.regions ?? [],
-        smokingPref: prefs?.smoking_pref ?? 'any',
-        personalityKeywords: prefs?.personality_keywords ?? [],
-      },
-      dealbreakers: ((dealbreakersRes.data ?? []).filter((d) => d.user_id === uid) as unknown[]).map(
-        (d) => d as Dealbreaker,
+      // 활성 차원 중요도만 (appearance_importance 는 읽지 않는다). 미설정이면 기본 3
+      importance: sanitizeImportance(
+        prefs
+          ? {
+              personality: prefs.personality_importance,
+              values: prefs.values_importance,
+              lifestyle: prefs.lifestyle_importance,
+              relationship: prefs.relationship_importance,
+            }
+          : null,
       ),
-      appearancePreferenceVector: preferenceVectorFromChoices(chosenVectors),
-      appearanceStyleVector: styleVectorFromFeature((face?.feature_vector as number[] | null) ?? null),
+      preferences: {
+        ageMin: (prefs?.age_min as number | null) ?? null,
+        ageMax: (prefs?.age_max as number | null) ?? null,
+        ageDirection: (prefs?.age_direction as 'any' | 'older' | 'same' | 'younger' | undefined) ?? 'any',
+        heightMin: (prefs?.height_min as number | null) ?? null,
+        heightMax: (prefs?.height_max as number | null) ?? null,
+        regions: (prefs?.regions as string[] | null) ?? [],
+        smokingPref: (prefs?.smoking_pref as 'any' | 'prefer_non' | undefined) ?? 'any',
+        personalityKeywords: (prefs?.personality_keywords as string[] | null) ?? [],
+      },
+      dealbreakers: dealbreakerRows
+        .filter((d) => d.user_id === uid)
+        .map((d) => ({ kind: d.kind, value: d.value }) as Dealbreaker),
     });
   }
   return snapshots;

@@ -1,29 +1,40 @@
 /**
- * MatchingEngine 단위 테스트.
+ * MatchingEngine / recommend 코어 단위 테스트.
  * 실행: node --experimental-strip-types selftest.ts
  * (외부 테스트 러너 의존성을 추가하지 않기 위한 단순 assert 기반 테스트)
+ *
+ * 마지막에 failures > 0 이면 process.exit(1) — 실패가 있는데 성공으로 끝나지 않는다.
+ * (임시로 check('__must_fail__', false) 를 넣고 exit code 1 이 나오는지 확인한 뒤 제거했다)
  */
+import type { DataSource, NewRecommendationRow, StoredRecommendation, UserAccountRow } from './dataSource.ts';
+import { generateIcebreaker } from './icebreaker.ts';
 import {
+  buildReasons,
   checkDealbreakers,
   computeMatch,
   directionalScore,
   pickStrategy,
-  preferenceVectorFromChoices,
-  styleVectorFromFeature,
+  rankCandidates,
+  sanitizeImportance,
+  tieBreakKey,
 } from './MatchingEngine.ts';
-import { generateIcebreaker } from './icebreaker.ts';
 import { buildPublicAnswerCards, composeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
+import { accountEligible, CARD_FIELDS, runDailyRecommendation } from './recommend.ts';
+import { loadSnapshots } from './snapshot.ts';
 import type { QuestionnaireResponse, UserSnapshot } from './types.ts';
 
 let failures = 0;
+let passes = 0;
 function check(name: string, cond: boolean) {
   if (!cond) {
     failures += 1;
     console.error(`FAIL: ${name}`);
   } else {
+    passes += 1;
     console.log(`ok: ${name}`);
   }
 }
+const approx = (a: number | null | undefined, b: number, eps = 1e-9) => a != null && Math.abs(a - b) < eps;
 
 const NOW_YEAR = 2026;
 
@@ -71,7 +82,7 @@ function makeUser(overrides: Partial<UserSnapshot> & { profile?: Partial<UserSna
       l01: ['lifestyle', 'lifestyle.homebody', 3],
       r01: ['relationship', 'relationship.contact', 4],
     }),
-    importance: { appearance: 3, personality: 4, values: 4, lifestyle: 3, relationship: 3 },
+    importance: { personality: 4, values: 4, lifestyle: 3, relationship: 3 },
     preferences: {
       ageMin: null,
       ageMax: null,
@@ -82,8 +93,6 @@ function makeUser(overrides: Partial<UserSnapshot> & { profile?: Partial<UserSna
       personalityKeywords: [],
     },
     dealbreakers: [],
-    appearancePreferenceVector: null,
-    appearanceStyleVector: null,
   };
   return {
     ...base,
@@ -93,41 +102,152 @@ function makeUser(overrides: Partial<UserSnapshot> & { profile?: Partial<UserSna
   };
 }
 
-// --- 기본 상호성 ---
+const female = (over: Partial<UserSnapshot> & { profile?: Partial<UserSnapshot['profile']> } = {}) =>
+  makeUser({ ...over, profile: { userId: 'u2', nickname: '상대', gender: 'female', seekingGender: 'male', birthYear: 1996, heightCm: 163, ...(over.profile ?? {}) } });
+
+// ===========================================================================
+// 기본 상호성
+// ===========================================================================
 const male = makeUser({});
-const female = makeUser({
-  profile: { userId: 'u2', nickname: '상대', gender: 'female', seekingGender: 'male', birthYear: 1996, heightCm: 163 },
-});
-
-const result = computeMatch(male, female, NOW_YEAR);
+const partner = female();
+const result = computeMatch(male, partner, NOW_YEAR);
 check('상호 지향이 맞으면 eligible', result.eligible);
-check('점수가 존재', result.score != null);
+check('점수가 존재 (scored)', result.score?.basis === 'scored' && result.score.total != null);
 check('total 은 0~1', (result.score?.total ?? -1) >= 0 && (result.score?.total ?? 2) <= 1);
-check('설명 문구 생성', result.reasons.length > 0);
+check('설명 문구 생성 (공통 취미·지역)', result.reasons.length > 0);
 
-// --- 같은 성별 지향 불일치 ---
 const sameSeeking = makeUser({ profile: { userId: 'u3', gender: 'female', seekingGender: 'female' } });
 check('지향 불일치는 ineligible', !computeMatch(male, sameSeeking, NOW_YEAR).eligible);
 
-// --- Dealbreaker: 흡연 ---
-const smoker = makeUser({
-  profile: { userId: 'u4', gender: 'female', seekingGender: 'male', smoking: 'regular' },
-});
-const nonSmokerStrict = makeUser({ dealbreakers: [{ kind: 'smoking', value: { allow: false } }] });
-check('흡연 dealbreaker 필터', checkDealbreakers(nonSmokerStrict, smoker, NOW_YEAR).includes('smoking'));
-check('흡연 dealbreaker → ineligible', !computeMatch(nonSmokerStrict, smoker, NOW_YEAR).eligible);
+// ===========================================================================
+// #40 외모 데이터 완전 제외
+// ===========================================================================
+{
+  const snapA = makeUser({});
+  const snapB = female();
+  // 타입에 외모 필드가 없지만, 과거 코드 경로가 남아 있지 않은지 "추가 속성" 을 억지로 넣어 확인
+  const withJunk = (u: UserSnapshot, extra: Record<string, unknown>) => ({ ...u, ...extra }) as unknown as UserSnapshot;
+  const r0 = computeMatch(snapA, snapB, NOW_YEAR);
+  const r1 = computeMatch(
+    withJunk(snapA, { appearancePreferenceVector: { soft: 1 }, importance: { ...snapA.importance, appearance: 5 } }),
+    withJunk(snapB, { appearanceStyleVector: { soft: 1 }, importance: { ...snapB.importance, appearance: 1 } }),
+    NOW_YEAR,
+  );
+  check('외모 벡터·중요도가 있어도 A→B/B→A/total 동일', r0.score?.aToB === r1.score?.aToB && r0.score?.bToA === r1.score?.bToA && r0.score?.total === r1.score?.total);
+  check('외모가 있어도 reasons 동일', JSON.stringify(r0.reasons) === JSON.stringify(r1.reasons));
+  check('dimensions 에 appearance 키 없음', !('appearance' in (r0.score?.dimensions ?? {})));
+  check('sanitizeImportance 는 appearance 를 버린다', !('appearance' in sanitizeImportance({ appearance: 5, personality: 2 })));
+  check('sanitizeImportance 기본값·범위', sanitizeImportance({ personality: 2, values: 9, lifestyle: 'x', relationship: NaN }).values === 3 && sanitizeImportance(null).lifestyle === 3);
+}
 
-// --- Dealbreaker: 나이 ---
-const older = makeUser({ profile: { userId: 'u5', gender: 'female', seekingGender: 'male', birthYear: 1985 } });
-const ageStrict = makeUser({ dealbreakers: [{ kind: 'age_range', value: { min: 25, max: 35 } }] });
-check('나이 dealbreaker 필터', checkDealbreakers(ageStrict, older, NOW_YEAR).includes('age_range'));
+// ===========================================================================
+// #40 누락 응답 · 재정규화
+// ===========================================================================
+{
+  // 한 차원만 유효: 설문·가치관·취미·키워드 모두 없음 → lifestyle 만 (지역 비교는 항상 가능)
+  const bare = makeUser({
+    profile: { hobbies: [], personalityKeywords: [] },
+    responses: [],
+    values: {
+      marriageIntent: null, childrenIntent: null, longDistanceOk: null, contactFrequency: null, dateFrequency: null,
+      personalTimeNeed: null, oppositeSexFriendsOk: null, spendingStyle: null, religionImportance: null,
+    },
+    importance: { personality: 5, values: 5, lifestyle: 1, relationship: 5 },
+  });
+  const bareF = female({ profile: { hobbies: [], personalityKeywords: [], regionCode: 'busan' }, responses: [], values: bare.values });
+  const d = directionalScore(bare, bareF, NOW_YEAR);
+  check('한 차원만 유효하면 그 차원만 반영 (available=[lifestyle])', d.availableDimensions.join(',') === 'lifestyle');
+  check('나머지 차원은 null (중립값 대입 없음)', d.dimensions.personality == null && d.dimensions.values == null && d.dimensions.relationship == null);
+  check('base = 유효 차원 점수 그대로 (다른 지역 0.4)', approx(d.base, 0.4));
+  check('score = clamp(base + adjustment)', approx(d.score, 0.4 + d.adjustment));
 
-// --- 양방향: 한쪽만 좋아하는 조합은 조화 평균으로 하락 ---
-const enthusiastic = makeUser({
-  importance: { appearance: 1, personality: 5, values: 5, lifestyle: 5, relationship: 5 },
-});
-const lukewarmTarget = makeUser({
-  profile: { userId: 'u6', gender: 'female', seekingGender: 'male', hobbies: [], personalityKeywords: [] },
+  // 수동 계산: personality=0.8(imp 4), values=null, lifestyle=0.6(imp 2), relationship=null → (0.8*4+0.6*2)/6
+  const manualA = makeUser({
+    profile: { hobbies: [], personalityKeywords: ['calm', 'honest'], regionCode: 'seoul' },
+    responses: [],
+    values: {
+      marriageIntent: null, childrenIntent: null, longDistanceOk: null, contactFrequency: null, dateFrequency: null,
+      personalTimeNeed: null, oppositeSexFriendsOk: null, spendingStyle: null, religionImportance: null,
+    },
+    importance: { personality: 4, values: 3, lifestyle: 2, relationship: 5 },
+    preferences: { ageMin: null, ageMax: null, heightMin: null, heightMax: null, regions: [], smokingPref: 'any', personalityKeywords: ['calm', 'honest'] },
+  });
+  const manualB = female({ profile: { hobbies: [], personalityKeywords: ['calm', 'honest'], regionCode: 'seoul' }, responses: [], values: manualA.values });
+  const md = directionalScore(manualA, manualB, NOW_YEAR);
+  // personality: keywordFit=1 → 0.4+0.6 = 1.0 ; lifestyle: sameRegion=1 → 1.0 ; 나머지 null → base = (1*4 + 1*2)/6 = 1
+  check('재정규화 수동 계산 일치 (personality·lifestyle 만)', md.availableDimensions.join(',') === 'personality,lifestyle' && approx(md.base, 1));
+  const manualB2 = female({ profile: { hobbies: [], personalityKeywords: ['humor'], regionCode: 'busan' }, responses: [], values: manualA.values });
+  const md2 = directionalScore(manualA, manualB2, NOW_YEAR);
+  // personality: keywordFit=0 → 0.4 ; lifestyle: 0.4 → base = (0.4*4 + 0.4*2)/6 = 0.4
+  check('재정규화 수동 계산 일치 (분모는 유효 중요도 합)', approx(md2.base, (0.4 * 4 + 0.4 * 2) / 6));
+
+  // 실제 0점 ≠ 누락: 가치관이 정반대(유사도 0)면 values=0 이 분모에 포함된다
+  const opp = female({ values: { marriageIntent: 1, childrenIntent: 1, spendingStyle: 1, religionImportance: 5, oppositeSexFriendsOk: 1, longDistanceOk: 5 } });
+  const extreme = makeUser({ values: { marriageIntent: 5, childrenIntent: 5, spendingStyle: 5, religionImportance: 1, oppositeSexFriendsOk: 5, longDistanceOk: 1 } });
+  const od = directionalScore(extreme, opp, NOW_YEAR);
+  check('실제 0점은 누락이 아니다 (values=0 이 available 에 포함)', od.dimensions.values === 0 && od.availableDimensions.includes('values'));
+
+  // 모든 비교 데이터 누락 → conditions_only, 자동 탈락 아님
+  const emptyA = makeUser({ profile: { hobbies: [], personalityKeywords: [], regionCode: 'seoul' }, responses: [], values: bare.values });
+  const emptyB = female({ profile: { hobbies: [], personalityKeywords: [], regionCode: 'seoul' }, responses: [], values: bare.values });
+  // 지역 비교는 항상 가능하므로 lifestyle 만 남는다 → 아직 scored. 지역까지 같아도 lifestyle 은 1.0 이므로 scored.
+  // conditions_only 는 계산 함수를 직접 검증: available 이 비면 base null
+  const cd = directionalScore(emptyA, emptyB, NOW_YEAR);
+  check('공개 지역만 비교 가능해도 scored (lifestyle=1.0)', cd.availableDimensions.join(',') === 'lifestyle' && approx(cd.base, 1));
+  const forced = { ...emptyA, profile: { ...emptyA.profile, regionCode: undefined as unknown as string } };
+  const forcedB = { ...emptyB, profile: { ...emptyB.profile, regionCode: undefined as unknown as string } };
+  // regionCode 가 없으면 sameRegion 은 (undefined === undefined) → 1 이므로 여전히 값이 있다. conditions_only 는 computeMatch 로 검증:
+  const cm = computeMatch(forced, forcedB, NOW_YEAR);
+  check('필수 조건 통과 후보는 데이터가 없어도 eligible', cm.eligible && cm.score != null);
+
+  // NaN/Infinity/문자열 응답·가중치 → 순위에 들어가지 않음
+  const dirty = makeUser({
+    responses: responses({ p01: ['personality', 'personality.extraversion', NaN], p03: ['personality', 'personality.planning', Infinity] }),
+    values: { marriageIntent: 'high' as unknown as number, childrenIntent: -Infinity },
+    importance: { personality: NaN, values: Infinity, lifestyle: -3 as number, relationship: 'x' as unknown as number },
+  });
+  const dd = directionalScore(dirty, female(), NOW_YEAR);
+  const allFinite = [dd.base, dd.score, ...Object.values(dd.dimensions)].every((v) => v == null || Number.isFinite(v));
+  check('유효하지 않은 숫자로 NaN/Infinity 가 생기지 않는다', allFinite);
+  check('잘못된 응답은 무시되어 personality 유사도가 null (키워드 없음)', dd.dimensions.personality == null);
+}
+
+// ===========================================================================
+// 필수 조건(Dealbreaker) vs soft preference · 판단 불가
+// ===========================================================================
+{
+  const smoker = female({ profile: { userId: 'u4', smoking: 'regular' } });
+  const strict = makeUser({ dealbreakers: [{ kind: 'smoking', value: { allow: false } }] });
+  check('흡연 dealbreaker 필터', checkDealbreakers(strict, smoker, NOW_YEAR).includes('smoking'));
+  check('A 만 필수 조건 불일치 → ineligible', !computeMatch(strict, smoker, NOW_YEAR).eligible);
+  const strictF = female({ dealbreakers: [{ kind: 'smoking', value: { allow: false } }] });
+  const maleSmoker = makeUser({ profile: { smoking: 'sometimes' } });
+  check('B 만 필수 조건 불일치 → ineligible', !computeMatch(maleSmoker, strictF, NOW_YEAR).eligible);
+
+  const soft = makeUser({ preferences: { ...male.preferences, smokingPref: 'prefer_non' } });
+  const softRes = computeMatch(soft, smoker, NOW_YEAR);
+  check('soft preference(비흡연이면 좋겠어요) 불일치는 제외가 아니라 감점', softRes.eligible && (softRes.score?.aToB ?? 1) < (computeMatch(soft, female(), NOW_YEAR).score?.aToB ?? 0));
+
+  const older = female({ profile: { userId: 'u5', birthYear: 1985 } });
+  const ageStrict = makeUser({ dealbreakers: [{ kind: 'age_range', value: { min: 25, max: 35 } }] });
+  check('나이 dealbreaker 필터', checkDealbreakers(ageStrict, older, NOW_YEAR).includes('age_range'));
+  const ageSoft = makeUser({ preferences: { ...male.preferences, ageMin: 25, ageMax: 35 } });
+  check('나이 soft preference 불일치는 eligible', computeMatch(ageSoft, older, NOW_YEAR).eligible);
+
+  const needMarriage = makeUser({ dealbreakers: [{ kind: 'marriage_intent', value: { min: 3 } }] });
+  const unknownMarriage = female({ values: { marriageIntent: null } });
+  check('필수 조건 평가값 누락(marriage_intent null) → 조용히 통과시키지 않는다', checkDealbreakers(needMarriage, unknownMarriage, NOW_YEAR).includes('marriage_intent'));
+  const needChildren = makeUser({ dealbreakers: [{ kind: 'children_intent', value: { maxGap: 1 } }] });
+  check('children_intent 한쪽 누락 → 실패', checkDealbreakers(needChildren, female({ values: { childrenIntent: null } }), NOW_YEAR).includes('children_intent'));
+  check('children_intent 양쪽 있고 범위 내 → 통과', checkDealbreakers(needChildren, female({ values: { childrenIntent: 3 } }), NOW_YEAR).length === 0);
+}
+
+// ===========================================================================
+// 양방향: 한쪽만 좋아하는 조합은 조화 평균으로 하락 · 유사한 상대가 더 높다 · 역채점
+// ===========================================================================
+const enthusiastic = makeUser({ importance: { personality: 5, values: 5, lifestyle: 5, relationship: 5 } });
+const lukewarmTarget = female({
+  profile: { userId: 'u6', hobbies: [], personalityKeywords: [] },
   values: { marriageIntent: 1, childrenIntent: 1, contactFrequency: 1, spendingStyle: 1 },
   responses: responses({
     p01: ['personality', 'personality.extraversion', 1],
@@ -137,108 +257,309 @@ const lukewarmTarget = makeUser({
   }),
 });
 const asym = computeMatch(enthusiastic, lukewarmTarget, NOW_YEAR);
-if (asym.score) {
+if (asym.score?.aToB != null && asym.score.bToA != null && asym.score.total != null) {
   const arith = (asym.score.aToB + asym.score.bToA) / 2;
   check('조화 평균 ≤ 산술 평균 (비대칭 벌점)', asym.score.total <= arith + 1e-9);
 }
+const similar = female({ profile: { userId: 'u7' } });
+check('유사한 상대의 방향 점수가 더 높다', (directionalScore(male, similar, NOW_YEAR).score ?? 0) > (directionalScore(male, lukewarmTarget, NOW_YEAR).score ?? 1));
+const reverseA = makeUser({ responses: responses({ p02: ['personality', 'personality.extraversion', 1, true] }) });
+const reverseB = female({ profile: { userId: 'u8' }, responses: responses({ p01: ['personality', 'personality.extraversion', 5, false] }) });
+check('역채점: 1(reverse)==5(normal) 로 해석', (directionalScore(reverseA, reverseB, NOW_YEAR).dimensions.personality ?? 0) > 0.9);
 
-// --- 방향 점수: 잘 맞는 상대가 안 맞는 상대보다 높다 ---
-const similar = makeUser({ profile: { userId: 'u7', gender: 'female', seekingGender: 'male' } });
-const dissimilar = lukewarmTarget;
-const simScore = directionalScore(male, similar, NOW_YEAR).score;
-const disScore = directionalScore(male, dissimilar, NOW_YEAR).score;
-check('유사한 상대의 방향 점수가 더 높다', simScore > disScore);
+// ===========================================================================
+// 전략 라벨 (스키마 호환)
+// ===========================================================================
+const scoredOf = (total: number) => ({ basis: 'scored' as const, total, aToB: total, bToA: total, dimensions: { personality: null, values: null, lifestyle: null, relationship: null } });
+check('high_confidence 라벨', pickStrategy(scoredOf(0.7), 0) === 'high_confidence');
+check('exploration 라벨', pickStrategy(scoredOf(0.55), 1) === 'exploration');
+check('fallback 라벨', pickStrategy(scoredOf(0.3), 2) === 'fallback');
+check('conditions_only 는 fallback', pickStrategy({ ...scoredOf(0), basis: 'conditions_only', total: null }, 0) === 'fallback');
 
-// --- 역채점 반영 ---
-const reverseA = makeUser({
-  responses: responses({ p02: ['personality', 'personality.extraversion', 1, true] }),
-});
-const reverseB = makeUser({
-  profile: { userId: 'u8', gender: 'female', seekingGender: 'male' },
-  responses: responses({ p01: ['personality', 'personality.extraversion', 5, false] }),
-});
-const revScore = directionalScore(reverseA, reverseB, NOW_YEAR);
-check('역채점: 1(reverse)==5(normal) 로 해석', revScore.dimensions.personality > 0.9);
+// ===========================================================================
+// 추천 이유 — 공개 사실만
+// ===========================================================================
+{
+  const pubA = makeUser({ profile: { hobbies: ['travel'], personalityKeywords: ['calm'], regionCode: 'seoul', relationshipGoal: 'serious', publicAnswers: { day_off: ['cafe', 'walk'], important: 'honest_talk' } } });
+  const pubB = female({ profile: { hobbies: ['travel'], personalityKeywords: ['honest'], regionCode: 'seoul', relationshipGoal: 'serious', publicAnswers: { day_off: ['walk'], important: 'respect' } } });
+  const r = buildReasons(pubA, pubB);
+  check('공통 취미·같은 지역·같은 목적 (최대 3개)', r.length === 3 && r.includes('공통 관심사가 있어요') && r.includes('같은 지역을 선택했어요') && r.includes('연애 목적이 같아요'));
+  check('"가까운 지역" 처럼 거리를 단정하는 문구 없음', !r.some((x) => x.includes('가까')));
+  const promptOnly = makeUser({ profile: { hobbies: [], personalityKeywords: [], regionCode: 'seoul', relationshipGoal: 'serious', publicAnswers: { day_off: ['cafe', 'walk'], together: 'food_tour' } } });
+  const promptOnlyB = female({ profile: { hobbies: [], personalityKeywords: [], regionCode: 'busan', relationshipGoal: 'take_it_slow', publicAnswers: { day_off: ['walk'], together: ['movie'] } } });
+  const pr = buildReasons(promptOnly, promptOnlyB);
+  check('공개 질문의 공통 선택지 → 이유', pr.length === 1 && pr[0] === '쉬는 날 보내는 방식이 겹쳐요');
+  const bogus = female({ profile: { hobbies: [], personalityKeywords: [], regionCode: 'busan', relationshipGoal: 'take_it_slow', publicAnswers: { day_off: ['not_a_code'], hidden: ['cafe'] } } });
+  const bogusA = makeUser({ profile: { hobbies: [], personalityKeywords: [], regionCode: 'seoul', relationshipGoal: 'serious', publicAnswers: { day_off: ['not_a_code'], hidden: ['cafe'] } } });
+  check('허용되지 않은 질문/코드는 공통이어도 이유가 되지 않는다', buildReasons(bogusA, bogus).length === 0);
 
-// --- 외모 취향 벡터 ---
-const prefVec = preferenceVectorFromChoices([
-  { soft: 1, warm: 0.8 },
-  { soft: 0.6, warm: 0.4 },
-]);
-check('취향 벡터 평균', Math.abs((prefVec?.soft ?? 0) - 0.8) < 1e-9);
-const styleVec = styleVectorFromFeature([0.1, 0.2, 0.3, 0.4, 0.5]);
-check('스타일 벡터 변환', styleVec?.playful === 0.4);
-check('feature 부족 시 null', styleVectorFromFeature([0.1]) == null);
+  // 비공개 응답만 바꿔도 reasons 불변 (내부 점수는 달라질 수 있다)
+  const privA1 = makeUser({ profile: { hobbies: ['travel'], regionCode: 'seoul' } });
+  const privA2 = makeUser({
+    profile: { hobbies: ['travel'], regionCode: 'seoul' },
+    values: { marriageIntent: 1, childrenIntent: 1, spendingStyle: 1, contactFrequency: 1 },
+    responses: responses({ p01: ['personality', 'personality.extraversion', 1] }),
+  });
+  const target = female({ profile: { hobbies: ['travel'], regionCode: 'seoul' } });
+  const m1 = computeMatch(privA1, target, NOW_YEAR);
+  const m2 = computeMatch(privA2, target, NOW_YEAR);
+  check('비공개 응답만 바꾸면 내부 점수는 달라질 수 있다', m1.score?.total !== m2.score?.total);
+  check('비공개 응답만 바꿔도 사용자용 reasons 는 동일', JSON.stringify(m1.reasons) === JSON.stringify(m2.reasons));
+  check('reasons 에 설문/점수 기반 문구 없음', !m1.reasons.some((x) => x.includes('질문에') || x.includes('비슷하게 답')));
 
-// --- 전략 ---
-check('high_confidence 전략', pickStrategy(0.7, 0) === 'high_confidence');
-check('exploration 전략', pickStrategy(0.55, 1) === 'exploration');
-check('fallback 전략', pickStrategy(0.3, 2) === 'fallback');
+  const strangerA = makeUser({ profile: { hobbies: [], personalityKeywords: [], regionCode: 'seoul', relationshipGoal: 'serious' } });
+  const strangerB = female({ profile: { hobbies: [], personalityKeywords: [], regionCode: 'busan', relationshipGoal: 'take_it_slow' } });
+  const sr = computeMatch(strangerA, strangerB, NOW_YEAR);
+  check('공개 근거가 없으면 reasons=[] (지어내지 않는다)', sr.eligible && sr.reasons.length === 0);
+  check('보장/궁합 표현 없음', ![...r, ...pr, ...m1.reasons].some((x) => x.includes('잘 맞') || x.includes('어울릴') || x.includes('궁합')));
+}
 
-// --- Icebreaker ---
-const ib = generateIcebreaker(male, female);
+// ===========================================================================
+// 결정적 tie-break · 입력 순서 무관
+// ===========================================================================
+{
+  const viewer = 'viewer-1';
+  const day = '2026-09-14';
+  const same = scoredOf(0.5);
+  const mk = (id: string) => ({ id, result: { eligible: true, failedDealbreakers: [], score: same, reasons: [] }, payload: id });
+  const ids = ['c1', 'c2', 'c3', 'c4', 'c5'];
+  const a = rankCandidates(ids.map(mk), viewer, day).map((c) => c.id);
+  const b = rankCandidates([...ids].reverse().map(mk), viewer, day).map((c) => c.id);
+  const c = rankCandidates([ids[2], ids[0], ids[4], ids[1], ids[3]].map(mk), viewer, day).map((c) => c.id);
+  check('동점 후보 입력 순서를 바꿔도 순위 동일', a.join() === b.join() && a.join() === c.join());
+  check('tie-break 는 (viewer, 날짜, 후보) 해시 오름차순', a.map((id) => tieBreakKey(viewer, day, id)).every((k, i, arr) => i === 0 || arr[i - 1] <= k));
+  check('날짜가 바뀌면 순서가 달라질 수 있다 (재현 가능하지만 고정 편향 아님)', tieBreakKey(viewer, day, 'c1') !== tieBreakKey(viewer, '2026-09-15', 'c1'));
+  const mixed = [
+    { id: 'low', result: { eligible: true, failedDealbreakers: [], score: scoredOf(0.3), reasons: [] }, payload: 0 },
+    { id: 'cond', result: { eligible: true, failedDealbreakers: [], score: { ...scoredOf(0), basis: 'conditions_only' as const, total: null }, reasons: [] }, payload: 0 },
+    { id: 'high', result: { eligible: true, failedDealbreakers: [], score: scoredOf(0.9), reasons: [] }, payload: 0 },
+    { id: 'no', result: { eligible: false, failedDealbreakers: [], score: null, reasons: [] }, payload: 0 },
+  ];
+  check('scored(총점순) → conditions_only, ineligible 제외', rankCandidates(mixed, viewer, day).map((c) => c.id).join() === 'high,low,cond');
+}
+
+// ===========================================================================
+// Icebreaker · 공개 답변 · 소개 문장 (#39 유지)
+// ===========================================================================
+const ib = generateIcebreaker(male, partner);
 check('공통 취미 기반 icebreaker', ib.lead.includes('여행') || ib.lead.includes('영화'));
-const noCommon = generateIcebreaker(male, lukewarmTarget);
-check('공통점 없어도 질문 생성', noCommon.question.length > 0);
-
-// --- #39: 비공개 가치관 응답은 icebreaker 문구에 새지 않는다 ---
-const privateHeavyA = makeUser({
-  profile: { hobbies: [] },
-  values: { spendingStyle: 5, personalTimeNeed: 5 },
-});
-const privateHeavyB = makeUser({
-  profile: { userId: 'u9', gender: 'female', seekingGender: 'male', hobbies: [] },
-  values: { spendingStyle: 5, personalTimeNeed: 5 },
-});
+check('공통점 없어도 질문 생성', generateIcebreaker(male, lukewarmTarget).question.length > 0);
+const privateHeavyA = makeUser({ profile: { hobbies: [] }, values: { spendingStyle: 5, personalTimeNeed: 5 } });
+const privateHeavyB = female({ profile: { userId: 'u9', hobbies: [] }, values: { spendingStyle: 5, personalTimeNeed: 5 } });
 const leak = generateIcebreaker(privateHeavyA, privateHeavyB);
 check('icebreaker 가 비공개 소비/개인시간 응답을 언급하지 않는다', !leak.lead.includes('경험에') && !leak.lead.includes('자기만의 시간'));
-const sameGoalA = makeUser({ profile: { hobbies: [], relationshipGoal: 'serious' } });
-const sameGoalB = makeUser({ profile: { userId: 'u10', gender: 'female', seekingGender: 'male', hobbies: [], relationshipGoal: 'serious' } });
-check('공개 연애 목적이 같으면 그 사실만 언급', generateIcebreaker(sameGoalA, sameGoalB).lead.includes('연애 목적'));
+check('공개 연애 목적이 같으면 그 사실만 언급', generateIcebreaker(makeUser({ profile: { hobbies: [], relationshipGoal: 'serious' } }), female({ profile: { hobbies: [], relationshipGoal: 'serious' } })).lead.includes('연애 목적'));
 
-// --- #39: 추천 이유는 확인된 데이터에서만 — 근거 없으면 빈 배열 ---
-const strangerA = makeUser({
-  profile: { hobbies: [], regionCode: 'seoul' },
-  responses: responses({ p01: ['personality', 'personality.extraversion', 1] }),
-  values: { marriageIntent: 1, childrenIntent: 1, spendingStyle: 1, contactFrequency: 1, dateFrequency: 1, personalTimeNeed: 1 },
-});
-const strangerB = makeUser({
-  profile: { userId: 'u11', gender: 'female', seekingGender: 'male', hobbies: [], regionCode: 'busan' },
-  responses: responses({ p01: ['personality', 'personality.extraversion', 5] }),
-  values: { marriageIntent: 5, childrenIntent: 5, spendingStyle: 5, contactFrequency: 5, dateFrequency: 5, personalTimeNeed: 5 },
-});
-const strangerResult = computeMatch(strangerA, strangerB, NOW_YEAR);
-check('공통점이 확인되지 않으면 이유를 지어내지 않는다', strangerResult.eligible && strangerResult.reasons.length === 0);
-check('추천 이유에 보장/궁합 표현 없음', !result.reasons.some((r) => r.includes('잘 맞아요') || r.includes('어울릴')));
-const goalMatch = computeMatch(
-  makeUser({ ...strangerA, profile: { ...strangerA.profile, relationshipGoal: 'marriage_minded' } }),
-  makeUser({ ...strangerB, profile: { ...strangerB.profile, relationshipGoal: 'marriage_minded' } }),
-  NOW_YEAR,
-);
-check('연애 목적이 같으면 공개 사실로 이유 생성', goalMatch.reasons.includes('연애 목적이 같아요'));
-
-// --- #39: 외모 응답·벡터가 없어도(신규 가입 경로) 추천 계산이 된다 ---
-check('외모 벡터 null 이어도 eligible + 점수', result.eligible && result.score != null && male.appearancePreferenceVector == null);
-
-// --- #39: 카드 공개 답변 allowlist (선택지 코드 → 라벨) ---
-const cards = buildPublicAnswerCards({
-  day_off: ['cafe', 'not_an_option', 'rest_home', 'walk'], // 허용 코드만, max 2
-  together: 'food_tour', // 문자열 하나도 허용
-  important: ['honest_talk', 'honest_talk'], // 중복 제거, max 1
-  unknown_key: ['cafe'], // 알 수 없는 질문은 버림
-  hidden: '노출되면 안 되는 자유 텍스트',
-});
+const cards = buildPublicAnswerCards({ day_off: ['cafe', 'not_an_option', 'rest_home', 'walk'], together: 'food_tour', important: ['honest_talk', 'honest_talk'], unknown_key: ['cafe'], hidden: '자유 텍스트' });
 check('허용된 질문만 카드에 실린다', cards.length === 3 && !cards.some((c) => c.id === 'unknown_key' || c.id === 'hidden'));
-check('허용 코드만 · 최대 개수 적용', cards[0].id === 'day_off' && cards[0].values.join(',') === 'cafe,rest_home');
-check('라벨로 변환', cards[0].answer === '카페 가기 · 집에서 푹 쉬기');
-check('문자열 하나도 허용', cards[1].values.join(',') === 'food_tour' && cards[1].answer === '맛집 탐방');
-check('중복 제거 + max 1', cards[2].values.length === 1);
-check('질문 문구가 함께 실린다', cards[0].question.length > 0);
+check('허용 코드만 · 최대 개수 적용 · 라벨 변환', cards[0].values.join(',') === 'cafe,rest_home' && cards[0].answer === '카페 가기 · 집에서 푹 쉬기');
 check('배열/비객체 답변은 빈 배열', buildPublicAnswerCards(['x']).length === 0 && buildPublicAnswerCards(null).length === 0);
 check('relationship_goal 허용값만', normalizeRelationshipGoal('serious') === 'serious' && normalizeRelationshipGoal('x') == null);
-
-// --- #39: 소개 문장 조합 (규칙 기반) ---
-const intro = composeIntro('serious', { day_off: ['rest_home', 'cafe'], important: 'honest_talk' });
-check('소개 문장 조합', intro === '진지한 연애를 원해요. 쉬는 날엔 주로 집에서 푹 쉬기 · 카페 가기. 연애에서 중요하게 생각하는 건 솔직한 대화.');
-check('고른 것이 없으면 null', composeIntro(null, {}) == null && composeIntro('bogus', { hidden: 'x' }) == null);
+check('소개 문장 조합', composeIntro('serious', { day_off: ['rest_home', 'cafe'], important: 'honest_talk' }) === '진지한 연애를 원해요. 쉬는 날엔 주로 집에서 푹 쉬기 · 카페 가기. 연애에서 중요하게 생각하는 건 솔직한 대화.');
 check('자유 텍스트는 문장에 들어가지 않는다', !(composeIntro('serious', { day_off: '내 맘대로 쓴 글' }) ?? '').includes('내 맘대로'));
+
+// ===========================================================================
+// recommend 코어 — in-memory DataSource (연결 흐름은 supabase/tests/recommendation_db_test.mjs 가 실제 DB 로 검증)
+// ===========================================================================
+type Fixture = {
+  users: UserAccountRow[];
+  profiles: Record<string, unknown>[];
+  privates: Record<string, unknown>[];
+  prefs: Record<string, unknown>[];
+  blocks: { blocker_id: string; blocked_id: string }[];
+  reports: { reporter_id: string; reported_id: string }[];
+  likes: { from: string; to: string }[];
+  matches: { a: string; b: string }[];
+  recs: (StoredRecommendation & { user_id: string; for_date: string })[];
+  failStages?: Set<string>;
+};
+
+function account(id: string, over: Partial<UserAccountRow> = {}): UserAccountRow {
+  return { id, status: 'active', onboarding_completed: true, identity_verified: true, face_verified: true, age_verified: true, ...over };
+}
+function profileRow(id: string, gender: 'male' | 'female', over: Record<string, unknown> = {}) {
+  return {
+    user_id: id, nickname: `닉${id}`, birth_year: 1995, gender, seeking_gender: gender === 'male' ? 'female' : 'male',
+    region_code: 'seoul', height_cm: 170, job_group: 'it', smoking: 'none', drinking: 'sometimes', religion: null,
+    hobbies: ['travel'], personality_keywords: ['calm'], intro: null, relationship_goal: 'serious', public_answers: { day_off: ['cafe'] }, ...over,
+  };
+}
+
+function memoryDataSource(f: Fixture): DataSource & { inserted: NewRecommendationRow[]; expired: string[]; touched: Set<string> } {
+  const fail = (stage: string) => {
+    if (f.failStages?.has(stage)) throw new Error(`simulated failure: ${stage}`);
+  };
+  const inserted: NewRecommendationRow[] = [];
+  const expired: string[] = [];
+  const touched = new Set<string>();
+  const ds: DataSource = {
+    async profiles(ids) { touched.add('profiles'); return f.profiles.filter((p) => ids.includes(p.user_id as string)); },
+    async privateProfiles(ids) { touched.add('private_profiles'); return f.privates.filter((p) => ids.includes(p.user_id as string)); },
+    async questionnaireResponses() { touched.add('questionnaire_responses'); return []; },
+    async questionnaireQuestions() { touched.add('questionnaire_questions'); return []; },
+    async preferenceSettings(ids) { touched.add('preference_settings'); return f.prefs.filter((p) => ids.includes(p.user_id as string)); },
+    async dealbreakers() { touched.add('dealbreakers'); return []; },
+    async userAccounts(ids) { fail('users'); touched.add('users'); return f.users.filter((u) => ids.includes(u.id)); },
+    async blockPairs(userId) { fail('blocks'); return f.blocks.filter((b) => b.blocker_id === userId || b.blocked_id === userId); },
+    async reportPairs(userId) { fail('reports'); return f.reports.filter((r) => r.reporter_id === userId || r.reported_id === userId); },
+    async likedUserIds(userId) { fail('likes'); return f.likes.filter((l) => l.from === userId).map((l) => l.to); },
+    async matchedUserIds(userId) { fail('matches'); return f.matches.filter((m) => m.a === userId || m.b === userId).map((m) => (m.a === userId ? m.b : m.a)); },
+    async pastRecommendationCandidateIds(userId) { fail('recs'); return f.recs.filter((r) => r.user_id === userId).map((r) => r.candidate_id); },
+    async recommendationsForDate(userId, forDate) { fail('recs'); return f.recs.filter((r) => r.user_id === userId && r.for_date === forDate); },
+    async candidateIdsPage(gender, seekingGender, offset, limit) {
+      fail('candidates');
+      const eligibleIds = f.profiles
+        .filter((p) => p.gender === gender && p.seeking_gender === seekingGender)
+        .map((p) => p.user_id as string)
+        .filter((id) => accountEligible(f.users.find((u) => u.id === id)))
+        .sort();
+      return eligibleIds.slice(offset, offset + limit);
+    },
+    async insertRecommendation(row) {
+      inserted.push(row);
+      const stored = { id: `rec-${inserted.length}`, status: 'pending', strategy: row.strategy, card: row.card, candidate_id: row.candidate_id, user_id: row.user_id, for_date: row.for_date };
+      f.recs.push(stored);
+      return stored;
+    },
+    async expireRecommendations(ids) { expired.push(...ids); for (const r of f.recs) if (ids.includes(r.id)) r.status = 'expired'; },
+  };
+  return Object.assign(ds, { inserted, expired, touched });
+}
+
+const ME = 'me';
+const baseFixture = (): Fixture => ({
+  users: [account(ME), account('f1'), account('f2'), account('f3')],
+  profiles: [profileRow(ME, 'male'), profileRow('f1', 'female'), profileRow('f2', 'female', { hobbies: ['games'] }), profileRow('f3', 'female', { region_code: 'busan', hobbies: [] })],
+  privates: [{ user_id: ME, marriage_intent: 4 }, { user_id: 'f1', marriage_intent: 4 }, { user_id: 'f2', marriage_intent: 2 }, { user_id: 'f3', marriage_intent: 1 }],
+  prefs: [],
+  blocks: [], reports: [], likes: [], matches: [], recs: [],
+});
+const RUN = { userId: ME, today: '2026-09-14', nowYear: NOW_YEAR, dailyLimit: 1 };
+
+await (async () => {
+  // 정상: 외모 데이터 전혀 없는 fixture 에서 추천 1건 + 카드 allowlist
+  const f = baseFixture();
+  const ds = memoryDataSource(f);
+  const out = await runDailyRecommendation(ds, RUN);
+  check('외모 데이터 없이 추천 생성', out.kind === 'ok' && out.recommendations.length === 1);
+  if (out.kind === 'ok') {
+    const card = out.recommendations[0].card;
+    check('카드는 allowlist 키만', Object.keys(card).every((k) => (CARD_FIELDS as readonly string[]).includes(k)) && Object.keys(card).length === CARD_FIELDS.length);
+    check('카드에 점수·차원·비공개·얼굴 데이터 없음', !('score_total' in card) && !('dimensions' in card) && !('marriage_intent' in card) && !('feature_vector' in card));
+    check('저장 dimensions 에 appearance 없음 + basis 있음', ds.inserted[0].dimensions.basis === 'scored' && !('appearance' in ds.inserted[0].dimensions));
+    check('공통 취미(f1) 가 1순위 (f2 는 취미 다름·결혼관 다름)', out.recommendations[0].candidate_id === 'f1');
+    check('reasons 는 공개 사실만', (card.reasons as string[]).every((r) => ['공통 관심사가 있어요', '같은 지역을 선택했어요', '연애 목적이 같아요', '쉬는 날 보내는 방식이 겹쳐요', '스스로 고른 키워드가 겹쳐요'].includes(r)));
+  }
+  check('snapshot 로더가 외모 테이블을 읽지 않는다', !ds.touched.has('appearance_preference_events') && !ds.touched.has('face_verifications'));
+  check('DataSource 계약에 외모 조회 메서드가 없다', !('appearancePreferenceEvents' in ds) && !('faceFeatureVectors' in ds));
+
+  // 같은 fixture 에서 preference_settings 의 appearance_importance 를 넣어도 결과 동일
+  const f2 = baseFixture();
+  f2.prefs = [{ user_id: ME, appearance_importance: 5, personality_importance: 3, values_importance: 3, lifestyle_importance: 3, relationship_importance: 3 }];
+  const ds2 = memoryDataSource(f2);
+  const out2 = await runDailyRecommendation(ds2, RUN);
+  check('appearance_importance 값과 무관하게 같은 후보·같은 점수', out2.kind === 'ok' && out2.recommendations[0].candidate_id === 'f1' && ds2.inserted[0].score_total === ds.inserted[0].score_total);
+
+  // 요청자 인증 미완료 → 거부
+  const f3 = baseFixture();
+  f3.users[0] = account(ME, { face_verified: false });
+  check('요청자 얼굴 인증 미완료 → not_verified', (await runDailyRecommendation(memoryDataSource(f3), RUN)).kind === 'not_verified');
+  const f3b = baseFixture();
+  f3b.users[0] = account(ME, { age_verified: false });
+  check('요청자 성인 확인 미완료 → not_verified', (await runDailyRecommendation(memoryDataSource(f3b), RUN)).kind === 'not_verified');
+  const f3c = baseFixture();
+  f3c.users[0] = account(ME, { onboarding_completed: false });
+  check('요청자 온보딩 미완료 → not_ready', (await runDailyRecommendation(memoryDataSource(f3c), RUN)).kind === 'not_ready');
+
+  // 후보 인증 미완료·정지·탈퇴·차단·신고 제외
+  const f4 = baseFixture();
+  f4.users = [account(ME), account('f1', { identity_verified: false }), account('f2', { status: 'suspended' }), account('f3', { status: 'deleted' })];
+  const o4 = await runDailyRecommendation(memoryDataSource(f4), RUN);
+  check('인증 미완료·정지·탈퇴 후보만 있으면 exhausted (조건 완화 없음)', o4.kind === 'ok' && o4.exhausted && o4.recommendations.length === 0);
+  const f5 = baseFixture();
+  f5.blocks = [{ blocker_id: 'f1', blocked_id: ME }];
+  f5.reports = [{ reporter_id: ME, reported_id: 'f2' }];
+  const o5 = await runDailyRecommendation(memoryDataSource(f5), RUN);
+  check('상대가 나를 차단(역방향) + 내가 신고한 상대 제외 → f3', o5.kind === 'ok' && o5.recommendations[0]?.candidate_id === 'f3');
+  const f5b = baseFixture();
+  f5b.reports = [{ reporter_id: 'x', reported_id: 'f1' }];
+  const o5b = await runDailyRecommendation(memoryDataSource(f5b), RUN);
+  check('다른 사람의 신고만으로는 전역 제외되지 않는다', o5b.kind === 'ok' && o5b.recommendations[0]?.candidate_id === 'f1');
+
+  // 저장된 오늘 추천 재검증
+  const f6 = baseFixture();
+  f6.recs = [{ id: 'old', status: 'pending', strategy: 'fallback', card: {}, candidate_id: 'f1', user_id: ME, for_date: RUN.today }];
+  f6.blocks = [{ blocker_id: ME, blocked_id: 'f1' }];
+  const ds6 = memoryDataSource(f6);
+  const o6 = await runDailyRecommendation(ds6, RUN);
+  check('오늘 저장된 pending 추천의 상대를 차단했으면 expired 처리 + 반환 안 함 + 새 추천 생성', ds6.expired.includes('old') && o6.kind === 'ok' && o6.recommendations.length === 1 && o6.recommendations[0].candidate_id !== 'f1');
+  const f7 = baseFixture();
+  f7.recs = [{ id: 'old', status: 'accepted', strategy: 'fallback', card: {}, candidate_id: 'f1', user_id: ME, for_date: RUN.today }];
+  f7.users[1] = account('f1', { status: 'suspended' });
+  const ds7 = memoryDataSource(f7);
+  const o7 = await runDailyRecommendation(ds7, RUN);
+  check('이미 수락한 추천의 상대가 정지되면 반환하지 않되 보존하고 오늘 한도에 포함', ds7.expired.length === 0 && o7.kind === 'ok' && o7.recommendations.length === 0 && ds7.inserted.length === 0);
+  const f8 = baseFixture();
+  f8.recs = [{ id: 'old', status: 'pending', strategy: 'fallback', card: {}, candidate_id: 'f1', user_id: ME, for_date: RUN.today }];
+  const o8 = await runDailyRecommendation(memoryDataSource(f8), RUN);
+  check('오늘 유효한 추천이 있으면 그대로 반환 (새로 만들지 않음)', o8.kind === 'ok' && o8.recommendations.length === 1 && o8.recommendations[0].id === 'old');
+
+  const f8b = baseFixture();
+  f8b.recs = [{ id: 'gone', status: 'expired', strategy: 'fallback', card: {}, candidate_id: 'f1', user_id: ME, for_date: RUN.today }];
+  const ds8b = memoryDataSource(f8b);
+  const o8b = await runDailyRecommendation(ds8b, RUN);
+  check('오늘 expired 행은 한도에 포함되지 않고 반환되지 않는다 (새 추천 생성, f1 은 과거 추천이라 제외)', o8b.kind === 'ok' && o8b.recommendations.length === 1 && o8b.recommendations[0].candidate_id !== 'f1' && !o8b.recommendations.some((r) => r.id === 'gone'));
+
+  // 안전 조회 실패 → 추천 진행 안 함
+  for (const stage of ['blocks', 'reports', 'users', 'likes', 'candidates']) {
+    const ff = baseFixture();
+    ff.failStages = new Set([stage]);
+    const dsf = memoryDataSource(ff);
+    const of = await runDailyRecommendation(dsf, RUN);
+    check(`${stage} 조회 실패 → lookup_failed, 추천 미생성`, of.kind === 'lookup_failed' && dsf.inserted.length === 0);
+  }
+
+  // 페이지네이션: 첫 100명이 전부 제외돼도 뒤의 후보를 찾는다
+  const f9 = baseFixture();
+  f9.profiles = [profileRow(ME, 'male')];
+  f9.users = [account(ME)];
+  for (let i = 0; i < 130; i += 1) {
+    const id = `c${String(i).padStart(3, '0')}`;
+    f9.profiles.push(profileRow(id, 'female'));
+    f9.users.push(account(id));
+    if (i < 120) f9.likes.push({ from: ME, to: id }); // 앞 120명은 이미 좋아요 → 제외
+  }
+  const o9 = await runDailyRecommendation(memoryDataSource(f9), RUN);
+  check('앞 페이지가 전부 제외돼도 뒤 페이지에서 후보를 찾는다 (오판 방지)', o9.kind === 'ok' && !o9.exhausted && o9.recommendations.length === 1 && o9.scanned === 10);
+
+  // 후보 부족 시 조건 완화 없음: 필수 조건 불일치만 있으면 exhausted
+  const f10 = baseFixture();
+  f10.profiles = [profileRow(ME, 'male', { smoking: 'regular' }), profileRow('f1', 'female')];
+  f10.users = [account(ME), account('f1')];
+  (f10 as Fixture & { db?: unknown }).db = undefined;
+  const ds10 = memoryDataSource(f10);
+  ds10.dealbreakers = async () => [{ user_id: 'f1', kind: 'smoking', value: { allow: false } }];
+  const o10 = await runDailyRecommendation(ds10, RUN);
+  check('후보의 필수 조건(비흡연) 불일치 → 제외, 완화 없이 exhausted', o10.kind === 'ok' && o10.exhausted && ds10.inserted.length === 0);
+
+  // 동점 후보: 입력 순서를 바꿔도 같은 후보 (모든 후보 동일 데이터)
+  const f11 = baseFixture();
+  f11.profiles = [profileRow(ME, 'male'), ...['z9', 'a1', 'm5'].map((id) => profileRow(id, 'female'))];
+  f11.users = [account(ME), account('z9'), account('a1'), account('m5')];
+  f11.privates = [];
+  const pick1 = await runDailyRecommendation(memoryDataSource(f11), RUN);
+  const f11r = { ...f11, profiles: [...f11.profiles].reverse(), users: [...f11.users].reverse(), recs: [] };
+  const pick2 = await runDailyRecommendation(memoryDataSource(f11r), RUN);
+  check('동점 후보 입력 순서를 바꿔도 같은 후보 선택', pick1.kind === 'ok' && pick2.kind === 'ok' && pick1.recommendations[0].candidate_id === pick2.recommendations[0].candidate_id);
+
+  // loadSnapshots: 얼굴 벡터·외모 이벤트 없이 스냅샷 생성
+  const snaps = await loadSnapshots(memoryDataSource(baseFixture()), [ME]);
+  check('loadSnapshots 결과에 외모 필드 없음', snaps.has(ME) && !('appearancePreferenceVector' in (snaps.get(ME) as object)) && !('appearance' in snaps.get(ME)!.importance));
+})();
+
+console.log(`\n${passes} passed, ${failures} failed`);
+if (failures > 0) {
+  console.error(`\n${failures} test(s) failed`);
+  process.exit(1);
+}
+console.log('All MatchingEngine tests passed');
