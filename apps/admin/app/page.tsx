@@ -22,7 +22,11 @@ export default async function Dashboard() {
         <div className="card"><div className="label">매치 수</div><div className="value">{stats.matchesCount}</div></div>
         <div className="card"><div className="label">대화 시작 수</div><div className="value">{stats.chatsStarted}</div></div>
         <div className="card"><div className="label">만남 희망(상호)</div><div className="value">{stats.meetupMutual}</div></div>
-        <div className="card"><div className="label">실제 만남</div><div className="value">{stats.meetupCompleted}</div></div>
+        <div className="card"><div className="label">실제 만남(양측 확인)</div><div className="value">{stats.meetupCompleted}</div></div>
+        <div className="card"><div className="label">만남 응답(한쪽 이상)</div><div className="value">{stats.meetupOneSideMet}</div></div>
+        {stats.legacyCompleted > 0 && (
+          <div className="card"><div className="label">예전 한쪽 완료(미검증)</div><div className="value">{stats.legacyCompleted}</div></div>
+        )}
         <div className="card"><div className="label">미처리 신고</div><div className="value">{stats.pendingReports}</div></div>
         <div className="card"><div className="label">얼굴 인증 검토 대기</div><div className="value">{stats.pendingFaceReviews}</div></div>
       </div>

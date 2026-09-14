@@ -7,7 +7,6 @@
  * (임시로 check('__must_fail__', false) 를 넣고 exit code 1 이 나오는지 확인한 뒤 제거했다)
  */
 import type { DataSource, NewRecommendationRow, StoredRecommendation, UserAccountRow } from './dataSource.ts';
-import { generateIcebreaker } from './icebreaker.ts';
 import {
   buildReasons,
   checkDealbreakers,
@@ -21,6 +20,7 @@ import {
 import { buildPublicAnswerCards, composeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
 import { accountEligible, CARD_FIELDS, runDailyRecommendation } from './recommend.ts';
 import { loadSnapshots } from './snapshot.ts';
+import { buildStarterCache, GENERAL_QUESTIONS, generateStarterQuestions, parseStarterCache, STARTER_MAX, STARTER_MIN } from './starterQuestions.ts';
 import type { QuestionnaireResponse, UserSnapshot } from './types.ts';
 
 let failures = 0;
@@ -339,16 +339,37 @@ check('conditions_only 는 fallback', pickStrategy({ ...scoredOf(0), basis: 'con
 }
 
 // ===========================================================================
-// Icebreaker · 공개 답변 · 소개 문장 (#39 유지)
+// 대화 시작 질문 (#41) — 공개 답변·취미만 입력, 공통/상대만/일반 구분, LLM 없음
 // ===========================================================================
-const ib = generateIcebreaker(male, partner);
-check('공통 취미 기반 icebreaker', ib.lead.includes('여행') || ib.lead.includes('영화'));
-check('공통점 없어도 질문 생성', generateIcebreaker(male, lukewarmTarget).question.length > 0);
-const privateHeavyA = makeUser({ profile: { hobbies: [] }, values: { spendingStyle: 5, personalTimeNeed: 5 } });
-const privateHeavyB = female({ profile: { userId: 'u9', hobbies: [] }, values: { spendingStyle: 5, personalTimeNeed: 5 } });
-const leak = generateIcebreaker(privateHeavyA, privateHeavyB);
-check('icebreaker 가 비공개 소비/개인시간 응답을 언급하지 않는다', !leak.lead.includes('경험에') && !leak.lead.includes('자기만의 시간'));
-check('공개 연애 목적이 같으면 그 사실만 언급', generateIcebreaker(makeUser({ profile: { hobbies: [], relationshipGoal: 'serious' } }), female({ profile: { hobbies: [], relationshipGoal: 'serious' } })).lead.includes('연애 목적'));
+{
+  const both = { hobbies: ['travel'], publicAnswers: { day_off: ['cafe', 'walk'], important: 'honest_talk' } };
+  const other = { hobbies: ['travel', 'music'], publicAnswers: { day_off: ['cafe', 'culture'], together: ['food_tour'], important: 'respect' } };
+  const qs = generateStarterQuestions(both, other);
+  check('시작 질문은 2~3개', qs.length >= STARTER_MIN && qs.length <= STARTER_MAX);
+  check('둘 다 고른 카페 → shared 질문 ("둘 다")', qs.some((q) => q.id === 'shared:day_off:cafe' && q.basis === 'shared' && q.text.startsWith('둘 다')));
+  check('상대만 고른 전시·공연 → partner 질문 (공통점 주장 없음)', (() => {
+    const q = qs.find((x) => x.id === 'partner:day_off:culture');
+    return !!q && q.basis === 'partner' && !q.text.includes('둘 다') && q.text.includes('전시');
+  })());
+  check('공통 근거가 먼저, 상대 근거가 뒤 (결정적 순서)', qs[0].basis === 'shared' && qs.findIndex((q) => q.basis === 'partner') > qs.findIndex((q) => q.basis === 'shared'));
+  check('같은 입력 → 같은 출력', JSON.stringify(generateStarterQuestions(both, other)) === JSON.stringify(qs));
+  check('내가 골랐지만 상대가 안 고른 항목(walk)은 질문 근거가 아니다', !qs.some((q) => q.value === 'walk'));
+  check('상대 관점(방향)에 따라 partner 질문이 다르다', generateStarterQuestions(other, both).some((q) => q.id === 'partner:day_off:walk'));
+
+  const none = generateStarterQuestions({ hobbies: [], publicAnswers: {} }, { hobbies: [], publicAnswers: null });
+  check('공개 정보가 없으면 일반 질문만 (허위 공통점 없음)', none.length >= STARTER_MIN && none.every((q) => q.basis === 'general' && GENERAL_QUESTIONS.includes(q.text)) && !none.some((q) => q.text.includes('둘 다')));
+  const one = generateStarterQuestions({ hobbies: [], publicAnswers: {} }, { hobbies: [], publicAnswers: { together: 'movie' } });
+  check('근거 질문이 하나면 일반 질문으로 2개를 채운다', one.length === STARTER_MIN && one[0].basis === 'partner' && one[1].basis === 'general');
+  const junk = generateStarterQuestions({ hobbies: ['travel'], publicAnswers: { day_off: ['cafe'] } }, { hobbies: ['travel'], publicAnswers: { day_off: ['cafe', 'not_an_option'], secret: '자유 텍스트', important: 42 } });
+  check('허용된 질문 id·선택지 코드만 사용 (알 수 없는 키/값 무시)', junk.every((q) => q.basis !== 'general' ? (q.promptId === 'day_off' || q.promptId === 'hobby') : true) && !junk.some((q) => q.text.includes('자유 텍스트')));
+  check('공통 취미(여행)도 shared 근거', junk.some((q) => q.id === 'shared:hobby:travel'));
+  check('입력 타입에 비공개 필드가 없다 (values/responses 없이 호출 가능)', Object.keys(both).join() === 'hobbies,publicAnswers');
+
+  const cache = buildStarterCache(qs, new Date('2026-09-14T00:00:00Z'));
+  check('v2 캐시 파싱', parseStarterCache(cache)?.questions.length === qs.length && parseStarterCache(JSON.parse(JSON.stringify(cache)))?.version === 2);
+  check('과거 lead/question 캐시는 무효 (다시 노출하지 않음)', parseStarterCache({ lead: '두 분 모두 경험에 투자하는 편이에요', question: '?' }) === null);
+  check('깨진 캐시는 무효', parseStarterCache({ version: 2, questions: [{ id: 'x' }] }) === null && parseStarterCache({ version: 2, questions: [] }) === null && parseStarterCache(null) === null);
+}
 
 const cards = buildPublicAnswerCards({ day_off: ['cafe', 'not_an_option', 'rest_home', 'walk'], together: 'food_tour', important: ['honest_talk', 'honest_talk'], unknown_key: ['cafe'], hidden: '자유 텍스트' });
 check('허용된 질문만 카드에 실린다', cards.length === 3 && !cards.some((c) => c.id === 'unknown_key' || c.id === 'hidden'));

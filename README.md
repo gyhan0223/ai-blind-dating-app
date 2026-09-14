@@ -18,7 +18,7 @@
 
 - 전화번호 SMS OTP 로그인 → 본인확인(1인 1계정) → **인증용** 얼굴 라이브니스(Didit) → 기본 정보 → 공개 소개(고르기) → 설문 → 가치관 → 선호 조건 → 홈
 - 하루 한 명 추천 (텍스트 카드: 닉네임·나이·지역·키·직업·흡연·음주·취미·키워드·**고른 항목으로 만든 소개 문장(연애 목적·공개 질문 선택)**·인증 배지)
-- 상호 수락 → 텍스트 채팅 → 만남 의사 → 만남 후 비공개 피드백 (흐름 보완은 #41)
+- 상호 수락 → 텍스트 채팅(멱등 전송·재접속 복구·공개 답변 기반 시작 질문) → 각자 비공개 만남 의향 → 둘 다 원할 때만 상호 관심 안내 → 대화로 일정 조율 → 각자 만남 결과 응답(양측 확인 시 확인된 만남) → 비공개 피드백 (#41 — `docs/meetup-flow.md`)
 - 신고·차단·정지·탈퇴, 관리자 웹
 
 **MVP 에서 제공하지 않는 것 (앱·문서에서 약속하지 않음)**
@@ -36,7 +36,7 @@
 | 노출 | 상대에게 공개되지 않음, 추천 계산에 쓰이지 않음 | — |
 | 동의 | 인증 목적 생체정보 고지 (#11/#12) | 채택 시 별도 동의 필요 |
 
-**개발 순서**: **#39**(이 저장소 상태 — 외모 단계 없는 온보딩·고르기형 공개 프로필·문구·Plus 숨김) → **#40**(매칭 엔진에서 외모 차원 제외·가중치 재정규화) → **#41**(대화 → 상호 만남 동의 → 만남 후 피드백).
+**개발 순서**: **#39**(외모 단계 없는 온보딩·고르기형 공개 프로필·문구·Plus 숨김) → **#40**(매칭 엔진에서 외모 차원 제외·가중치 재정규화) → **#41**(이 저장소 상태 — 대화 → 상호 만남 의향 → 실제 만남 확인 → 비공개 피드백). #41 코드 완료는 전체 앱 출시 준비 완료가 아니다 — 남은 P0(#5/#6/#7/#11/#13/#15/#16/#17/#18/#19/#20/#21/#22/#23/#24)은 #30 참고.
 #40 반영: `MatchingEngine` 에서 `appearance` 차원·중요도가 제거되어 유효한 비외모 차원만으로 재정규화한다 (`docs/matching-policy.md`).
 
 ## 구성
@@ -57,7 +57,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0015 순서대로 — 0015 는 앱 배포 전에 적용)
+# 마이그레이션 적용 (0001 → 0016 순서대로 — 0015/0016 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -204,6 +204,10 @@ cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.
 # 온보딩 재진입 판정 테스트 (#39 — 외모 데이터 없는 완료 · 'appearance' 단계 사용자 복귀 · 인증 미완료 홈 차단)
 cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs
 # DB: 인증 전 온보딩 완료 차단 트리거 · 공개 자기소개 제약 (onboarding_guard_tests.sql — 위 run_local_check.sh 에 포함)
+# 채팅 순수 로직 테스트 (#41 — 조회/Realtime 중복 병합 · 낙관적 메시지 교체 · cursor 정렬 · 과거 캐시 무효 · 오류 분류)
+cd apps/mobile && node --experimental-strip-types scripts/chat-core-selftest.mjs
+# DB: 만남 흐름 (#41 — 멱등 전송 · 일방 의향 비공개 · 상호 1회 · 철회 · 만남 확인 집계 · 비공개 피드백 · 차단/정지) 과
+#     동시성(양측 동시 yes 1회 전이 · 같은 키 동시 재시도 1행) — meetup_flow_tests.sql · meetup_concurrency_test.sh (run_local_check.sh 에 포함)
 
 # 타입체크 / 빌드
 cd apps/mobile && npx tsc --noEmit && npx expo export --platform web
@@ -324,6 +328,8 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 2. **profiles(공개용) / private_profiles(가치관·민감 응답) 분리** — private 은 본인만 조회 가능.
 3. **RLS 전면 적용**: 메시지·신고·피드백·행동 이벤트·좋아요(받은 쪽 비공개)·
    만남 의사(상호 yes 전 비공개)까지 시뮬레이션 테스트로 검증 (`supabase/tests/rls_tests.sql`).
+   만남 의향·만남 결과·피드백은 RPC 로만 쓰고(직접 insert/update 정책 없음), 상대의 일방 응답·만남 결과·피드백은 API 로도 읽을 수 없다
+   (`supabase/tests/meetup_flow_tests.sql` — JWT 컨텍스트, `docs/meetup-flow.md`).
 4. **인증 플래그(본인/얼굴/나이)와 계정 상태는 서버 전용** — DB 트리거가 클라이언트 변경 차단.
 5. 민감 설문은 선택 응답 + 공개 여부 별도 저장, 대화 분석은 `conversation_analysis_consent` 동의 필드로 준비만.
 6. 로그에 얼굴 경로/민감정보를 남기지 않음.
@@ -339,7 +345,8 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 | 얼굴 라이브니스 | **Didit 네이티브 SDK 능동형 라이브니스 구현 완료** (`start-face-liveness` + `didit-webhook`, Development Build 필요). 개발 Mock 은 `complete-face-verification` (production 미배포) | Didit 콘솔 설정·secret·실기기 검증 (`docs/face-liveness-didit.md`) |
 | 얼굴 특징 벡터 | 미생성 (null) — 인증용 reference image 만 서버 전용 private 저장 | MVP 범위 밖 (#8 — 별도 채택·별도 동의 후 검토) |
 | 외모 취향 테스트 | **제거됨** (#39 — 온보딩·수정 화면에 없음, 기존 `appearance_preference_events` 행만 보존) | MVP 범위 밖 (#9/#10) |
-| Icebreaker | 규칙 기반 (공개 정보만 사용) | 공개 답변 기반 선택형 질문 (#41) |
+| 대화 시작 질문 | **공개 답변·취미 기반 선택형 2~3개 구현 완료** (#41 — 규칙 기반, 자동 발송 없음, LLM 없음) | — (AI 대화 분석은 #28, MVP 범위 밖) |
+| Push 알림 | 서버 outbox(`notification_events`)만 — 새 메시지·상호 만남 관심을 중복 없이 기록 | 토큰 등록·발송기·deep link (#17) |
 | 결제 | 구조만 (subscriptions 테이블) — **앱 진입점 숨김, 서버 Plus 플래그 off** (#29) | MVP 검증 이후 feature flag 로 재도입 |
 | 이메일 로그인 | 시드 데모 계정·관리자 웹 전용으로 분리 | 일반 사용자 앱은 전화번호 OTP 만 사용 (완료) |
 | 시드 데모 사용자 | `is_demo=true` 12명 | 실배포 시 제거 |
@@ -356,8 +363,9 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 
 ## 다음 개발 우선순위 (#30)
 
-1. **#41** 텍스트 대화 → 상호 만남 동의 → 실제 만남 확인 → 비공개 피드백 흐름 완성
-2. #22 하루 한 명 스케줄러·멱등성(동시 요청) · #23 후보 부족 정책·재추천 주기 · #24 퍼널 측정 (베타 시작 전)
+1. #22 하루 한 명 스케줄러·멱등성(동시 요청) · #23 후보 부족 정책·재추천 주기 · #24 퍼널 측정 대시보드 (이벤트·집계 뷰는 #41 에서 제공 — `docs/meetup-flow.md` 5절)
+2. #17 Push 발송기(outbox 연결) · #15/#16 신고 운영·스팸 방지 · #13 삭제 파이프라인 (#41 데이터는 cascade 로 연결됨)
 3. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기), #11 얼굴 데이터 보관 정책
-4. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)
+4. #21 실기기 E2E (두 계정으로 소개 수락 → 대화 → 상호 의향 → 만남 확인 → 피드백 — #41 은 로컬 DB/순수 로직 검증까지만 마침)
+5. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)
 5. MVP 이후 별도 채택 시 검토: #8 얼굴 임베딩 · #9/#10 외모 취향 매칭 · #28 AI 대화 분석 · #29 Plus/결제 재도입

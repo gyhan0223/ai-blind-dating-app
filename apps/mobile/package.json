@@ -53,7 +53,8 @@
     "postinstall": "patch-package",
     "face:selftest": "node --experimental-strip-types scripts/face-liveness-selftest.mjs",
     "sdk:verify-no-token-log": "bash scripts/verify-sdk-no-token-log.sh",
-    "onboarding:selftest": "node --experimental-strip-types scripts/onboarding-resume-selftest.mjs"
+    "onboarding:selftest": "node --experimental-strip-types scripts/onboarding-resume-selftest.mjs",
+    "chat:selftest": "node --experimental-strip-types scripts/chat-core-selftest.mjs"
   },
   "private": true
 }

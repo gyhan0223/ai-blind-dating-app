@@ -51,6 +51,16 @@ if [[ "${WITH_FACE_CONCURRENCY_TESTS:-1}" == "1" && -f face_liveness_concurrency
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash face_liveness_concurrency_test.sh
 fi
 
+if [[ "${WITH_MEETUP_FLOW_TESTS:-1}" == "1" && -f meetup_flow_tests.sql ]]; then
+  echo "running meetup flow tests (#41 — 멱등 전송 · 일방 의향 비공개 · 상호 1회 · 철회 · 만남 확인 집계 · 비공개 피드백 · 차단)"
+  $PSQL -d "$DB_NAME" -f meetup_flow_tests.sql
+fi
+
+if [[ "${WITH_MEETUP_CONCURRENCY_TESTS:-1}" == "1" && -f meetup_concurrency_test.sh ]]; then
+  echo "running meetup concurrency tests (#41 — 양측 동시 yes 1회 전이 · 같은 키 동시 재시도 1행)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash meetup_concurrency_test.sh
+fi
+
 if [[ "${WITH_RECOMMENDATION_DB_TEST:-1}" == "1" && -f recommendation_db_test.mjs ]]; then
   if command -v node >/dev/null 2>&1; then
     echo "running recommendation db test (#40 — DB → snapshot → engine → card, 외모 데이터 없이)"

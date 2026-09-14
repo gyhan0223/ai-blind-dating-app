@@ -119,3 +119,14 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       `bash supabase/tests/run_local_check.sh` 에 포함된 `recommendation_db_test.mjs` (#40 — 실제 DB 위에서 외모 데이터 없이 추천 생성)
 - [ ] 마이그레이션 `0015_no_appearance_onboarding.sql` 이 production DB 에 적용되어 있다 (`profiles.relationship_goal/public_answers(/intro)` 컬럼, `users_guard_onboarding_completion` 트리거)
       — **앱 배포보다 먼저** 적용한다 (새 앱은 이 컬럼에 저장한다)
+- [ ] (#41) 마이그레이션 `0016_meetup_flow.sql` 이 production DB 에 적용되어 있다 (`send_message`/`meetup_set_intent`/`meetup_report_outcome`/`meetup_submit_feedback`/`conversation_access` RPC,
+      `meetup_outcomes`·`notification_events` 테이블, `messages.client_message_id`, `matches.mutual_interest_at/meetup_confirmed_at`) — 앱과 **같은 릴리스 창**에서 (예전 앱의 만남 화면 저장은 이 시점부터 실패한다)
+- [ ] (#41) `icebreaker` Edge Function 이 최신 코드로 재배포되어 있다 (v2 캐시 · 공개 필드만 조회). 배포 후 `select count(*) from conversations where icebreaker ? 'lead'` 가 줄어든다 (과거 캐시 덮어쓰기)
+- [ ] (#41) 사용자 JWT 로 `matches` 의 `meetup_state`/`meetup_completed_at` 을 update 하면 0행이고, `meetup_intentions`/`meetup_outcomes`/`meetup_feedback` 에 insert 하면 거부된다
+- [ ] (#41) 두 테스트 계정으로 A 만 yes 일 때 B 의 `meetup_intentions` 조회가 0행이고 매치 `meetup_state` 가 `none` 이다. B 도 yes 면 `mutual_interest` 가 되고 `analytics_events.meetup_mutual_interest` 가 참가자당 1행이다
+- [ ] (#41) 한쪽만 "만났어요" 를 기록해도 `meetup_state` 가 `met_confirmed` 가 아니고, 상대는 `meetup_outcomes`/`meetup_feedback` 에서 0행을 본다
+- [ ] (#41) 같은 `client_message_id` 로 `send_message` 를 두 번 호출해도 `messages` 1행 · `conversation_metrics.total_messages` +1 · `analytics_events.message_sent` 1행이다
+- [ ] (#41) `meetup_pair_summary` 뷰와 `notification_events` 를 사용자 JWT 로 select 하면 권한 오류다
+- [ ] (#41) **실기기 두 대**로 상호 수락 → 첫 메시지 → 시작 질문 선택·수정·전송 → 상호 의향 → 만남 확인 → 피드백을 끝까지 확인했다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)
+- [ ] (#41) 실기기에서 네트워크 끊김 → 복귀 시 놓친 메시지가 복구되고, 전송 실패 메시지가 "다시 보내기" 로 중복 없이 전송된다 — **아직 미수행**
+- [ ] (#41/#17) Push 는 미구현이다 — 앱·문서에 "알림이 간다" 고 약속하지 않는다. `notification_events` outbox 만 쌓인다
