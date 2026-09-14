@@ -8,6 +8,7 @@
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
 import { generateIcebreaker } from '../_shared/matching/icebreaker.ts';
 import { loadSnapshots } from '../_shared/matching/snapshot.ts';
+import { supabaseDataSource } from '../_shared/matching/supabaseDataSource.ts';
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -34,7 +35,12 @@ Deno.serve(async (req) => {
 
   if (conv.icebreaker) return json({ icebreaker: conv.icebreaker });
 
-  const snapshots = await loadSnapshots(db, [match.user_a, match.user_b]);
+  let snapshots;
+  try {
+    snapshots = await loadSnapshots(supabaseDataSource(db), [match.user_a, match.user_b]);
+  } catch {
+    return json({ error: 'lookup_failed' }, 500);
+  }
   const a = snapshots.get(match.user_a);
   const b = snapshots.get(match.user_b);
   if (!a || !b) return json({ icebreaker: null });
