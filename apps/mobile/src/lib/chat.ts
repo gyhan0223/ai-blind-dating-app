@@ -1,6 +1,16 @@
 import type { RealtimeChannel } from '@supabase/supabase-js';
-import { track } from './analytics';
+import {
+  beforeCursorFilter,
+  classifySendError,
+  type ChatMessage,
+  type MessageCursor,
+  parseStarterCache,
+  type ServerMessage,
+  type StarterCache,
+} from './chatCore';
 import { supabase } from './supabase';
+
+export type { ChatMessage, StarterCache, StarterQuestion } from './chatCore';
 
 export type ConversationListItem = {
   conversationId: string;
@@ -14,27 +24,27 @@ export type ConversationListItem = {
   unreadCount: number;
 };
 
-export type ChatMessage = {
-  id: string;
-  conversation_id: string;
-  sender_id: string;
-  content: string;
-  created_at: string;
-  read_at: string | null;
+export type ConversationAccess = {
+  canChat: boolean;
+  reason: 'ok' | 'forbidden' | 'ended' | 'self_restricted' | 'unavailable';
 };
-
-export type Icebreaker = { lead: string; question: string };
 
 export type ConversationDetail = {
   conversationId: string;
   matchId: string;
   matchStatus: string;
   meetupState: string;
+  mutualInterestAt: string | null;
   partnerId: string;
   partnerNickname: string;
-  icebreaker: Icebreaker | null;
+  /** v2 캐시만. 과거 lead/question 캐시는 null 로 취급 (서버가 v2 로 재생성) */
+  starters: StarterCache | null;
   totalMessages: number;
+  access: ConversationAccess;
 };
+
+export const MESSAGE_PAGE_SIZE = 50;
+const MESSAGE_COLUMNS = 'id, conversation_id, sender_id, content, created_at, read_at, client_message_id';
 
 async function requireUserId(): Promise<string> {
   const { data } = await supabase.auth.getUser();
@@ -102,13 +112,22 @@ export async function fetchConversations(): Promise<ConversationListItem[]> {
     .sort((a, b) => (b.lastMessageAt ?? '').localeCompare(a.lastMessageAt ?? ''));
 }
 
-/** 대화방 상세 (상대/아이스브레이커/메시지 수) */
+/** 지금 이 대화에 메시지를 보낼 수 있는지 (서버 판단: 매치 종료·차단·본인/상대 비활성) */
+export async function fetchConversationAccess(conversationId: string): Promise<ConversationAccess> {
+  const { data, error } = await supabase.rpc('conversation_access', { cid: conversationId });
+  if (error || !data) throw new Error('대화 상태를 확인하지 못했습니다.');
+  const obj = data as { can_chat?: boolean; reason?: string };
+  const reason = (['ok', 'forbidden', 'ended', 'self_restricted', 'unavailable'] as const).find((r) => r === obj.reason) ?? 'forbidden';
+  return { canChat: obj.can_chat === true && reason === 'ok', reason };
+}
+
+/** 대화방 상세 (상대/시작 질문 캐시/메시지 수/전송 가능 여부) */
 export async function fetchConversationDetail(conversationId: string): Promise<ConversationDetail> {
   const userId = await requireUserId();
 
   const { data: conv, error } = await supabase
     .from('conversations')
-    .select('id, icebreaker, match_id, matches(id, status, meetup_state, user_a, user_b)')
+    .select('id, icebreaker, match_id, matches(id, status, meetup_state, mutual_interest_at, user_a, user_b)')
     .eq('id', conversationId)
     .single();
   if (error || !conv) throw new Error('대화방을 찾을 수 없습니다.');
@@ -117,18 +136,20 @@ export async function fetchConversationDetail(conversationId: string): Promise<C
     id: string;
     status: string;
     meetup_state: string;
+    mutual_interest_at: string | null;
     user_a: string;
     user_b: string;
   };
   const partnerId = match.user_a === userId ? match.user_b : match.user_a;
 
-  const [{ data: profile }, { data: metrics }] = await Promise.all([
+  const [{ data: profile }, { data: metrics }, access] = await Promise.all([
     supabase.from('profiles').select('nickname').eq('user_id', partnerId).maybeSingle(),
     supabase
       .from('conversation_metrics')
       .select('total_messages')
       .eq('conversation_id', conversationId)
       .maybeSingle(),
+    fetchConversationAccess(conversationId),
   ]);
 
   return {
@@ -136,35 +157,84 @@ export async function fetchConversationDetail(conversationId: string): Promise<C
     matchId: match.id,
     matchStatus: match.status,
     meetupState: match.meetup_state,
+    mutualInterestAt: match.mutual_interest_at ?? null,
     partnerId,
     partnerNickname: profile?.nickname ?? '알 수 없음',
-    icebreaker: (conv.icebreaker as Icebreaker | null) ?? null,
+    starters: parseStarterCache(conv.icebreaker),
     totalMessages: metrics?.total_messages ?? 0,
+    access,
   };
 }
 
-export async function fetchMessages(conversationId: string): Promise<ChatMessage[]> {
-  const { data, error } = await supabase
+/**
+ * 최신 메시지부터 한 페이지. cursor 가 있으면 그보다 오래된 행 (created_at 동률은 id 로 보조 정렬).
+ * 반환은 오름차순(오래된 → 최신). hasMore 는 페이지가 꽉 찼는지로 판단한다.
+ */
+export async function fetchMessagesPage(
+  conversationId: string,
+  before: MessageCursor | null = null,
+  limit = MESSAGE_PAGE_SIZE,
+): Promise<{ messages: ChatMessage[]; hasMore: boolean }> {
+  let query = supabase
     .from('messages')
-    .select('*')
+    .select(MESSAGE_COLUMNS)
     .eq('conversation_id', conversationId)
-    .order('created_at', { ascending: true })
-    .limit(500);
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(limit);
+  if (before) query = query.or(beforeCursorFilter(before));
+  const { data, error } = await query;
   if (error) throw new Error('메시지를 불러오지 못했습니다.');
-  return (data ?? []) as ChatMessage[];
+  const rows = ((data ?? []) as ServerMessage[]).slice().reverse();
+  return { messages: rows, hasMore: rows.length >= limit };
 }
 
-export async function sendMessage(conversationId: string, content: string): Promise<void> {
-  const userId = await requireUserId();
+/** 특정 시각 이후 행 (재연결·포그라운드 복귀 시 누락 복구). 겹치는 행은 병합 시 id 로 제거된다 */
+export async function fetchMessagesSince(conversationId: string, sinceIso: string): Promise<ChatMessage[]> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select(MESSAGE_COLUMNS)
+    .eq('conversation_id', conversationId)
+    .gte('created_at', sinceIso)
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(500);
+  if (error) throw new Error('메시지를 불러오지 못했습니다.');
+  return (data ?? []) as ServerMessage[];
+}
+
+export class SendMessageError extends Error {
+  failure: NonNullable<ChatMessage['failure']>;
+  constructor(failure: NonNullable<ChatMessage['failure']>, message: string) {
+    super(message);
+    this.failure = failure;
+  }
+}
+
+/**
+ * 메시지 전송 — 서버 RPC send_message (멱등).
+ * 같은 clientMessageId 로 재시도하면 서버가 저장된 행을 돌려준다 (저장 성공 후 응답 유실 복구, 중복 없음).
+ * 본문·이벤트 기록은 서버가 한다 (클라이언트 track 없음).
+ */
+export async function sendMessage(
+  conversationId: string,
+  clientMessageId: string,
+  content: string,
+): Promise<ChatMessage> {
   const trimmed = content.trim();
-  if (!trimmed) return;
-  const { error } = await supabase.from('messages').insert({
-    conversation_id: conversationId,
-    sender_id: userId,
-    content: trimmed,
+  if (!trimmed) throw new SendMessageError('network', '빈 메시지는 보낼 수 없습니다.');
+  const { data, error } = await supabase.rpc('send_message', {
+    p_conversation_id: conversationId,
+    p_client_message_id: clientMessageId,
+    p_content: trimmed,
   });
-  if (error) throw new Error('메시지를 보내지 못했습니다.');
-  track('message_sent', { conversation_id: conversationId });
+  if (error) {
+    const failure = classifySendError(`${error.message} ${error.code ?? ''} ${error.details ?? ''}`);
+    throw new SendMessageError(failure, error.message);
+  }
+  const row = (Array.isArray(data) ? data[0] : data) as ServerMessage | null | undefined;
+  if (!row?.id) throw new SendMessageError('network', '메시지를 보내지 못했습니다.');
+  return row;
 }
 
 /** 상대가 보낸 안 읽은 메시지를 읽음 처리 */
@@ -178,33 +248,45 @@ export async function markConversationRead(conversationId: string): Promise<void
     .is('read_at', null);
 }
 
-/** 새 메시지 실시간 구독 */
-export function subscribeToMessages(
+export type MessageSubscription = {
+  channel: RealtimeChannel;
+};
+
+/**
+ * 새 메시지 + 매치 상태 실시간 구독.
+ * onStatus('SUBSCRIBED') 는 최초 연결과 재연결 모두에서 불린다 — 호출 측이 그 시점에 서버와 재동기화한다.
+ */
+export function subscribeToConversation(
   conversationId: string,
-  onMessage: (message: ChatMessage) => void,
+  matchId: string,
+  handlers: {
+    onMessage: (message: ChatMessage) => void;
+    onMatchChanged: () => void;
+    onStatus: (status: 'SUBSCRIBED' | 'TIMED_OUT' | 'CLOSED' | 'CHANNEL_ERROR') => void;
+  },
 ): RealtimeChannel {
   return supabase
-    .channel(`messages:${conversationId}`)
+    .channel(`conversation:${conversationId}`)
     .on(
       'postgres_changes',
-      {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'messages',
-        filter: `conversation_id=eq.${conversationId}`,
-      },
-      (payload) => onMessage(payload.new as ChatMessage),
+      { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${conversationId}` },
+      (payload) => handlers.onMessage(payload.new as ServerMessage),
     )
-    .subscribe();
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'matches', filter: `id=eq.${matchId}` },
+      () => handlers.onMatchChanged(),
+    )
+    .subscribe((status) => handlers.onStatus(status));
 }
 
-/** 아이스브레이커 (서버 규칙 기반 생성, 대화방에 캐시) */
-export async function fetchIcebreaker(conversationId: string): Promise<Icebreaker | null> {
+/** 대화 시작 질문 (서버 규칙 기반, 공개 답변만 사용). 실패하면 null — 질문 없이도 대화할 수 있다 */
+export async function fetchStarterQuestions(conversationId: string): Promise<StarterCache | null> {
   const { data, error } = await supabase.functions.invoke('icebreaker', {
     body: { conversationId },
   });
   if (error) return null;
-  return (data?.icebreaker as Icebreaker | null) ?? null;
+  return parseStarterCache((data as { icebreaker?: unknown } | null)?.icebreaker);
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +327,7 @@ export async function reportUser(
   if (error) throw new Error('신고를 접수하지 못했습니다.');
 }
 
-/** 차단 — DB 트리거가 매치를 종료하고, 이후 서로 추천되지 않는다. */
+/** 차단 — DB 트리거가 매치를 종료하고, 이후 서로 추천되지 않는다. 대화 이력은 삭제하지 않는다 */
 export async function blockUser(blockedId: string): Promise<void> {
   const userId = await requireUserId();
   const { error } = await supabase.from('blocks').insert({

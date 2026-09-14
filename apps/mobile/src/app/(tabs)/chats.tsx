@@ -6,6 +6,18 @@ import { Card, Screen, Text } from '@/components/ui';
 import { fetchConversations } from '@/lib/chat';
 import { colors, radius, spacing } from '@/theme/tokens';
 
+/** 공통 매치 상태 라벨 — 일방 의향은 여기에 없다 (서버가 둘 다 yes 일 때만 상태를 바꾼다) */
+function meetupLabel(state: string): string | null {
+  switch (state) {
+    case 'mutual_interest':
+      return '서로 만나고 싶어 해요';
+    case 'met_confirmed':
+      return '만남 확인됨';
+    default:
+      return null;
+  }
+}
+
 function timeLabel(iso: string | null): string {
   if (!iso) return '';
   const date = new Date(iso);
@@ -56,7 +68,12 @@ export default function ChatsScreen() {
           >
             <Card style={{ paddingVertical: spacing.md }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                <Text variant="heading">{conv.partnerNickname}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flex: 1 }}>
+                  <Text variant="heading">{conv.partnerNickname}</Text>
+                  {meetupLabel(conv.meetupState) && (
+                    <Text variant="caption" color={colors.accent}>{meetupLabel(conv.meetupState)}</Text>
+                  )}
+                </View>
                 <Text variant="caption" color={colors.faint}>{timeLabel(conv.lastMessageAt)}</Text>
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: spacing.xs, gap: spacing.sm }}>

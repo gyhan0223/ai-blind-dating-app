@@ -13,7 +13,10 @@ import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.t
 type Db = ReturnType<typeof serviceClient>;
 
 /** 1) 콘텐츠 비활성화 — 매칭/추천에서 보이지 않게 한다.
- *  대화 기록 등은 상대방 보호를 위해 유지 (정책 확정 시 이 함수에서 익명화/삭제 구현). */
+ *  대화 기록 등은 상대방 보호를 위해 유지 (정책 확정 시 이 함수에서 익명화/삭제 구현).
+ *  #41 로 추가된 사용자별 데이터(meetup_intentions·meetup_outcomes·meetup_feedback·notification_events)는
+ *  모두 users(id) on delete cascade 라 계정 행을 hard delete 하면 함께 삭제된다 (#13 파이프라인 연결 — docs/meetup-flow.md 9절).
+ *  status='deleted' 가 되면 can_chat_in/meetup_set_intent 가 양쪽 계정 active 를 요구하므로 기존 매치로도 더 이상 연락되지 않는다. */
 async function deleteUserContent(db: Db, userId: string) {
   await db.from('users').update({ status: 'deleted' }).eq('id', userId);
   await db

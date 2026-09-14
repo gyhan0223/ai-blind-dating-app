@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AppState,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -13,21 +14,46 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Button, Card, Text } from '@/components/ui';
-import { track } from '@/lib/analytics';
 import {
   type ChatMessage,
   fetchConversationDetail,
-  fetchIcebreaker,
-  fetchMessages,
+  fetchMessagesPage,
+  fetchMessagesSince,
+  fetchStarterQuestions,
   markConversationRead,
   sendMessage,
-  subscribeToMessages,
+  SendMessageError,
+  subscribeToConversation,
 } from '@/lib/chat';
+import {
+  makeLocalMessage,
+  mergeMessages,
+  newClientMessageId,
+  newestServerTimestamp,
+  oldestCursor,
+  removeLocal,
+  resyncSince,
+  setLocalStatus,
+  type StarterQuestion,
+} from '@/lib/chatCore';
 import { useSession } from '@/lib/session';
 import { colors, radius, spacing } from '@/theme/tokens';
 
-/** 만남 제안 버튼이 열리는 최소 대화량 */
-const MEETUP_UNLOCK_MESSAGES = 10;
+/** 시작 질문 카드를 보여주는 최대 메시지 수 (그 뒤엔 접는다 — 강요하지 않는다) */
+const STARTER_VISIBLE_UNTIL = 4;
+
+function accessMessage(reason: string): string {
+  switch (reason) {
+    case 'ended':
+      return '종료된 대화예요. 이전 대화는 볼 수 있지만 새 메시지는 보낼 수 없어요.';
+    case 'unavailable':
+      return '지금은 대화할 수 없는 상대예요.';
+    case 'self_restricted':
+      return '현재 계정 상태에서는 메시지를 보낼 수 없어요.';
+    default:
+      return '이 대화에 참여할 수 없어요.';
+  }
+}
 
 export default function ChatRoom() {
   const { conversationId } = useLocalSearchParams<{ conversationId: string }>();
@@ -35,93 +61,209 @@ export default function ChatRoom() {
   const myId = session?.user.id;
   const queryClient = useQueryClient();
 
-  const { data: detail } = useQuery({
+  const { data: detail, refetch: refetchDetail } = useQuery({
     queryKey: ['conversation', conversationId],
     queryFn: () => fetchConversationDetail(conversationId!),
     enabled: !!conversationId,
   });
-  const { data: initialMessages } = useQuery({
-    queryKey: ['messages', conversationId],
-    queryFn: () => fetchMessages(conversationId!),
-    enabled: !!conversationId,
-  });
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [initialLoaded, setInitialLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [input, setInput] = useState('');
-  const [sending, setSending] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [startersOpen, setStartersOpen] = useState(true);
   const listRef = useRef<FlatList<ChatMessage>>(null);
-  const chatStartedTracked = useRef(false);
-
-  // 초기 로드 동기화 (렌더 중 1회 — https://react.dev/learn/you-might-not-need-an-effect)
-  const [hydratedFrom, setHydratedFrom] = useState<ChatMessage[] | null>(null);
-  if (initialMessages && hydratedFrom !== initialMessages) {
-    setHydratedFrom(initialMessages);
-    setMessages(initialMessages);
-  }
-
-  // 실시간 수신 + 읽음 처리
+  const messagesRef = useRef<ChatMessage[]>([]);
   useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  // 화면 재진입 시 스크롤 하단 유지용
+  const stickToEnd = useRef(true);
+
+  const applyIncoming = useCallback((incoming: ChatMessage[]) => {
+    setMessages((prev) => mergeMessages(prev, incoming));
+  }, []);
+
+  /** 서버와 재동기화 — 구독 재연결·포그라운드 복귀·초기 진입 */
+  const resync = useCallback(async () => {
     if (!conversationId) return;
+    const since = resyncSince(newestServerTimestamp(messagesRef.current));
+    try {
+      if (since) {
+        applyIncoming(await fetchMessagesSince(conversationId, since));
+      } else {
+        const page = await fetchMessagesPage(conversationId);
+        applyIncoming(page.messages);
+        setHasMore(page.hasMore);
+      }
+      setLoadError(null);
+    } catch {
+      setLoadError('메시지를 불러오지 못했어요. 네트워크를 확인해 주세요.');
+    } finally {
+      setInitialLoaded(true);
+    }
     markConversationRead(conversationId);
-    const channel = subscribeToMessages(conversationId, (msg) => {
-      setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
-      if (msg.sender_id !== myId) markConversationRead(conversationId);
+  }, [conversationId, applyIncoming]);
+
+  // 구독을 먼저 열고(연결 시점 이벤트 유실 방지) SUBSCRIBED 마다 재동기화한다.
+  useEffect(() => {
+    if (!conversationId || !detail?.matchId) return;
+    let cancelled = false;
+    const channel = subscribeToConversation(conversationId, detail.matchId, {
+      onMessage: (msg) => {
+        if (cancelled) return;
+        applyIncoming([msg]);
+        if (msg.sender_id !== myId) markConversationRead(conversationId);
+      },
+      onMatchChanged: () => {
+        if (cancelled) return;
+        refetchDetail();
+        queryClient.invalidateQueries({ queryKey: ['meetup', detail.matchId] });
+        queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      },
+      onStatus: (status) => {
+        if (cancelled) return;
+        if (status === 'SUBSCRIBED') resync();
+      },
     });
+    // 구독 확립 전에도 첫 화면은 그린다 (SUBSCRIBED 시 한 번 더 병합 — id 로 중복 제거)
+    resync();
     return () => {
+      cancelled = true;
       channel.unsubscribe();
     };
-  }, [conversationId, myId]);
+  }, [conversationId, detail?.matchId, myId, applyIncoming, resync, refetchDetail, queryClient]);
 
-  // 아이스브레이커 (대화 시작 전이면 생성)
-  const { data: icebreaker } = useQuery({
-    queryKey: ['icebreaker', conversationId],
-    queryFn: () => fetchIcebreaker(conversationId!),
-    enabled: !!conversationId && (initialMessages?.length ?? 1) === 0,
-  });
-  const icebreakerToShow = detail?.icebreaker ?? icebreaker ?? null;
+  // 포그라운드 복귀 시 재동기화
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        resync();
+        refetchDetail();
+      }
+    });
+    return () => sub.remove();
+  }, [resync, refetchDetail]);
 
-  const send = useCallback(async () => {
-    if (!conversationId || !input.trim() || sending) return;
-    setSending(true);
-    const content = input;
-    setInput('');
+  const loadOlder = useCallback(async () => {
+    if (!conversationId || loadingMore) return;
+    const cursor = oldestCursor(messagesRef.current);
+    if (!cursor) return;
+    setLoadingMore(true);
+    stickToEnd.current = false;
     try {
-      const isFirstMessage = messages.length === 0;
-      const lastMessage = messages[messages.length - 1];
-      await sendMessage(conversationId, content);
-      if (isFirstMessage && !chatStartedTracked.current) {
-        chatStartedTracked.current = true;
-        track('chat_started', { conversation_id: conversationId });
-      }
-      if (
-        lastMessage &&
-        Date.now() - new Date(lastMessage.created_at).getTime() > 6 * 60 * 60 * 1000
-      ) {
-        track('conversation_resumed', { conversation_id: conversationId });
-      }
-      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      const page = await fetchMessagesPage(conversationId, cursor);
+      applyIncoming(page.messages);
+      setHasMore(page.hasMore);
     } catch {
-      setInput(content);
+      setLoadError('이전 메시지를 불러오지 못했어요.');
     } finally {
-      setSending(false);
+      setLoadingMore(false);
     }
-  }, [conversationId, input, sending, messages, queryClient]);
+  }, [conversationId, loadingMore, applyIncoming]);
 
-  const meetupUnlocked =
-    (detail?.totalMessages ?? 0) + messages.length - (initialMessages?.length ?? 0) >=
-      MEETUP_UNLOCK_MESSAGES || (detail?.totalMessages ?? 0) >= MEETUP_UNLOCK_MESSAGES;
+  // 시작 질문 — 캐시(v2)가 없으면 서버에서 생성. 실패해도 대화는 가능
+  const serverMessageCount = messages.filter((m) => m.status == null).length;
+  const { data: fetchedStarters } = useQuery({
+    queryKey: ['starters', conversationId],
+    queryFn: () => fetchStarterQuestions(conversationId!),
+    enabled: !!conversationId && !!detail && detail.starters == null && initialLoaded && serverMessageCount < STARTER_VISIBLE_UNTIL,
+    staleTime: Infinity,
+  });
+  const starters = detail?.starters ?? fetchedStarters ?? null;
+  const showStarters =
+    !!starters && startersOpen && initialLoaded && serverMessageCount < STARTER_VISIBLE_UNTIL && detail?.access.canChat;
 
-  const lastMyReadMessage = [...messages].reverse().find((m) => m.sender_id === myId && m.read_at);
+  const canChat = detail?.access.canChat ?? false;
+
+  /** 전송 — 작성 시 발급한 clientMessageId 를 재시도에도 그대로 쓴다 */
+  const deliver = useCallback(
+    async (clientMessageId: string, content: string) => {
+      if (!conversationId) return;
+      try {
+        const saved = await sendMessage(conversationId, clientMessageId, content);
+        applyIncoming([saved]);
+        queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      } catch (e) {
+        const failure = e instanceof SendMessageError ? e.failure : 'network';
+        setMessages((prev) => setLocalStatus(prev, clientMessageId, 'failed', failure));
+        if (failure === 'blocked') refetchDetail();
+      }
+    },
+    [conversationId, applyIncoming, queryClient, refetchDetail],
+  );
+
+  const send = useCallback(() => {
+    const content = input.trim();
+    if (!conversationId || !myId || !content || !canChat) return;
+    const clientMessageId = newClientMessageId();
+    setInput('');
+    stickToEnd.current = true;
+    setMessages((prev) =>
+      mergeMessages(prev, [makeLocalMessage({ conversationId, senderId: myId, clientMessageId, content })]),
+    );
+    deliver(clientMessageId, content);
+  }, [conversationId, myId, input, canChat, deliver]);
+
+  const retry = useCallback(
+    (m: ChatMessage) => {
+      if (!m.client_message_id) return;
+      setMessages((prev) => setLocalStatus(prev, m.client_message_id!, 'sending'));
+      deliver(m.client_message_id, m.content);
+    },
+    [deliver],
+  );
+
+  const discardFailed = useCallback((m: ChatMessage) => {
+    if (!m.client_message_id) return;
+    // 작성 내용은 입력창으로 되돌려 잃지 않게 한다
+    setInput((cur) => (cur.trim() ? cur : m.content));
+    setMessages((prev) => removeLocal(prev, m.client_message_id!));
+  }, []);
+
+  const applyStarter = useCallback((q: StarterQuestion) => {
+    // 자동 발송하지 않는다 — 입력창에 넣고 사용자가 고쳐서 보낸다
+    setInput(q.text);
+  }, []);
+
+  const lastMyReadMessage = [...messages].reverse().find((m) => m.status == null && m.sender_id === myId && m.read_at);
 
   const renderMessage = ({ item }: { item: ChatMessage }) => {
     const mine = item.sender_id === myId;
+    const failed = item.status === 'failed';
     return (
       <View style={[styles.bubbleRow, mine ? { justifyContent: 'flex-end' } : null]}>
-        <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleTheirs]}>
-          <Text variant="body" color={mine ? colors.onAccent : colors.ink}>
-            {item.content}
-          </Text>
+        <View style={{ maxWidth: '78%', alignItems: mine ? 'flex-end' : 'flex-start' }}>
+          <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleTheirs, item.status === 'sending' && { opacity: 0.6 }]}>
+            <Text variant="body" color={mine ? colors.onAccent : colors.ink}>
+              {item.content}
+            </Text>
+          </View>
+          {item.status === 'sending' && (
+            <Text variant="caption" color={colors.faint} style={{ marginTop: 2 }}>보내는 중…</Text>
+          )}
+          {failed && (
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: 2, alignItems: 'center' }}>
+              <Text variant="caption" color={colors.danger}>
+                {item.failure === 'blocked'
+                  ? '보낼 수 없어요'
+                  : item.failure === 'mismatch'
+                    ? '이미 다른 내용으로 보낸 메시지예요'
+                    : '전송 실패'}
+              </Text>
+              {item.failure === 'network' && (
+                <Pressable onPress={() => retry(item)} hitSlop={8}>
+                  <Text variant="caption" color={colors.accent}>다시 보내기</Text>
+                </Pressable>
+              )}
+              <Pressable onPress={() => discardFailed(item)} hitSlop={8}>
+                <Text variant="caption" color={colors.sub}>{item.failure === 'network' ? '지우기' : '입력창으로'}</Text>
+              </Pressable>
+            </View>
+          )}
         </View>
       </View>
     );
@@ -135,26 +277,38 @@ export default function ChatRoom() {
           <Ionicons name="chevron-back" size={24} color={colors.ink} />
         </Pressable>
         <Text variant="heading">{detail?.partnerNickname ?? ''}</Text>
-        <Pressable onPress={() => setMenuOpen(!menuOpen)} hitSlop={12}>
+        <Pressable onPress={() => setMenuOpen(!menuOpen)} hitSlop={12} accessibilityLabel="대화 메뉴">
           <Ionicons name="ellipsis-horizontal" size={22} color={colors.sub} />
         </Pressable>
       </View>
 
       {menuOpen && detail && (
         <View style={styles.menu}>
-          <Button
-            kind="secondary"
-            title="이 사람을 실제로 만나보고 싶어요"
-            onPress={() => {
-              setMenuOpen(false);
-              router.push({ pathname: '/meetup/[matchId]', params: { matchId: detail.matchId } });
-            }}
-            disabled={!meetupUnlocked}
-          />
-          {!meetupUnlocked && (
-            <Text variant="caption" color={colors.faint} style={{ textAlign: 'center' }}>
-              대화를 조금 더 나누면 만남을 제안할 수 있어요
-            </Text>
+          {detail.matchStatus === 'active' && (
+            <Button
+              kind="secondary"
+              title={
+                detail.meetupState === 'met_confirmed'
+                  ? '만남 후 이야기 남기기'
+                  : detail.meetupState === 'mutual_interest'
+                    ? '만남 · 서로 만나고 싶어 해요'
+                    : '이 사람을 실제로 만나보고 싶어요'
+              }
+              onPress={() => {
+                setMenuOpen(false);
+                router.push({ pathname: '/meetup/[matchId]', params: { matchId: detail.matchId } });
+              }}
+            />
+          )}
+          {detail.matchStatus !== 'active' && detail.mutualInterestAt && (
+            <Button
+              kind="secondary"
+              title="만남 결과·후기 남기기"
+              onPress={() => {
+                setMenuOpen(false);
+                router.push({ pathname: '/meetup/[matchId]', params: { matchId: detail.matchId } });
+              }}
+            />
           )}
           <Button
             kind="danger"
@@ -181,17 +335,59 @@ export default function ChatRoom() {
           keyExtractor={(m) => m.id}
           renderItem={renderMessage}
           contentContainerStyle={{ padding: spacing.lg, gap: spacing.sm }}
-          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
+          onContentSizeChange={() => {
+            if (stickToEnd.current) listRef.current?.scrollToEnd({ animated: false });
+          }}
+          onEndReached={() => {
+            stickToEnd.current = true;
+          }}
           ListHeaderComponent={
-            icebreakerToShow && messages.length < 4 ? (
-              <Card style={{ marginBottom: spacing.md, backgroundColor: colors.warmHighlight, borderColor: colors.line }}>
-                <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.xs }}>
-                  이런 이야기로 시작해 보세요
-                </Text>
-                <Text variant="body" color={colors.inkSoft}>{icebreakerToShow.lead}</Text>
-                <Text variant="heading" style={{ marginTop: spacing.xs }}>{icebreakerToShow.question}</Text>
-              </Card>
-            ) : null
+            <View>
+              {hasMore && (
+                <Button
+                  kind="ghost"
+                  title={loadingMore ? '불러오는 중…' : '이전 메시지 보기'}
+                  onPress={loadOlder}
+                  disabled={loadingMore}
+                />
+              )}
+              {loadError && (
+                <Pressable onPress={resync}>
+                  <Text variant="caption" color={colors.danger} style={{ textAlign: 'center', marginBottom: spacing.sm }}>
+                    {loadError} (눌러서 다시 시도)
+                  </Text>
+                </Pressable>
+              )}
+              {showStarters && starters && (
+                <Card style={{ marginBottom: spacing.md, backgroundColor: colors.warmHighlight, borderColor: colors.line }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.xs }}>
+                    <Text variant="caption" color={colors.sub}>공개 소개를 바탕으로 고른 질문이에요</Text>
+                    <Pressable onPress={() => setStartersOpen(false)} hitSlop={8} accessibilityLabel="질문 카드 닫기">
+                      <Ionicons name="close" size={16} color={colors.sub} />
+                    </Pressable>
+                  </View>
+                  <Text variant="caption" color={colors.faint} style={{ marginBottom: spacing.sm }}>
+                    골라서 고쳐 보내도 되고, 그냥 바로 대화해도 괜찮아요.
+                  </Text>
+                  <View style={{ gap: spacing.sm }}>
+                    {starters.questions.map((q) => (
+                      <Pressable
+                        key={q.id}
+                        onPress={() => applyStarter(q)}
+                        style={styles.starter}
+                        accessibilityRole="button"
+                        accessibilityLabel={`질문 사용: ${q.text}`}
+                      >
+                        <Text variant="caption" color={colors.faint} style={{ marginBottom: 2 }}>
+                          {q.basis === 'shared' ? '둘 다 고른 항목' : q.basis === 'partner' ? '상대가 고른 항목' : '가볍게 시작하기'}
+                        </Text>
+                        <Text variant="body" color={colors.ink}>{q.text}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </Card>
+              )}
+            </View>
           }
           ListFooterComponent={
             lastMyReadMessage && messages[messages.length - 1]?.id === lastMyReadMessage.id ? (
@@ -202,10 +398,10 @@ export default function ChatRoom() {
           }
         />
 
-        {detail?.matchStatus !== 'active' && detail ? (
+        {detail && !canChat ? (
           <View style={styles.inputBar}>
             <Text variant="caption" color={colors.sub} style={{ flex: 1, textAlign: 'center' }}>
-              종료된 대화예요.
+              {accessMessage(detail.access.reason)}
             </Text>
           </View>
         ) : (
@@ -218,11 +414,14 @@ export default function ChatRoom() {
               onChangeText={setInput}
               multiline
               maxLength={2000}
+              editable={!!detail}
             />
             <Pressable
               onPress={send}
-              disabled={!input.trim() || sending}
-              style={[styles.sendButton, (!input.trim() || sending) && { opacity: 0.4 }]}
+              disabled={!input.trim() || !detail}
+              style={[styles.sendButton, (!input.trim() || !detail) && { opacity: 0.4 }]}
+              accessibilityRole="button"
+              accessibilityLabel="보내기"
             >
               <Ionicons name="arrow-up" size={20} color={colors.onAccent} />
             </Pressable>
@@ -253,7 +452,6 @@ const styles = StyleSheet.create({
   },
   bubbleRow: { flexDirection: 'row' },
   bubble: {
-    maxWidth: '78%',
     paddingHorizontal: spacing.md,
     paddingVertical: 10,
     borderRadius: radius.lg,
@@ -264,6 +462,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
     borderBottomLeftRadius: radius.sm,
+  },
+  starter: {
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
   },
   inputBar: {
     flexDirection: 'row',

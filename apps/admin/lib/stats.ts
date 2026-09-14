@@ -30,7 +30,9 @@ export async function loadDashboardStats(db: SupabaseClient) {
     matchesCount,
     chatsStarted,
     meetupMutual,
+    meetupOneSideMet,
     meetupCompleted,
+    legacyCompleted,
     secondDateYes,
     pendingReports,
     pendingFaceReviews,
@@ -43,7 +45,12 @@ export async function loadDashboardStats(db: SupabaseClient) {
     distinctUsers(db, 'likes', 'from_user_id'),
     count(db, 'matches'),
     count(db, 'conversation_metrics', (q) => q.gt('total_messages', 0)),
-    count(db, 'matches', (q) => q.in('meetup_state', ['mutual_interest', 'scheduled', 'completed'])),
+    // 상호 만남 관심이 한 번이라도 성립한 매치 (0016 이후: mutual_interest_at, 이전: 상태값)
+    count(db, 'matches', (q) => q.or('mutual_interest_at.not.is.null,meetup_state.in.(mutual_interest,scheduled,completed,met_confirmed)')),
+    // 한쪽 이상이 "만났음" 이라고 응답한 매치 (양측 확인과 구분 — #41/#24)
+    distinctUsers(db, 'meetup_outcomes', 'match_id', (q) => q.eq('outcome', 'met')),
+    // 양측 모두 "만났음" 응답 (met_confirmed). 0016 이전의 한쪽 완료(completed)는 세지 않는다
+    count(db, 'matches', (q) => q.eq('meetup_state', 'met_confirmed')),
     count(db, 'matches', (q) => q.eq('meetup_state', 'completed')),
     count(db, 'meetup_feedback', (q) => q.eq('met_again_intent', 'yes')),
     count(db, 'reports', (q) => q.eq('status', 'pending')),
@@ -58,8 +65,9 @@ export async function loadDashboardStats(db: SupabaseClient) {
     { label: '매치', value: matchesCount },
     { label: '대화 시작', value: chatsStarted },
     { label: '만남 희망(상호)', value: meetupMutual },
-    { label: '실제 만남', value: meetupCompleted },
-    { label: '재만남 희망', value: secondDateYes },
+    { label: '만남 응답(한쪽 이상 "만났음")', value: meetupOneSideMet },
+    { label: '실제 만남(양측 확인)', value: meetupCompleted },
+    { label: '재만남 희망(피드백 yes)', value: secondDateYes },
   ];
 
   return {
@@ -70,7 +78,9 @@ export async function loadDashboardStats(db: SupabaseClient) {
     matchesCount,
     chatsStarted,
     meetupMutual,
+    meetupOneSideMet,
     meetupCompleted,
+    legacyCompleted,
     pendingReports,
     pendingFaceReviews,
     funnel,

@@ -14,6 +14,10 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#39) 얼굴 인증 화면 문구가 "실제 사람 확인" 목적만 설명하고 이상형 추천처럼 설명하지 않는다 ("서로의 얼굴은 AI만 먼저 봅니다" 없음)
 - [ ] (#39/#29) 내 정보 화면에 **Plus/결제/플랜 표시가 없다**. 앱 어디에도 결제 라우트·"결제 준비 중" 문구가 없다
 - [ ] (#39) 추천 카드에 고른 항목으로 만든 소개 문장(연애 목적·공개 질문 선택)만 보이고, 가치관 설문·민감 응답은 카드/API 응답에 없다
+- [ ] (#40) `daily-recommendation`·`icebreaker` 가 이 저장소의 최신 코드로 재배포되어 있다 (외모 데이터 미조회·인증 플래그 후보 필터·안전 조회 실패 시 500)
+- [ ] (#40) 배포 후 새로 생성된 `recommendations.dimensions` 에 `appearance` 키가 없고 `basis` 가 있다:
+      `select count(*) from recommendations where created_at > '<배포 시각>' and dimensions ? 'appearance'` → 0
+- [ ] (#40) 인증 미완료(`face_verified=false` 등) 사용자로 daily-recommendation 을 호출하면 403 `not_verified` 다
 - [ ] (#39) 번들 grep: `외모 취향|이상형|AI만 먼저|본심 Plus|결제는 준비` → 0건 (아래 secret grep 과 함께 확인)
 - [ ] production 빌드 환경(EAS 등)에 `EXPO_PUBLIC_DEV_LOGIN` 이 설정되어 있지 **않다**
       (설정돼 있어도 release 빌드에선 무효지만, 아예 제거한다)
@@ -111,6 +115,18 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       `cd apps/admin && npx tsc --noEmit`
       `cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.mjs`
       `cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs` (#39 — 외모 데이터 없는 완료·인증 미완료 홈 차단)
-      `cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts` (#39 — 카드 공개 필드 allowlist·근거 없는 추천 이유 없음)
+      `cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts` (#39/#40 — 외모 제외·재정규화·안전 필터·공개 이유·tie-break, 실패 시 exit 1)
+      `bash supabase/tests/run_local_check.sh` 에 포함된 `recommendation_db_test.mjs` (#40 — 실제 DB 위에서 외모 데이터 없이 추천 생성)
 - [ ] 마이그레이션 `0015_no_appearance_onboarding.sql` 이 production DB 에 적용되어 있다 (`profiles.relationship_goal/public_answers(/intro)` 컬럼, `users_guard_onboarding_completion` 트리거)
       — **앱 배포보다 먼저** 적용한다 (새 앱은 이 컬럼에 저장한다)
+- [ ] (#41) 마이그레이션 `0016_meetup_flow.sql` 이 production DB 에 적용되어 있다 (`send_message`/`meetup_set_intent`/`meetup_report_outcome`/`meetup_submit_feedback`/`conversation_access` RPC,
+      `meetup_outcomes`·`notification_events` 테이블, `messages.client_message_id`, `matches.mutual_interest_at/meetup_confirmed_at`) — 앱과 **같은 릴리스 창**에서 (예전 앱의 만남 화면 저장은 이 시점부터 실패한다)
+- [ ] (#41) `icebreaker` Edge Function 이 최신 코드로 재배포되어 있다 (v2 캐시 · 공개 필드만 조회). 배포 후 `select count(*) from conversations where icebreaker ? 'lead'` 가 줄어든다 (과거 캐시 덮어쓰기)
+- [ ] (#41) 사용자 JWT 로 `matches` 의 `meetup_state`/`meetup_completed_at` 을 update 하면 0행이고, `meetup_intentions`/`meetup_outcomes`/`meetup_feedback` 에 insert 하면 거부된다
+- [ ] (#41) 두 테스트 계정으로 A 만 yes 일 때 B 의 `meetup_intentions` 조회가 0행이고 매치 `meetup_state` 가 `none` 이다. B 도 yes 면 `mutual_interest` 가 되고 `analytics_events.meetup_mutual_interest` 가 참가자당 1행이다
+- [ ] (#41) 한쪽만 "만났어요" 를 기록해도 `meetup_state` 가 `met_confirmed` 가 아니고, 상대는 `meetup_outcomes`/`meetup_feedback` 에서 0행을 본다
+- [ ] (#41) 같은 `client_message_id` 로 `send_message` 를 두 번 호출해도 `messages` 1행 · `conversation_metrics.total_messages` +1 · `analytics_events.message_sent` 1행이다
+- [ ] (#41) `meetup_pair_summary` 뷰와 `notification_events` 를 사용자 JWT 로 select 하면 권한 오류다
+- [ ] (#41) **실기기 두 대**로 상호 수락 → 첫 메시지 → 시작 질문 선택·수정·전송 → 상호 의향 → 만남 확인 → 피드백을 끝까지 확인했다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)
+- [ ] (#41) 실기기에서 네트워크 끊김 → 복귀 시 놓친 메시지가 복구되고, 전송 실패 메시지가 "다시 보내기" 로 중복 없이 전송된다 — **아직 미수행**
+- [ ] (#41/#17) Push 는 미구현이다 — 앱·문서에 "알림이 간다" 고 약속하지 않는다. `notification_events` outbox 만 쌓인다
