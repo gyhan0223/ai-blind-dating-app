@@ -104,7 +104,7 @@ begin
 
   insert into public.likes (from_user_id, to_user_id) values (ua, ub);
   insert into public.likes (from_user_id, to_user_id) values (ub, ua);
-  select count(*) into n from public.notification_events where kind = 'match_created';
+  select count(*) into n from public.notification_events where kind = 'match_created' and recipient_id in (ua, ub);
   if n <> 2 then raise exception 'FAIL match_created outbox expected 2, got %', n; end if;
   select count(*) into n from public.matches where user_a = least(ua, ub) and user_b = greatest(ua, ub);
   if n <> 1 then raise exception 'FAIL match not created'; end if;

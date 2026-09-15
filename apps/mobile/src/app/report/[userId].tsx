@@ -11,6 +11,7 @@ export default function ReportScreen() {
   const [reason, setReason] = useState<ReportReason | null>(null);
   const [detail, setDetail] = useState('');
   const [alsoBlock, setAlsoBlock] = useState(true);
+  const [urgent, setUrgent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
@@ -20,7 +21,7 @@ export default function ReportScreen() {
     setBusy(true);
     setError(null);
     try {
-      await reportUser(userId, reason, detail, matchId);
+      await reportUser(userId, reason, detail, matchId, urgent);
       if (alsoBlock) await blockUser(userId);
       setDone(true);
     } catch {
@@ -95,6 +96,23 @@ export default function ReportScreen() {
           onChangeText={setDetail}
         />
       </View>
+
+      {REPORT_REASONS.find((r) => r.value === reason)?.urgentAllowed && (
+        <View style={{ marginBottom: spacing.md }}>
+          <Text variant="label" color={colors.inkSoft} style={{ marginBottom: spacing.sm }}>지금 위험을 느끼고 있나요?</Text>
+          <ChipGroup
+            options={[
+              { value: 'yes', label: '긴급해요' },
+              { value: 'no', label: '긴급하지는 않아요' },
+            ]}
+            value={urgent ? 'yes' : 'no'}
+            onChange={(v) => setUrgent(v === 'yes')}
+          />
+          <Text variant="caption" color={colors.faint} style={{ marginTop: spacing.xs }}>
+            긴급 신고는 먼저 확인해요. 당장 위험하다면 112 에 먼저 연락해 주세요.
+          </Text>
+        </View>
+      )}
 
       <ChipGroup
         options={[

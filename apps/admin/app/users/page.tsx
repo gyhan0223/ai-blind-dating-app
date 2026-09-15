@@ -2,6 +2,7 @@ import { revalidatePath } from 'next/cache';
 import React from 'react';
 import { callAccountPurge } from '@/lib/accountDeletion';
 import { requireAdmin } from '@/lib/adminAuth';
+import { moderateUser } from '@/lib/moderation';
 import { adminClient } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
@@ -14,7 +15,8 @@ async function setUserStatus(formData: FormData) {
   const status = String(formData.get('status'));
   if (!['active', 'suspended'].includes(status)) return;
   const db = adminClient();
-  await db.from('users').update({ status }).eq('id', userId);
+  // 상태 변경은 RPC 로만 (moderation_actions 감사 기록 — #15)
+  await moderateUser(db, { userId, action: status === 'suspended' ? 'suspend' : 'unsuspend', reason: '사용자 목록에서 수동 조치', reportId: null, actor: 'admin', days: null });
   revalidatePath('/users');
 }
 

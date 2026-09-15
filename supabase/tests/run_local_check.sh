@@ -61,6 +61,11 @@ if [[ "${WITH_MEETUP_CONCURRENCY_TESTS:-1}" == "1" && -f meetup_concurrency_test
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash meetup_concurrency_test.sh
 fi
 
+if [[ "${WITH_MODERATION_TESTS:-1}" == "1" && -f moderation_tests.sql ]]; then
+  echo "running moderation tests (#15/#16 — rate limit · 반복 스팸 · 위험 신호(오탐 없음) · 신고 긴급 · 관리자 조치 감사)"
+  $PSQL -d "$DB_NAME" -f moderation_tests.sql
+fi
+
 if [[ "${WITH_ACCOUNT_DELETION_TESTS:-1}" == "1" && -f account_deletion_tests.sql ]]; then
   echo "running account deletion tests (#13/#11/#14 — 유예 · 익명화 · 상대 이력 보존 · 서버 전용)"
   $PSQL -d "$DB_NAME" -f account_deletion_tests.sql

@@ -252,15 +252,19 @@ export default function ChatRoom() {
                   ? '보낼 수 없어요'
                   : item.failure === 'mismatch'
                     ? '이미 다른 내용으로 보낸 메시지예요'
-                    : '전송 실패'}
+                    : item.failure === 'rate_limited'
+                      ? '너무 빠르게 보내고 있어요. 잠시 후 다시 보내 주세요'
+                      : item.failure === 'repeated'
+                        ? '같은 내용을 여러 번 보냈어요'
+                        : '전송 실패'}
               </Text>
-              {item.failure === 'network' && (
+              {(item.failure === 'network' || item.failure === 'rate_limited') && (
                 <Pressable onPress={() => retry(item)} hitSlop={8}>
                   <Text variant="caption" color={colors.accent}>다시 보내기</Text>
                 </Pressable>
               )}
               <Pressable onPress={() => discardFailed(item)} hitSlop={8}>
-                <Text variant="caption" color={colors.sub}>{item.failure === 'network' ? '지우기' : '입력창으로'}</Text>
+                <Text variant="caption" color={colors.sub}>{item.failure === 'network' || item.failure === 'rate_limited' ? '지우기' : '입력창으로'}</Text>
               </Pressable>
             </View>
           )}
@@ -277,9 +281,20 @@ export default function ChatRoom() {
           <Ionicons name="chevron-back" size={24} color={colors.ink} />
         </Pressable>
         <Text variant="heading">{detail?.partnerNickname ?? ''}</Text>
-        <Pressable onPress={() => setMenuOpen(!menuOpen)} hitSlop={12} accessibilityLabel="대화 메뉴">
-          <Ionicons name="ellipsis-horizontal" size={22} color={colors.sub} />
-        </Pressable>
+        <View style={{ flexDirection: 'row', gap: spacing.md }}>
+          {detail && (
+            <Pressable
+              onPress={() => router.push({ pathname: '/report/[userId]', params: { userId: detail.partnerId, matchId: detail.matchId } })}
+              hitSlop={12}
+              accessibilityLabel="신고 또는 차단"
+            >
+              <Ionicons name="flag-outline" size={20} color={colors.sub} />
+            </Pressable>
+          )}
+          <Pressable onPress={() => setMenuOpen(!menuOpen)} hitSlop={12} accessibilityLabel="대화 메뉴">
+            <Ionicons name="ellipsis-horizontal" size={22} color={colors.sub} />
+          </Pressable>
+        </View>
       </View>
 
       {menuOpen && detail && (
