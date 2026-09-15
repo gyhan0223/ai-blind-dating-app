@@ -14,6 +14,7 @@
 import { corsHeaders, json, requireServiceRole, serviceClient } from '../_shared/http.ts';
 import { runDailyRecommendationWithClaim, supabaseClaimClient } from '../_shared/matching/runWithClaim.ts';
 import { supabaseDataSource } from '../_shared/matching/supabaseDataSource.ts';
+import { reportServerError } from '../_shared/observability/report.ts';
 
 const DEFAULT_MAX_USERS = 100;
 const HARD_MAX_USERS = 300;
@@ -40,7 +41,7 @@ Deno.serve(async (req) => {
     p_limit: maxUsers,
   });
   if (error) {
-    console.error(`daily-recommendation-batch targets failed: ${error.message}`);
+    await reportServerError(db, 'daily-recommendation-batch', new Error(error.message), { stage: 'targets' });
     return json({ error: 'lookup_failed' }, 500);
   }
   const ids = ((targets ?? []) as { user_id: string }[]).map((t) => t.user_id);
@@ -60,7 +61,7 @@ Deno.serve(async (req) => {
       else counts.created += 1;
     } catch (e) {
       counts.failed += 1;
-      console.error(`daily-recommendation-batch user failed: ${e instanceof Error ? e.message : 'unknown'}`);
+      await reportServerError(db, 'daily-recommendation-batch', e, { stage: 'user', user_id: userId });
     }
   }
 

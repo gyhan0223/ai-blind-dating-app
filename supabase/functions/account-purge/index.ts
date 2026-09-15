@@ -13,6 +13,7 @@
 import { requireFaceProviderKind } from '../_shared/env/env.ts';
 import { getFaceLivenessProvider } from '../_shared/face/FaceLivenessProvider.ts';
 import { corsHeaders, json, requireServiceRole, serviceClient } from '../_shared/http.ts';
+import { reportServerError } from '../_shared/observability/report.ts';
 
 const FACES_BUCKET = 'faces';
 
@@ -68,9 +69,15 @@ async function deleteFaceAssets(db: Db, userId: string): Promise<{ ok: boolean; 
 
 async function purgeOne(db: Db, userId: string, hard: boolean) {
   const face = await deleteFaceAssets(db, userId);
-  if (!face.ok) return { user_id: userId, ok: false, error: face.error };
+  if (!face.ok) {
+    await reportServerError(db, 'account-purge', new Error(face.error ?? 'face_assets_failed'), { stage: 'face_assets', user_id: userId });
+    return { user_id: userId, ok: false, error: face.error };
+  }
   const { data: summary, error } = await db.rpc('account_purge', { p_user_id: userId });
-  if (error) return { user_id: userId, ok: false, error: `purge: ${error.message}` };
+  if (error) {
+    await reportServerError(db, 'account-purge', new Error(error.message), { stage: 'purge', user_id: userId });
+    return { user_id: userId, ok: false, error: `purge: ${error.message}` };
+  }
   let hardDeleted = false;
   if (hard) {
     const { error: authErr } = await db.auth.admin.deleteUser(userId);

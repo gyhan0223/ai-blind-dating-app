@@ -11,6 +11,7 @@
  */
 import { corsHeaders, json, requireServiceRole, serviceClient } from '../_shared/http.ts';
 import { applyTickets, buildPushBatch, chunk, type DequeuedEvent, type ExpoTicket } from '../_shared/notifications/pushCore.ts';
+import { reportServerError } from '../_shared/observability/report.ts';
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 const EXPO_CHUNK = 100;
@@ -26,7 +27,7 @@ Deno.serve(async (req) => {
 
   const { data: rows, error } = await db.rpc('notification_events_dequeue', { p_limit: limit });
   if (error) {
-    console.error(`send-push dequeue failed: ${error.message}`);
+    await reportServerError(db, 'send-push', new Error(error.message), { stage: 'dequeue' });
     return json({ error: 'dequeue_failed' }, 500);
   }
   const events = (rows ?? []) as DequeuedEvent[];
@@ -61,6 +62,7 @@ Deno.serve(async (req) => {
       tickets = parsed.data;
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'expo_push_failed';
+      await reportServerError(db, 'send-push', e, { stage: 'expo_push', count: part.length });
       const ids = [...new Set(part.flatMap((m) => m.eventIds))];
       const { error: markErr } = await db.rpc('notification_events_mark', { p_failed: ids, p_error: msg });
       if (markErr) console.error(`send-push mark failed failed: ${markErr.message}`);

@@ -5,6 +5,7 @@
 import type { Session } from '@supabase/supabase-js';
 import { useQueryClient } from '@tanstack/react-query';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { setMonitoringUser } from './monitoring';
 import { unregisterPushToken } from './push';
 import { supabase } from './supabase';
 
@@ -45,6 +46,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     (uid: string | null) => {
       if (lastUserId.current !== null && lastUserId.current !== uid) queryClient.clear();
       lastUserId.current = uid;
+      setMonitoringUser(uid); // opaque id 만 (#20)
     },
     [queryClient],
   );

@@ -57,7 +57,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0020 순서대로 — 0015~0020 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
+# 마이그레이션 적용 (0001 → 0021 순서대로 — 0015~0021 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -207,6 +207,11 @@ cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.
 # 온보딩 재진입 판정 테스트 (#39 — 외모 데이터 없는 완료 · 'appearance' 단계 사용자 복귀 · 인증 미완료 홈 차단)
 cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs
 # DB: 인증 전 온보딩 완료 차단 트리거 · 공개 자기소개 제약 (onboarding_guard_tests.sql — 위 run_local_check.sh 에 포함)
+# 민감정보 마스킹 테스트 (#20 — 앱·서버 동일 규칙, Sentry 이벤트에서 연락처·원문 제거)
+cd apps/mobile && node --experimental-strip-types scripts/redact-selftest.mjs
+cd supabase/functions/_shared/observability && node --experimental-strip-types selftest.ts
+# Push 발송 순수 로직 (#17 — 고정 문구·원문 없음·같은 대화 묶음·티켓 처리)
+cd supabase/functions/_shared/notifications && node --experimental-strip-types selftest.ts
 # 채팅 순수 로직 테스트 (#41 — 조회/Realtime 중복 병합 · 낙관적 메시지 교체 · cursor 정렬 · 과거 캐시 무효 · 오류 분류)
 cd apps/mobile && node --experimental-strip-types scripts/chat-core-selftest.mjs
 # DB: 만남 흐름 (#41 — 멱등 전송 · 일방 의향 비공개 · 상호 1회 · 철회 · 만남 확인 집계 · 비공개 피드백 · 차단/정지) 과
@@ -335,7 +340,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
    (`supabase/tests/meetup_flow_tests.sql` — JWT 컨텍스트, `docs/meetup-flow.md`).
 4. **인증 플래그(본인/얼굴/나이)와 계정 상태는 서버 전용** — DB 트리거가 클라이언트 변경 차단.
 5. 민감 설문은 선택 응답 + 공개 여부 별도 저장, 대화 분석은 `conversation_analysis_consent` 동의 필드로 준비만.
-6. 로그에 얼굴 경로/민감정보를 남기지 않음.
+6. 로그에 얼굴 경로/민감정보를 남기지 않음 — 앱(Sentry beforeSend)·서버(`server_errors`) 모두 전송 전 마스킹 (`docs/monitoring.md`, selftest 로 검증).
 
 ## 현재 Mock 인 부분 (실서비스 전 교체)
 

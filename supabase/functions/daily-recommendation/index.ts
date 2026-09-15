@@ -17,6 +17,7 @@
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
 import { runDailyRecommendationWithClaim, supabaseClaimClient } from '../_shared/matching/runWithClaim.ts';
 import { supabaseDataSource } from '../_shared/matching/supabaseDataSource.ts';
+import { reportServerError } from '../_shared/observability/report.ts';
 
 /**
  * Plus(하루 +1 추천) feature flag — MVP 베타에서는 결제가 없으므로 끈다 (#29).
@@ -59,7 +60,7 @@ Deno.serve(async (req) => {
       dailyLimit,
     });
   } catch (e) {
-    console.error(`daily-recommendation failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    await reportServerError(db, 'daily-recommendation', e, { user_id: auth.userId });
     return json({ error: 'lookup_failed' }, 500);
   }
 
@@ -72,7 +73,7 @@ Deno.serve(async (req) => {
       return json({ error: 'profile_missing' }, 400);
     case 'lookup_failed':
       // 안전·계정 조회 실패 — 추천을 만들지 않았다. 후보 부족(exhausted)과 구분된다.
-      console.error(`daily-recommendation lookup failed at stage=${outcome.stage}`);
+      await reportServerError(db, 'daily-recommendation', new Error('lookup_failed'), { stage: outcome.stage, user_id: auth.userId });
       return json({ error: 'lookup_failed' }, 500);
     case 'ok':
       return json({
