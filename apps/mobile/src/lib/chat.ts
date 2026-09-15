@@ -3,6 +3,8 @@ import {
   beforeCursorFilter,
   classifySendError,
   type ChatMessage,
+  type ExitReason,
+  type MatchCloseKind,
   type MessageCursor,
   parseStarterCache,
   type ServerMessage,
@@ -10,18 +12,29 @@ import {
 } from './chatCore';
 import { supabase } from './supabase';
 
-export type { ChatMessage, StarterCache, StarterQuestion } from './chatCore';
+export type { ChatMessage, ExitReason, MatchCloseKind, StarterCache, StarterQuestion } from './chatCore';
 
 export type ConversationListItem = {
   conversationId: string;
   matchId: string;
   matchStatus: string;
   meetupState: string;
+  /** 종료 사실 (#24) — 이유는 없다 (상대 비공개) */
+  closeKind: MatchCloseKind | null;
+  closedBy: string | null;
+  closedAt: string | null;
   partnerId: string;
   partnerNickname: string;
   lastMessageAt: string | null;
   lastMessagePreview: string | null;
   unreadCount: number;
+};
+
+export type ConversationLists = {
+  /** 진행 중 (자리를 차지하는 대화) */
+  active: ConversationListItem[];
+  /** 종료된 대화 — 이전 메시지 열람·신고만 가능 */
+  closed: ConversationListItem[];
 };
 
 export type ConversationAccess = {
@@ -35,6 +48,8 @@ export type ConversationDetail = {
   matchStatus: string;
   meetupState: string;
   mutualInterestAt: string | null;
+  closeKind: MatchCloseKind | null;
+  closedBy: string | null;
   partnerId: string;
   partnerNickname: string;
   /** v2 캐시만. 과거 lead/question 캐시는 null 로 취급 (서버가 v2 로 재생성) */
@@ -53,20 +68,23 @@ async function requireUserId(): Promise<string> {
   return id;
 }
 
-/** 대화 목록 (활성 매치 기준) */
-export async function fetchConversations(): Promise<ConversationListItem[]> {
+/**
+ * 대화 목록 — 진행 중(active)과 종료된 대화를 나눠 돌려준다 (#24).
+ * 종료된 대화는 진행 중 목록·3개 제한에서 빠지지만 이전 메시지 열람과 신고 경로는 남는다.
+ * 종료된 상대의 프로필은 RLS 상 보이지 않으므로 닉네임은 고정 문구로 대체된다.
+ */
+export async function fetchConversations(): Promise<ConversationLists> {
   const userId = await requireUserId();
 
   const { data: matches, error } = await supabase
     .from('matches')
-    .select('id, status, meetup_state, user_a, user_b, conversations(id, last_message_at)')
-    .eq('status', 'active')
+    .select('id, status, meetup_state, user_a, user_b, close_kind, closed_by, closed_at, conversations(id, last_message_at)')
     .order('created_at', { ascending: false });
   if (error) throw new Error('대화를 불러오지 못했습니다.');
 
   const rows = (matches ?? []).filter((m) => m.conversations != null);
   const partnerIds = rows.map((m) => (m.user_a === userId ? m.user_b : m.user_a));
-  if (rows.length === 0) return [];
+  if (rows.length === 0) return { active: [], closed: [] };
 
   const { data: profiles } = await supabase
     .from('profiles')
@@ -93,7 +111,7 @@ export async function fetchConversations(): Promise<ConversationListItem[]> {
     }
   }
 
-  return rows
+  const items = rows
     .map((m) => {
       const conv = m.conversations as unknown as { id: string; last_message_at: string | null };
       const partnerId = m.user_a === userId ? m.user_b : m.user_a;
@@ -102,14 +120,43 @@ export async function fetchConversations(): Promise<ConversationListItem[]> {
         matchId: m.id,
         matchStatus: m.status,
         meetupState: m.meetup_state,
+        closeKind: (m.close_kind as MatchCloseKind | null) ?? null,
+        closedBy: (m.closed_by as string | null) ?? null,
+        closedAt: (m.closed_at as string | null) ?? null,
         partnerId,
-        partnerNickname: nicknameMap.get(partnerId) ?? '알 수 없음',
+        partnerNickname: nicknameMap.get(partnerId) ?? (m.status === 'active' ? '알 수 없음' : '종료된 대화 상대'),
         lastMessageAt: conv.last_message_at,
         lastMessagePreview: previewMap.get(conv.id)?.content ?? null,
         unreadCount: unreadMap.get(conv.id) ?? 0,
       };
     })
     .sort((a, b) => (b.lastMessageAt ?? '').localeCompare(a.lastMessageAt ?? ''));
+  return {
+    active: items.filter((c) => c.matchStatus === 'active'),
+    closed: items.filter((c) => c.matchStatus !== 'active'),
+  };
+}
+
+/**
+ * 대화 나가기 (#24) — 서버 RPC 가 매치 행을 잠그고 한 번만 종료한다. 재시도·양쪽 동시 요청은 안전하다.
+ * 이유는 선택이며 상대에게 비공개다. 종료 후 다시 메시지를 보낼 수 없다 (호출 전 화면에서 확인을 받는다).
+ */
+export async function leaveConversation(
+  matchId: string,
+  reason: ExitReason | null,
+): Promise<{ alreadyClosed: boolean; closeKind: MatchCloseKind | null; closedBy: string | null }> {
+  const { data, error } = await supabase.rpc('conversation_leave', { p_match_id: matchId, p_reason: reason });
+  if (error) {
+    const m = error.message ?? '';
+    if (m.includes('forbidden')) throw new Error('접근할 수 없는 대화예요.');
+    throw new Error('대화를 종료하지 못했어요. 잠시 후 다시 시도해 주세요.');
+  }
+  const obj = (data ?? {}) as { already_closed?: boolean; close_kind?: string | null; closed_by?: string | null };
+  return {
+    alreadyClosed: obj.already_closed === true,
+    closeKind: (obj.close_kind as MatchCloseKind | null) ?? null,
+    closedBy: obj.closed_by ?? null,
+  };
 }
 
 /** 지금 이 대화에 메시지를 보낼 수 있는지 (서버 판단: 매치 종료·차단·본인/상대 비활성) */
@@ -127,7 +174,7 @@ export async function fetchConversationDetail(conversationId: string): Promise<C
 
   const { data: conv, error } = await supabase
     .from('conversations')
-    .select('id, icebreaker, match_id, matches(id, status, meetup_state, mutual_interest_at, user_a, user_b)')
+    .select('id, icebreaker, match_id, matches(id, status, meetup_state, mutual_interest_at, close_kind, closed_by, user_a, user_b)')
     .eq('id', conversationId)
     .single();
   if (error || !conv) throw new Error('대화방을 찾을 수 없습니다.');
@@ -137,6 +184,8 @@ export async function fetchConversationDetail(conversationId: string): Promise<C
     status: string;
     meetup_state: string;
     mutual_interest_at: string | null;
+    close_kind: string | null;
+    closed_by: string | null;
     user_a: string;
     user_b: string;
   };
@@ -158,8 +207,10 @@ export async function fetchConversationDetail(conversationId: string): Promise<C
     matchStatus: match.status,
     meetupState: match.meetup_state,
     mutualInterestAt: match.mutual_interest_at ?? null,
+    closeKind: (match.close_kind as MatchCloseKind | null) ?? null,
+    closedBy: match.closed_by ?? null,
     partnerId,
-    partnerNickname: profile?.nickname ?? '알 수 없음',
+    partnerNickname: profile?.nickname ?? (match.status === 'active' ? '알 수 없음' : '종료된 대화 상대'),
     starters: parseStarterCache(conv.icebreaker),
     totalMessages: metrics?.total_messages ?? 0,
     access,

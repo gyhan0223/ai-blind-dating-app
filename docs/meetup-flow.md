@@ -62,6 +62,9 @@ MVP(#30)의 핵심 흐름: 사용자는 공개 프로필로 상대를 알아보�
 | `meetup_report_outcome(match, outcome, reason?)` | 참가자 · 본인 active · `mutual_interest_at` 있거나 `meetup_state <> none` (앱 내 예약 등록은 요구하지 않음). 매치가 종료/차단돼도 허용 | upsert → 트리거가 양측 met 일 때만 `met_confirmed` |
 | `meetup_submit_feedback(match, satisfaction?, met_again?, next_intro?, concerns?)` | 참가자 · 본인 active · **본인** outcome = met (상대 확인 불필요) · 최소 1개 응답. 매치가 종료/차단돼도 허용 | upsert (`form_version=2`) |
 | `conversation_access(conv)` | 참가자 | `{can_chat, reason: ok / ended / self_restricted / unavailable / forbidden}` |
+| `conversation_leave(match, reason?)` (#24, 0026) | 참가자. 계정 상태 무관 | 매치 행 잠금 → `closed` + `closed_at/closed_by/close_kind='left'` **1회**. 이미 종료면 `already_closed=true` 로 상태 불변. 이유는 `conversation_exits`(본인만) |
+| `recommendation_accept(rec)` (#24) | 본인 추천 · 본인 active | 추천 accepted + 좋아요 + (상호면) 매치를 한 트랜잭션으로. `result`: matched / liked / no_slot_self / no_slot_partner / already_matched — 자리 부족이면 아무것도 남지 않는다 |
+| `recommendation_mark_viewed(rec)` (#24) | 본인 추천 | `viewed_at` 최초 시각 기록 (멱등) |
 
 `forbidden` 은 존재하지 않는 매치와 타인 매치를 구분하지 않는다 (열거 방지). SECURITY DEFINER 헬퍼 `meetup_mutual_yes` · `is_blocked_pair` 는
 참가자가 아닌 호출자에게 항상 false 를 돌려준다 (RLS 정책 안에서는 항상 참가자 컨텍스트).
@@ -80,6 +83,9 @@ MVP(#30)의 핵심 흐름: 사용자는 공개 프로필로 상대를 알아보�
 - **차단·정지 반영**: `matches` 가 Realtime publication 에 추가돼 열린 화면이 상태 변경(차단·상호 관심·양측 확인)을 받는다 (RLS 참가자 한정).
   `can_chat_in` 이 양쪽 계정 `active` 를 요구하므로 정지·탈퇴 상대에게는 기존 매치로도 보낼 수 없다. 대화 이력은 삭제하지 않는다
   (차단 후에도 참가자는 이전 메시지를 볼 수 있고, 신고 증거는 서버에 그대로 남는다).
+- **나가기·3개 제한 (#24, 0026)**: 진행 중 매치는 사용자당 3개. 한쪽이 나가면 양쪽 모두 종료되고 자리가 돌아온다 (`conversation_leave`). 종료된 대화에는
+  `handle_new_message` 가 매치 행을 잠근 뒤 status 를 다시 확인해 저장을 거부한다 (종료·전송 경쟁 포함). 상대에게는 "상대방이 대화를 종료했어요" 만 보이고 이유는
+  보이지 않는다. 종료·차단·탈퇴·제재는 `matches.close_kind` 로 구분한다. 정책: `docs/conversation-policy.md`.
 
 ## 4. 공개 답변 기반 시작 질문 (`_shared/matching/starterQuestions.ts`)
 
@@ -113,12 +119,14 @@ MVP(#30)의 핵심 흐름: 사용자는 공개 프로필로 상대를 알아보�
 | `meetup_outcome_reported` | 사용자 | 만남 결과 최초 응답 또는 실제 변경 | match_id, outcome, not_met_reason |
 | `meetup_confirmed_both` | 매치 쌍 (참가자당 1행) | 양측 met 처음 성립 | match_id |
 | `meetup_feedback_submitted` / `_changed` | 사용자 | 최초 제출 / 실제 값 변경 (동일 재제출 제외) | match_id |
+| `conversation_left` (#24) | 사용자 | 나가기로 매치를 종료한 순간 (1회 — 재시도·상대 호출은 없음). 이유는 payload 에 없다 | match_id |
+| `recommendation_accepted` (#24, 서버) | 사용자 | `recommendation_accept` 가 실제로 accepted 로 바꿨을 때 (자리 부족은 기록 없음) | recommendation_id, strategy |
 
 과거 클라이언트 이벤트(`chat_started`, `meetup_interest_yes/not_yet`, `meetup_completed`, `second_date_interest_*`)는 0016 이전 데이터에만 남고
 새로 기록되지 않는다. 클라이언트가 보낸 `meetup_completed` 만으로 실제 만남 건수를 확정하지 않는다.
 
-**양방향 대화 지속(관찰 기준, #24)**: 매치 생성 후 7일 안에 `conversation_metrics.messages_a > 0 and messages_b > 0 and active_days >= 2`.
-메시지 수·응답 속도는 지속 여부의 관찰값이지 진정성 점수가 아니다.
+**대화 지속 지표 (#24)**: 예전 `sustained_7d`(7일 안 2일 이상)는 핵심 퍼널에서 제외됐다. 첫 연락·상대 첫 답장·응답 대기·24시간 중단/재개·종료 단계는
+`conversation_pair_metrics()` 가 메시지 행에서 계산한다 (`docs/funnel-metrics.md` 3절). 메시지 수·응답 속도는 관찰값이지 진정성 점수가 아니다.
 
 ### 집계 쿼리 예 (service role)
 
@@ -198,6 +206,8 @@ Push 발송(토큰 등록·expo-notifications·deep link)은 **미구현**이다
 | `meetup_feedback` 새 컬럼 | 만남 경험 확인, 개선 판단 (#24). 추천 점수·개인화 학습에 쓰지 않음 (#28 범위 밖) | 〃 |
 | `notification_events` | 알림 outbox | 〃. 발송 후 보존 기간은 #17 에서 정한다 (권장: 30일 후 삭제) |
 | `analytics_events` 새 이벤트 | 퍼널 측정 | 기존 정책 (user_id `set null`) |
+| `conversation_exits` (#24) | 나가기 이유(선택) 집계 — 본인만 조회, 상대 비공개 | `users`/`matches` cascade. 제재·호감 판단에 쓰지 않는다 |
+| `matches.closed_at/closed_by/close_kind` (#24) | 종료 사실·지표 | 매치와 함께 |
 
 `delete-account` 는 현재 `status='deleted'` 소프트 삭제다. 그 즉시 `can_chat_in`/`meetup_set_intent` 가 거부하므로 기존 매치로도 연락되지 않는다.
 hard delete·익명화 파이프라인(#13)이 구현되면 위 cascade 로 함께 삭제된다.

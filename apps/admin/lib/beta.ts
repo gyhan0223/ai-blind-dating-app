@@ -17,10 +17,10 @@ export type CohortStats = {
   admitted_female: number;
   onboarded: number;
   got_recommendation: number;
+  viewed_recommendation: number;
   liked: number;
   matched: number;
   two_way: number;
-  sustained_7d: number;
   mutual_interest: number;
   both_confirmed: number;
   active_codes: number;

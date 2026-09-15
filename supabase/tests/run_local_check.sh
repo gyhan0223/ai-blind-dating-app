@@ -107,6 +107,16 @@ if [[ "${WITH_BETA_TESTS:-1}" == "1" && -f beta_tests.sql ]]; then
   $PSQL -d "$DB_NAME" -f beta_tests.sql
 fi
 
+if [[ "${WITH_CONVERSATION_TESTS:-1}" == "1" && -f conversation_tests.sql ]]; then
+  echo "running conversation tests (#24 — 고정 시각 대화 지표(1시간/24시간 경계·연속 발신·중단/재개·종료 단계) · 3개 제한 · 나가기 · 재매칭 차단 · 종료 후 전송 차단 · 이유 비공개 · 퍼널 뷰)"
+  $PSQL -d "$DB_NAME" -f conversation_tests.sql
+  echo "running conversation concurrency tests (#24 — 빈자리 1개 동시 수락 · 양쪽 동시 나가기 · 나가기/전송 경쟁)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash conversation_concurrency_test.sh
+  echo "running conversation metrics raw check (#24 — 뷰 vs 원본 테이블 절차적 재계산 대조, 고정 기준 시각)"
+  $PSQL -d "$DB_NAME" -v as_of="'2026-09-03 09:00:00+09'" -f conversation_metrics_raw_check.sql
+  $PSQL -d "$DB_NAME" -v as_of="now()" -f conversation_metrics_raw_check.sql
+fi
+
 if [[ "${WITH_RECOMMENDATION_DB_TEST:-1}" == "1" && -f recommendation_db_test.mjs ]]; then
   if command -v node >/dev/null 2>&1; then
     echo "running recommendation db test (#40 — DB → snapshot → engine → card, 외모 데이터 없이)"

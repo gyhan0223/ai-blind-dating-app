@@ -4,7 +4,8 @@
  * recommendation_run_claim() 으로 (user_id, KST 날짜) 당 한 실행만 코어를 돌린다.
  *  - claimed → runDailyRecommendation → recommendation_run_finish(result)
  *  - busy    → 잠시 기다렸다가 다시 claim (최대 BUSY_RETRIES). 끝내 busy 면 저장된 오늘 추천을 읽어 돌려준다 (in_progress=true)
- *  - skip    → 최근에 끝난 실행이 있다: ok 면 저장된 추천을 읽고, exhausted 면 다시 훑지 않고 exhausted 로 응답 (#23 재시도 주기)
+ *  - skip    → 최근에 끝난 실행이 있다: ok 면 저장된 추천을 읽고, exhausted 면 다시 훑지 않고 exhausted 로 응답 (#23 재시도 주기),
+ *              slots_full 이면 그날은 다시 훑지 않고 slotsFull 로 응답 (#24 — 자리가 생겨도 다음 날 소개부터 재개)
  * 코어가 throw 하면 finish('error') 로 lease 를 닫아 다음 요청이 바로 다시 맡을 수 있게 한다.
  */
 import type { DataSource, StoredRecommendation } from './dataSource.ts';
@@ -17,7 +18,7 @@ export interface ClaimClient {
 
 export type ClaimedOutcome =
   | RunOutcome
-  | { kind: 'ok'; recommendations: StoredRecommendation[]; dailyLimit: number; exhausted: boolean; scanned: number; capReached: boolean; inProgress?: boolean; skipped?: boolean };
+  | { kind: 'ok'; recommendations: StoredRecommendation[]; dailyLimit: number; exhausted: boolean; scanned: number; capReached: boolean; slotsFull?: boolean; inProgress?: boolean; skipped?: boolean };
 
 export const BUSY_RETRIES = 4;
 export const BUSY_WAIT_MS = 400;
@@ -25,7 +26,7 @@ export const BUSY_WAIT_MS = 400;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function resultOf(outcome: RunOutcome): string {
-  if (outcome.kind === 'ok') return outcome.exhausted ? 'exhausted' : 'ok';
+  if (outcome.kind === 'ok') return outcome.slotsFull ? 'slots_full' : outcome.exhausted ? 'exhausted' : 'ok';
   return outcome.kind;
 }
 
@@ -65,6 +66,7 @@ export async function runDailyRecommendationWithClaim(
         exhausted: c.result === 'exhausted' && stored.length === 0,
         scanned: 0,
         capReached: false,
+        slotsFull: c.result === 'slots_full' && stored.length === 0,
         skipped: true,
       };
     }

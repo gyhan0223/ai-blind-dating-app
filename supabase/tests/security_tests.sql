@@ -35,6 +35,7 @@ declare
     'beta_redeem_invite(p_code text)',
     'can_chat_in(cid uuid)',
     'conversation_access(cid uuid)',
+    'conversation_leave(p_match_id uuid, p_reason text)',
     'conversation_participant(cid uuid)',
     'is_blocked_pair(a uuid, b uuid)',
     'is_match_participant(mid uuid)',
@@ -45,7 +46,9 @@ declare
     'meetup_set_intent(p_match_id uuid, p_intent text, p_available_dates text[], p_preferred_region text)',
     'meetup_submit_feedback(p_match_id uuid, p_overall_satisfaction integer, p_met_again_intent text, p_next_intro_intent text, p_concerns text[])',
     'push_token_register(p_token text, p_platform text)',
-    'rate_limit_hit_self(p_scope text, p_limit integer, p_window_seconds integer)'
+    'rate_limit_hit_self(p_scope text, p_limit integer, p_window_seconds integer)',
+    'recommendation_accept(p_recommendation_id uuid)',
+    'recommendation_mark_viewed(p_recommendation_id uuid)'
   ];
   extra text;
 begin

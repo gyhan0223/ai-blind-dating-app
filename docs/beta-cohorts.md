@@ -52,7 +52,7 @@ OTP 로그인 → Gate → OnboardingResume → beta_access_state()
 
 ## 5. 측정 (#24 연결)
 
-- `beta_cohort_stats` 뷰: cohort 별 입장(남/여) · 온보딩 · 추천 · 호감 · 매치 · 양방향 · 7일 지속 · 상호 만남 의향 · 양측 확인 (funnel_user_facts 기준, demo 제외).
+- `beta_cohort_stats` 뷰: cohort 별 입장(남/여) · 온보딩 · 추천 생성/실제 확인 · 호감 · 매치 · 양방향 · 상호 만남 의향 · 양측 확인 (funnel_user_facts 기준, demo 제외). 7일 지속 지표는 #24 결정으로 제외됐다 (0026).
 - `beta_waitlist_summary` 뷰: 지역 · 성별 · 5세 연령대별 대기/입장 수와 가장 오래된 대기 시각.
 - 이벤트: `beta_waitlisted`, `beta_admitted{via: invite|waitlist|admin, cohort}` — 개인정보 없음.
 

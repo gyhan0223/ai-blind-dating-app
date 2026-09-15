@@ -19,6 +19,7 @@
 - 전화번호 SMS OTP 로그인 → 본인확인(1인 1계정) → **인증용** 얼굴 라이브니스(Didit) → 기본 정보 → 공개 소개(고르기) → 설문 → 가치관 → 선호 조건 → 홈
 - 하루 한 명 추천 (텍스트 카드: 닉네임·나이·지역·키·직업·흡연·음주·취미·키워드·**고른 항목으로 만든 소개 문장(연애 목적·공개 질문 선택)**·인증 배지)
 - 상호 수락 → 텍스트 채팅(멱등 전송·재접속 복구·공개 답변 기반 시작 질문) → 각자 비공개 만남 의향 → 둘 다 원할 때만 상호 관심 안내 → 대화로 일정 조율 → 각자 만남 결과 응답(양측 확인 시 확인된 만남) → 비공개 피드백 (#41 — `docs/meetup-flow.md`)
+- 진행 중 대화는 사용자당 최대 3개 (가득 차면 오늘의 소개 중단), 나가기(선택 이유·상대 비공개)로 자리 반환, 한 번 매칭된 상대는 다시 소개하지 않음, 대화 행동 지표(첫 연락·응답 대기·24시간 중단/재개·종료) (#24 — `docs/conversation-policy.md` · `docs/funnel-metrics.md`)
 - 신고·차단·정지·탈퇴, 관리자 웹
 
 **MVP 에서 제공하지 않는 것 (앱·문서에서 약속하지 않음)**
@@ -57,7 +58,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0022 순서대로 — 0015~0022 는 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
+# 마이그레이션 적용 (0001 → 0026 순서대로 — 0015~0026 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -217,6 +218,9 @@ cd supabase/functions/_shared/notifications && node --experimental-strip-types s
 cd apps/mobile && node --experimental-strip-types scripts/chat-core-selftest.mjs
 # DB: 만남 흐름 (#41 — 멱등 전송 · 일방 의향 비공개 · 상호 1회 · 철회 · 만남 확인 집계 · 비공개 피드백 · 차단/정지) 과
 #     동시성(양측 동시 yes 1회 전이 · 같은 키 동시 재시도 1행) — meetup_flow_tests.sql · meetup_concurrency_test.sh (run_local_check.sh 에 포함)
+# DB: 대화 정책·지표 (#24 — 고정 시각 대화 지표(1시간/24시간 경계·연속 발신·중단/재개·종료 단계) · 동시 대화 3개 제한 · 나가기 · 재매칭 차단 ·
+#     종료 후 전송 차단 · 이유 비공개 · 퍼널 뷰) — conversation_tests.sql · conversation_concurrency_test.sh(빈자리 1개 동시 수락 · 동시 나가기 · 나가기/전송 경쟁) ·
+#     conversation_metrics_raw_check.sql(뷰 vs 원본 테이블 절차적 재계산 대조) (run_local_check.sh 에 포함)
 
 # 선호 조건·Dealbreaker 순수 로직 (#25 — 화면 상태 ↔ 서버 행 변환 · 허용 키만 · appearance_importance 없음 · 검증)
 cd apps/mobile && node --experimental-strip-types scripts/preferences-core-selftest.mjs

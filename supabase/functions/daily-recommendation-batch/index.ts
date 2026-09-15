@@ -1,7 +1,7 @@
 /**
  * 하루 1명 추천 배치 (#22) — 스케줄러(pg_cron / 외부 cron)가 service role 로 호출한다. 사용자 JWT 로는 401.
  *
- * POST { after?: uuid, max_users?: number } → { for_date, processed, created, exhausted, skipped, failed, next_after }
+ * POST { after?: uuid, max_users?: number } → { for_date, processed, created, exhausted, slots_full, skipped, failed, next_after }
  *
  *  * 대상: recommendation_batch_targets() — 자격(active·온보딩·인증) 있고, 오늘(KST) 추천이 없고,
  *    다른 실행이 진행 중이거나 최근 1시간 안에 exhausted 로 끝난 사용자는 제외.
@@ -48,7 +48,7 @@ Deno.serve(async (req) => {
 
   const ds = supabaseDataSource(db);
   const claims = supabaseClaimClient(db);
-  const counts = { processed: 0, created: 0, exhausted: 0, skipped: 0, failed: 0 };
+  const counts = { processed: 0, created: 0, exhausted: 0, slots_full: 0, skipped: 0, failed: 0 };
   for (const userId of ids) {
     counts.processed += 1;
     try {
@@ -57,6 +57,7 @@ Deno.serve(async (req) => {
       if (outcome.kind !== 'ok') counts.failed += 1;
       else if ('skipped' in outcome && outcome.skipped) counts.skipped += 1;
       else if ('inProgress' in outcome && outcome.inProgress) counts.skipped += 1;
+      else if (outcome.slotsFull) counts.slots_full += 1;
       else if (outcome.exhausted) counts.exhausted += 1;
       else counts.created += 1;
     } catch (e) {
