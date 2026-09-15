@@ -1,6 +1,7 @@
 import { revalidatePath } from 'next/cache';
 import React from 'react';
 import { requireAdmin } from '@/lib/adminAuth';
+import { recordAdminAudit } from '@/lib/audit';
 import { callAccountPurge, type DeletionRequestRow, findUserByContact } from '@/lib/accountDeletion';
 import { adminClient } from '@/lib/supabaseAdmin';
 
@@ -14,7 +15,7 @@ export const dynamic = 'force-dynamic';
 async function handleRequest(formData: FormData) {
   'use server';
   const { requireAdmin: guard } = await import('@/lib/adminAuth');
-  await guard();
+  const session = await guard();
   const id = String(formData.get('id'));
   const action = String(formData.get('action'));
   const db = adminClient();
@@ -23,6 +24,7 @@ async function handleRequest(formData: FormData) {
 
   if (action === 'reject') {
     await db.from('account_deletion_requests').update({ status: 'rejected', handled_at: new Date().toISOString(), admin_note: '본인 확인 불가 또는 계정 없음' }).eq('id', id);
+    await recordAdminAudit(session.actor, 'deletion_request_handle', 'deletion_request', id, { action: 'reject' });
     revalidatePath('/deletion-requests');
     return;
   }
@@ -31,6 +33,7 @@ async function handleRequest(formData: FormData) {
   const userId = await findUserByContact(db, req.contact as string);
   if (!userId) {
     await db.from('account_deletion_requests').update({ admin_note: '연락처와 일치하는 계정을 찾지 못함 (또는 여러 개)' }).eq('id', id);
+    await recordAdminAudit(session.actor, 'deletion_request_handle', 'deletion_request', id, { action: 'purge', result: 'user_not_found' });
     revalidatePath('/deletion-requests');
     return;
   }
@@ -47,6 +50,7 @@ async function handleRequest(formData: FormData) {
         : { admin_note: `삭제 실패: ${result.error}` },
     )
     .eq('id', id);
+  await recordAdminAudit(session.actor, 'deletion_request_handle', 'deletion_request', id, { action: 'purge', ok: result.ok, hard: true, error: result.ok ? undefined : result.error });
   revalidatePath('/deletion-requests');
   revalidatePath('/users');
 }

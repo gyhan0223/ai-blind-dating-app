@@ -22,7 +22,8 @@ export type PushRoute =
   | { pathname: '/chat/[conversationId]'; params: { conversationId: string } }
   | { pathname: '/meetup/[matchId]'; params: { matchId: string } }
   | { pathname: '/(tabs)' }
-  | { pathname: '/(tabs)/chats' };
+  | { pathname: '/(tabs)/chats' }
+  | { pathname: '/' };
 
 /** 알림 data → 이동할 화면 (순수 함수 — 알 수 없는 값이면 홈) */
 export function routeForNotificationData(data: unknown): PushRoute {
@@ -33,6 +34,7 @@ export function routeForNotificationData(data: unknown): PushRoute {
   if (kind === 'new_message' && conversationId) return { pathname: '/chat/[conversationId]', params: { conversationId } };
   if (kind === 'mutual_meetup_interest' && matchId) return { pathname: '/meetup/[matchId]', params: { matchId } };
   if (kind === 'match_created') return { pathname: '/(tabs)/chats' };
+  if (kind === 'beta_admitted') return { pathname: '/' }; // Gate 가 입장 상태를 다시 읽어 온보딩으로 보낸다 (#26)
   return { pathname: '/(tabs)' };
 }
 

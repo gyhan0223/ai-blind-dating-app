@@ -22,7 +22,9 @@
  * 개인정보: raw identityKey / DI / 본인확인 응답 전문은 저장·로그하지 않는다.
  */
 import { requireIdentityProviderKind, requireIdentitySecret } from '../_shared/env/env.ts';
+import { enforceBetaAccess } from '../_shared/beta.ts';
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
+import { enforceRateLimit } from '../_shared/rateLimit.ts';
 import {
   getIdentityProvider,
   type IdentityRequestInput,
@@ -75,6 +77,16 @@ Deno.serve(async (req) => {
   if (!body) return json({ error: 'invalid_body' }, 400);
 
   const db = serviceClient();
+
+  // 폐쇄 베타 (#26): 입장 허가 없는 계정은 본인확인을 시작할 수 없다 (게이트가 꺼져 있으면 모두 허용). fail-closed
+  const beta = await enforceBetaAccess(db, auth.userId, 'verify-identity');
+  if (beta) return beta;
+
+  // 남용 방지 (#27): 사용자당 request 5회/10분 · confirm/recover 10회/시간. RPC 불가 시 503 (fail-closed)
+  const rl = body.action === 'request'
+    ? await enforceRateLimit(db, 'verify-identity:request', auth.userId, 5, 600, 'verify-identity')
+    : await enforceRateLimit(db, 'verify-identity:confirm', auth.userId, 10, 3600, 'verify-identity');
+  if (rl) return rl;
 
   // 로그인 전화번호는 클라이언트 입력이 아니라 auth 세션(OTP 로 소유 증명됨)에서 가져온다.
   const { data: authUser } = await db.auth.admin.getUserById(auth.userId);

@@ -4,6 +4,7 @@ import { View } from 'react-native';
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, ChipGroup, Field, InlineNotice, Screen, Text } from '@/components/ui';
 import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
+import { isBetaDenied, rateLimitedText, readEdgeError } from '@/lib/edge';
 import { advanceOnboarding } from '@/lib/onboarding';
 import { formatPhoneKR } from '@/lib/phone';
 import { useSession } from '@/lib/session';
@@ -46,6 +47,21 @@ export default function IdentityStep() {
 
   const payload = { name: name.trim(), birthDate, carrier: carrier ?? '' };
 
+  /** 서버가 폐쇄 베타 입장 전(403)이라 거부하면 입장 화면으로, 남용 제한(429)이면 안내 문구. 그 외는 false */
+  const routeIfDenied = async (err: unknown): Promise<boolean> => {
+    const e = await readEdgeError(err);
+    if (isBetaDenied(e)) {
+      router.replace('/auth/beta');
+      return true;
+    }
+    const limited = rateLimitedText(e);
+    if (limited) {
+      setError(limited);
+      return true;
+    }
+    return false;
+  };
+
   const request = async () => {
     setLoading(true);
     setError(null);
@@ -54,6 +70,7 @@ export default function IdentityStep() {
     });
     setLoading(false);
     if (err || !data?.requestId) {
+      if (err && (await routeIfDenied(err))) return;
       setError('인증 요청에 실패했어요. 입력 내용을 확인해 주세요.');
       return;
     }
@@ -98,6 +115,7 @@ export default function IdentityStep() {
     });
     setLoading(false);
     if (err) {
+      if (await routeIfDenied(err)) return;
       setError('인증에 실패했어요. 잠시 후 다시 시도해 주세요.');
       return;
     }
@@ -154,6 +172,7 @@ export default function IdentityStep() {
     });
     setLoading(false);
     if (err || !data?.recovered) {
+      if (err && (await routeIfDenied(err))) return;
       setError('계정 복구에 실패했어요. 잠시 후 다시 시도해 주세요.');
       return;
     }

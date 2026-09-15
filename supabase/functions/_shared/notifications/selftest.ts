@@ -88,5 +88,12 @@ const ev = (over: Partial<DequeuedEvent>): DequeuedEvent => ({
 }
 check('chunk', chunk([1, 2, 3, 4, 5], 2).map((c) => c.length).join() === '2,2,1' && chunk([], 3).length === 0);
 
+// #26 대기 → 입장 알림: 고정 문구, data 는 kind 만 (cohort·개인정보 없음)
+{
+  const ev: DequeuedEvent = { id: 9, recipient_id: 'u9', kind: 'beta_admitted', match_id: null, conversation_id: null, created_at: new Date().toISOString(), attempts: 1, recipient_status: 'active', pref_enabled: true, tokens: [{ token: 'ExponentPushToken[beta]', platform: 'android' }] };
+  const r = buildPushBatch([ev], new Date());
+  check('beta_admitted 발송 · 고정 문구', r.messages.length === 1 && r.messages[0].message.body === PUSH_TEXT.beta_admitted.body && Object.keys(r.messages[0].message.data).join() === 'kind');
+}
+
 console.log(`push selftest: ${passes} passed, ${failures} failed`);
 if (failures > 0) process.exit(1);

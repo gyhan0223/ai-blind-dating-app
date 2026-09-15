@@ -154,3 +154,7 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
   seed 의 과거 외모 데이터를 지워도 같은 결과, 신규 무외모 사용자 추천, 인증·차단·신고·exhausted, reasons 불변.
   `run_local_check.sh` 가 함께 실행한다.
 - 실제 Didit 인증·실기기·원격 Supabase(PostgREST) 경로는 로컬에서 실행하지 않는다 — 배포 후 확인 대상.
+
+## 11. 선호·프로필 수정의 반영 시점 (#25)
+
+DataSource 는 추천 **생성 시점** 에 `profiles / preference_settings / dealbreakers / private_profiles` 를 읽는다. 사용자가 내 정보에서 조건을 바꾸면 다음 추천 생성부터 반영되고, 이미 만들어진 오늘의 추천은 다시 계산하지 않는다 (앱이 안내). 자세한 내용은 `docs/profile-edit.md`.

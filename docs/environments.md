@@ -77,8 +77,9 @@ Issue #3 기준 환경 모델. 핵심 원칙은 두 가지다.
 |---|---|---|
 | `SUPABASE_URL` | 아니오 | 환경별 프로젝트 URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | **예** | 서버 컴포넌트에서만 사용. `NEXT_PUBLIC_*` 로 절대 노출 금지 |
-| `ADMIN_PASSWORD` | **예** | 관리자 로그인 |
-| `ADMIN_ACTOR_LABEL` | 아니오 | 선택. 얼굴 인증 검토 감사 기록(`face_verification_reviews.actor`)에 남는 처리자 이름. 기본 `admin-web` |
+| `ADMIN_PASSWORD` | **예** | 관리자 로그인. 로그인 5회 실패 시 IP 당 15분 잠금 (#27) |
+| `ADMIN_SESSION_SECRET` | **예** | 세션 쿠키 서명 키(16자+, #27). 없으면 `ADMIN_PASSWORD` 에서 파생 — 비밀번호 변경 시 전 세션 무효. production 권장 설정 |
+| `ADMIN_ACTOR_LABEL` | 아니오 | 선택. 로그인 화면에서 처리자 이름을 비웠을 때 감사 기록(`admin_audit_log.actor` · `face_verification_reviews.actor`)에 남는 기본 이름. 기본 `admin-web` |
 
 ## dev-login 정책 (fail-closed allowlist)
 

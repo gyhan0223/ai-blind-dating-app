@@ -28,7 +28,8 @@ body {
 
 .brand { font-weight: 700; }
 
-.topbar nav { display: flex; gap: 18px; }
+.topbar nav { display: flex; gap: 18px; flex-wrap: wrap; }
+.session-box { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 13px; }
 .topbar a { color: var(--sub); text-decoration: none; font-size: 14px; }
 .topbar a:hover { color: var(--ink); }
 
@@ -85,7 +86,7 @@ button:hover { background: var(--bg); }
 button.danger { color: var(--danger); border-color: #e5c5c1; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 
-input[type='password'], input[type='text'] {
+input[type='password'], input[type='text'], input[type='number'], select {
   font: inherit;
   padding: 10px 14px;
   border-radius: 8px;

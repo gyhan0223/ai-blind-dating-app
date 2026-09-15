@@ -18,6 +18,7 @@ import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.t
 import { runDailyRecommendationWithClaim, supabaseClaimClient } from '../_shared/matching/runWithClaim.ts';
 import { supabaseDataSource } from '../_shared/matching/supabaseDataSource.ts';
 import { reportServerError } from '../_shared/observability/report.ts';
+import { enforceRateLimit } from '../_shared/rateLimit.ts';
 
 /**
  * Plus(하루 +1 추천) feature flag — MVP 베타에서는 결제가 없으므로 끈다 (#29).
@@ -39,6 +40,10 @@ Deno.serve(async (req) => {
   const auth = await requireUser(req);
   if (auth instanceof Response) return auth;
   const db = serviceClient();
+
+  // 남용 방지 (#27): 사용자당 30회/시간 — 홈 진입·in_progress 재시도로 충분하고, 후보 스캔 반복 호출을 막는다
+  const rl = await enforceRateLimit(db, 'daily-recommendation', auth.userId, 30, 3600, 'daily-recommendation');
+  if (rl) return rl;
 
   // 오늘 추천 한도 — MVP 는 모두 1명. (Plus +1 은 플래그가 켜진 경우에만, 품질이 아니라 개수만)
   let dailyLimit = 1;

@@ -177,6 +177,10 @@ export default function FaceStep() {
       }
       setState({ kind: 'starting' });
       const started = await startFaceLiveness();
+      if (!started.ok && started.code === 'beta_admission_required') {
+        router.replace('/auth/beta'); // 폐쇄 베타 입장 전 (#26) — 서버가 거부했으니 입장 화면으로
+        return;
+      }
       if (!started.ok) {
         setState(
           started.code === 'already_verified'

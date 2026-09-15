@@ -174,7 +174,8 @@ npm install
 npm run dev                  # http://localhost:3100
 ```
 
-대시보드(핵심 퍼널 9단계 전환율) · 사용자 정지/해제 · 신고 처리.
+대시보드(핵심 퍼널 9단계 전환율) · 사용자 정지/해제 · 신고 처리 · 얼굴 검토 · 삭제 요청 · 서버 오류 · 퍼널 · **폐쇄 베타(게이트·cohort·초대코드·대기자 입장, #26)** · **감사 로그(#27)**.
+로그인 때 입력한 처리자 이름이 모든 조치의 감사 기록에 남는다. 세션은 서명된 12시간 토큰이고 로그인 5회 실패 시 15분 잠긴다 (`docs/security.md`).
 
 ## 검증 (로컬)
 
@@ -216,6 +217,16 @@ cd supabase/functions/_shared/notifications && node --experimental-strip-types s
 cd apps/mobile && node --experimental-strip-types scripts/chat-core-selftest.mjs
 # DB: 만남 흐름 (#41 — 멱등 전송 · 일방 의향 비공개 · 상호 1회 · 철회 · 만남 확인 집계 · 비공개 피드백 · 차단/정지) 과
 #     동시성(양측 동시 yes 1회 전이 · 같은 키 동시 재시도 1행) — meetup_flow_tests.sql · meetup_concurrency_test.sh (run_local_check.sh 에 포함)
+
+# 선호 조건·Dealbreaker 순수 로직 (#25 — 화면 상태 ↔ 서버 행 변환 · 허용 키만 · appearance_importance 없음 · 검증)
+cd apps/mobile && node --experimental-strip-types scripts/preferences-core-selftest.mjs
+# Edge 남용 방지·베타 강제 판정 (#27/#26 — fail-closed: RPC 오류는 허용이 아니라 거부)
+cd supabase/functions/_shared/security && node --experimental-strip-types selftest.ts
+# 관리자 세션 토큰·로그인 잠금 (#27 — 서명·만료·변조 거부 · 5회 실패 잠금)
+cd apps/admin && node --experimental-strip-types scripts/admin-session-selftest.mjs
+# DB: 권한 회귀 (#27 — RLS 전수 · SECURITY DEFINER allowlist · 뷰 비공개 · anon 0행 · 추천 변경 범위 · 신고 상한) — security_tests.sql
+#     프로필 수정 (#25 — 성별/출생연도 잠금 · preferences_save 원자성 · 변경 이벤트 컬럼명만) — profile_edit_tests.sql
+#     폐쇄 베타 (#26 — 게이트 · 초대코드 · 대기 · 운영자 입장 · 정원 · 공개 전환) — beta_tests.sql   (모두 run_local_check.sh 에 포함)
 
 # 타입체크 / 빌드
 cd apps/mobile && npx tsc --noEmit && npx expo export --platform web
@@ -377,5 +388,5 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 3. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기). #11 보관·삭제 정책은 `docs/data-retention.md` 로 구현됨
 4. #12 정책 문서: 초안·공개 URL·앱 링크는 있음(`docs/policy-docs.md`) — 법률 검토·`[ ]` 값 기입·생체정보 별도 동의 화면 남음
 5. #21 실기기 E2E (두 계정으로 소개 수락 → 대화 → 상호 의향 → 만남 확인 → 피드백 — #41 은 로컬 DB/순수 로직 검증까지만 마침) · #18/#19 EAS·스토어 제출
-6. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)
-5. MVP 이후 별도 채택 시 검토: #8 얼굴 임베딩 · #9/#10 외모 취향 매칭 · #28 AI 대화 분석 · #29 Plus/결제 재도입
+6. P1 구현됨: #25 프로필·선호·가치관 수정(`docs/profile-edit.md`) · #26 폐쇄 베타 cohort/초대코드/대기(`docs/beta-cohorts.md`) · #27 보안 하드닝(`docs/security.md`) — 남은 것은 실기기 확인, 관리자 다중 인스턴스 로그인 잠금, cohort 운영 기준
+7. MVP 이후 별도 채택 시 검토: #8 얼굴 임베딩 · #9/#10 외모 취향 매칭 · #28 AI 대화 분석 · #29 Plus/결제 재도입

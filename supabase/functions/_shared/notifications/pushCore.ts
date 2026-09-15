@@ -9,7 +9,7 @@
  *  * 토큰 없음 / 설정 off / 수신자 비활성 → 발송하지 않고 skipped 로 닫는다 (재시도하지 않는다).
  */
 
-export type NotificationKind = 'new_message' | 'mutual_meetup_interest' | 'daily_recommendation' | 'match_created';
+export type NotificationKind = 'new_message' | 'mutual_meetup_interest' | 'daily_recommendation' | 'match_created' | 'beta_admitted';
 
 export interface DequeuedEvent {
   id: number;
@@ -46,13 +46,14 @@ export const PUSH_TEXT: Record<NotificationKind, { title: string; body: string }
   mutual_meetup_interest: { title: '본심', body: '만남에 대한 새 소식이 있어요. 앱에서 확인해 보세요.' },
   daily_recommendation: { title: '본심', body: '오늘의 소개가 도착했어요.' },
   match_created: { title: '본심', body: '새로운 대화가 열렸어요. 첫 인사를 건네 보세요.' },
+  beta_admitted: { title: '본심', body: '모집이 열렸어요. 앱에서 이어서 시작해 보세요.' }, // #26 대기 → 입장
 };
 
 /** 이벤트가 오래됐으면(예: 6시간) 보내지 않는다 — 발송기가 오래 멈췄다 켜졌을 때 몰아서 울리지 않게 */
 export const MAX_EVENT_AGE_MS = 6 * 60 * 60 * 1000;
 
 function isKind(k: string): k is NotificationKind {
-  return k === 'new_message' || k === 'mutual_meetup_interest' || k === 'daily_recommendation' || k === 'match_created';
+  return k === 'new_message' || k === 'mutual_meetup_interest' || k === 'daily_recommendation' || k === 'match_created' || k === 'beta_admitted';
 }
 
 export function buildPushBatch(events: DequeuedEvent[], now: Date = new Date()): BuildResult {

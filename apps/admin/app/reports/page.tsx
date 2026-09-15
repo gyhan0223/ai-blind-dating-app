@@ -1,6 +1,7 @@
 import { revalidatePath } from 'next/cache';
 import React from 'react';
 import { requireAdmin } from '@/lib/adminAuth';
+import { recordAdminAudit } from '@/lib/audit';
 import { loadUserSummaries, type ModerationAction, moderateUser, REASON_LABEL, STATUS_LABEL } from '@/lib/moderation';
 import { adminClient } from '@/lib/supabaseAdmin';
 
@@ -13,17 +14,18 @@ export const dynamic = 'force-dynamic';
 async function setReviewing(formData: FormData) {
   'use server';
   const { requireAdmin: guard } = await import('@/lib/adminAuth');
-  await guard();
+  const session = await guard();
   const id = String(formData.get('id'));
   const db = adminClient();
   await db.from('reports').update({ status: 'reviewing' }).eq('id', id).eq('status', 'pending');
+  await recordAdminAudit(session.actor, 'report_reviewing', 'report', id, {});
   revalidatePath('/reports');
 }
 
 async function act(formData: FormData) {
   'use server';
   const { requireAdmin: guard } = await import('@/lib/adminAuth');
-  await guard();
+  const session = await guard();
   const id = String(formData.get('id'));
   const action = String(formData.get('action')) as ModerationAction;
   const days = formData.get('days') ? Number(formData.get('days')) : null;
@@ -32,7 +34,8 @@ async function act(formData: FormData) {
   const db = adminClient();
   const { data: report } = await db.from('reports').select('id, reported_id, status').eq('id', id).maybeSingle();
   if (!report || report.status === 'actioned' || report.status === 'dismissed') return;
-  await moderateUser(db, { userId: report.reported_id, action, reason, reportId: id, actor: 'admin', days });
+  const res = await moderateUser(db, { userId: report.reported_id, action, reason, reportId: id, actor: session.actor, days });
+  await recordAdminAudit(session.actor, 'report_action', 'report', id, { action, days, ok: res.ok });
   revalidatePath('/reports');
   revalidatePath('/users');
 }

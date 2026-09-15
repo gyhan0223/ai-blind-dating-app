@@ -23,7 +23,7 @@ import { colors, radius, spacing } from '@/theme/tokens';
  * 내 정보.
  * Plus/결제 관련 UI 는 MVP(#29/#39) 에서 제거 — 결제가 없으므로 진입점·플랜 표시·"준비 중" 안내를 두지 않는다.
  * (subscriptions 테이블과 재도입용 구조는 서버에 그대로 남아 있다.)
- * 소개 항목·선호조건 수정은 #25 에서 제공한다 — 여기서는 상대에게 보이는 문장을 확인만 한다.
+ * 소개·기본 정보·선호 조건·가치관 수정은 settings/* 화면 (#25). 성별·출생연도·인증 상태는 서버가 잠근다.
  */
 async function fetchMe() {
   const { data: auth } = await supabase.auth.getUser();
@@ -133,6 +133,23 @@ export default function MeScreen() {
         <Text variant="body" style={{ lineHeight: 24 }}>
           {intro ?? '아직 고른 소개가 없어요.'}
         </Text>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginTop: spacing.md }}>
+          <Button kind="secondary" title="소개 수정" onPress={() => router.push('/settings/intro')} />
+          <Button kind="secondary" title="기본 정보 수정" onPress={() => router.push('/settings/profile')} />
+        </View>
+      </Card>
+
+      <View style={{ height: spacing.md }} />
+
+      <Card>
+        <Text variant="heading" style={{ marginBottom: spacing.xs }}>소개 기준</Text>
+        <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.md }}>
+          선호 조건과 가치관은 상대에게 공개되지 않고 소개 기준에만 참고돼요. 수정한 내용은 다음 소개부터 반영돼요.
+        </Text>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+          <Button kind="secondary" title="선호 조건 수정" onPress={() => router.push('/settings/preferences')} />
+          <Button kind="secondary" title="가치관 다시 답하기" onPress={() => router.push('/settings/values')} />
+        </View>
       </Card>
 
       <View style={{ height: spacing.md }} />

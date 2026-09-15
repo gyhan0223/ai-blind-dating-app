@@ -22,6 +22,7 @@ function eq(name, actual, expected) {
 }
 
 const complete = {
+  betaAccess: 'open',
   identityVerified: true,
   faceVerified: true,
   hasProfile: true,
@@ -41,6 +42,14 @@ eq('done → 홈 라우트', routeForResumeStep('done'), '/(tabs)');
 eq('legacy appearance + 자기소개 없음 → intro', resolveOnboardingStep({ ...complete, hasIntro: false }), 'intro');
 eq('legacy appearance + 모두 있음 → done', resolveOnboardingStep(complete), 'done');
 eq('legacy appearance + 얼굴 인증 없음 → face (홈으로 보내지 않음)', resolveOnboardingStep({ ...complete, faceVerified: false }), 'face');
+
+// 폐쇄 베타 게이트 (#26) — 허가 전에는 본인확인으로 가지 않는다. 이미 인증한 사용자는 게이트가 뒤늦게 켜져도 막지 않는다
+eq('초대 필요 → beta', resolveOnboardingStep({ ...complete, betaAccess: 'invite_required', identityVerified: false, faceVerified: false, hasProfile: false }), 'beta');
+eq('대기 중 → beta', resolveOnboardingStep({ ...complete, betaAccess: 'waitlisted', identityVerified: false, faceVerified: false }), 'beta');
+eq('입장 허가 → identity 부터', resolveOnboardingStep({ ...complete, betaAccess: 'admitted', identityVerified: false, faceVerified: false }), 'identity');
+eq('게이트 꺼짐 → identity 부터', resolveOnboardingStep({ ...complete, betaAccess: 'open', identityVerified: false }), 'identity');
+eq('본인확인 끝난 사용자는 게이트가 켜져도 계속 진행', resolveOnboardingStep({ ...complete, betaAccess: 'invite_required', faceVerified: false }), 'face');
+eq('beta 라우트', routeForResumeStep('beta'), '/auth/beta');
 
 // 인증은 절대 건너뛰지 않는다
 eq('본인확인 없음 → identity', resolveOnboardingStep({ ...complete, identityVerified: false }), 'identity');

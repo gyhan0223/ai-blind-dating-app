@@ -60,3 +60,9 @@ payload 에도 본문에도 없다. 같은 대화의 여러 메시지는 발송 
   outbox 트리거(match_created 2건, daily_recommendation 하루 1건)·dequeue 잠금/재시도/expired·발송기 RPC 클라이언트 호출 불가
 - **미실행**: 실기기 수신(Android 우선, iOS 는 Apple Developer 이후), 알림 탭 화면 이동, Expo Push API 실제 호출, EAS projectId 연결.
   이 항목이 끝나기 전에는 앱·문서에 "알림이 간다" 고 약속하지 않는다.
+
+## 추가 kind — `beta_admitted` (#26)
+
+운영자가 대기자를 cohort 에 입장시키면(`beta_admit_waitlist` / `beta_admit_user`) outbox 에 `beta_admitted` 1건(dedupe `beta:admitted:<uid>`)이 쌓인다.
+본문은 고정 문구("모집이 열렸어요. 앱에서 이어서 시작해 보세요."), data 는 `kind` 만. 알림 설정 스위치가 없는 종류라 항상 발송된다 (탈퇴·정지 계정 제외).
+앱은 탭하면 Gate(`/`)로 가서 입장 상태를 다시 읽고 온보딩으로 보낸다. 대기 화면에서 알림 권한을 켜야 토큰이 있다 (`docs/beta-cohorts.md`).
