@@ -5,9 +5,11 @@ import { ActivityIndicator, View } from 'react-native';
 import { RecommendationCard } from '@/components/RecommendationCard';
 import { Button, Card, ChipGroup, InlineNotice, Screen, Text } from '@/components/ui';
 import { track } from '@/lib/analytics';
+import { acceptResultNotice, CONVERSATION_SLOT_LIMIT } from '@/lib/chatCore';
 import {
   decideRecommendation,
   fetchTodayRecommendations,
+  markRecommendationViewed,
   SKIP_CATEGORIES,
   type Recommendation,
   type SkipCategory,
@@ -26,6 +28,7 @@ export default function TodayScreen() {
   const [askingSkipReason, setAskingSkipReason] = useState(false);
   const [skipCategory, setSkipCategory] = useState<SkipCategory | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const viewedIds = useRef(new Set<string>());
 
   const pending = data?.recommendations.find((r) => r.status === 'pending') ?? null;
@@ -34,6 +37,8 @@ export default function TodayScreen() {
   useEffect(() => {
     if (pending && !viewedIds.current.has(pending.id)) {
       viewedIds.current.add(pending.id);
+      // 실제 확인(열람)은 서버에 멱등 기록한다 (#24 — 생성 ≠ 확인). 화면 이벤트는 보조
+      markRecommendationViewed(pending.id);
       track('recommendation_viewed', { recommendation_id: pending.id, strategy: pending.strategy });
     }
   }, [pending]);
@@ -46,9 +51,16 @@ export default function TodayScreen() {
   ) => {
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
-      const { matched } = await decideRecommendation(rec, decision, reasonCategory, reasonDetail);
+      const { matched, result } = await decideRecommendation(rec, decision, reasonCategory, reasonDetail);
       if (matched) setMatchedNickname(rec.card.nickname);
+      // 자리 부족·재매칭 차단: 추천은 그대로 남고 안내만 (상대의 거절이 아니다)
+      const info = result ? acceptResultNotice(result) : null;
+      if (info) {
+        setNotice(info);
+        return;
+      }
       setAskingSkipReason(false);
       setSkipCategory(null);
       await queryClient.invalidateQueries({ queryKey: ['today-recommendations'] });
@@ -111,6 +123,12 @@ export default function TodayScreen() {
           {error && (
             <View style={{ marginTop: spacing.md }}>
               <InlineNotice tone="danger" text={error} />
+            </View>
+          )}
+          {notice && (
+            <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
+              <InlineNotice text={notice} />
+              <Button kind="ghost" title="대화 목록 보기" onPress={() => router.push('/(tabs)/chats')} />
             </View>
           )}
           {!askingSkipReason ? (
@@ -195,7 +213,17 @@ export default function TodayScreen() {
         </Card>
       )}
 
-      {!isLoading && !isError && !pending && !matchedNickname && !data?.inProgress && (
+      {!isLoading && !isError && !pending && !matchedNickname && !data?.inProgress && data?.slotsFull && (
+        <Card>
+          <Text variant="heading" style={{ marginBottom: spacing.sm }}>진행 중인 대화가 {CONVERSATION_SLOT_LIMIT}개예요</Text>
+          <Text variant="body" color={colors.sub} style={{ marginBottom: spacing.md }}>
+            대화에 집중할 수 있도록 오늘의 소개는 쉬어요.{'\n'}대화를 하나 종료하면 다음 소개부터 다시 시작돼요.
+          </Text>
+          <Button kind="secondary" title="대화 목록으로" onPress={() => router.push('/(tabs)/chats')} />
+        </Card>
+      )}
+
+      {!isLoading && !isError && !pending && !matchedNickname && !data?.inProgress && !data?.slotsFull && (
         <Card>
           <Text variant="heading" style={{ marginBottom: spacing.sm }}>
             {acceptedToday.length > 0

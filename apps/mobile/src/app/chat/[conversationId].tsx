@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Alert,
   AppState,
   FlatList,
   KeyboardAvoidingView,
@@ -13,19 +14,23 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Button, Card, Text } from '@/components/ui';
+import { Button, Card, ChipGroup, InlineNotice, Text } from '@/components/ui';
 import {
   type ChatMessage,
   fetchConversationDetail,
   fetchMessagesPage,
   fetchMessagesSince,
   fetchStarterQuestions,
+  leaveConversation,
   markConversationRead,
   sendMessage,
   SendMessageError,
   subscribeToConversation,
 } from '@/lib/chat';
 import {
+  closedNotice,
+  EXIT_REASONS,
+  type ExitReason,
   makeLocalMessage,
   mergeMessages,
   newClientMessageId,
@@ -42,10 +47,10 @@ import { colors, radius, spacing } from '@/theme/tokens';
 /** 시작 질문 카드를 보여주는 최대 메시지 수 (그 뒤엔 접는다 — 강요하지 않는다) */
 const STARTER_VISIBLE_UNTIL = 4;
 
-function accessMessage(reason: string): string {
+function accessMessage(reason: string, closed: string | null): string {
   switch (reason) {
     case 'ended':
-      return '종료된 대화예요. 이전 대화는 볼 수 있지만 새 메시지는 보낼 수 없어요.';
+      return `${closed ?? '종료된 대화예요'}. 이전 대화는 볼 수 있지만 새 메시지는 보낼 수 없어요.`;
     case 'unavailable':
       return '지금은 대화할 수 없는 상대예요.';
     case 'self_restricted':
@@ -75,6 +80,11 @@ export default function ChatRoom() {
   const [input, setInput] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [startersOpen, setStartersOpen] = useState(true);
+  // 나가기 (#24): 확인 → (선택) 이유 → 서버 RPC. 이유는 상대에게 보이지 않는다
+  const [leaving, setLeaving] = useState(false);
+  const [leaveReason, setLeaveReason] = useState<ExitReason | null>(null);
+  const [leaveBusy, setLeaveBusy] = useState(false);
+  const [leaveError, setLeaveError] = useState<string | null>(null);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
   useEffect(() => {
@@ -178,6 +188,38 @@ export default function ChatRoom() {
     !!starters && startersOpen && initialLoaded && serverMessageCount < STARTER_VISIBLE_UNTIL && detail?.access.canChat;
 
   const canChat = detail?.access.canChat ?? false;
+  const closedText = detail
+    ? closedNotice({ matchStatus: detail.matchStatus, closeKind: detail.closeKind, closedBy: detail.closedBy, myId })
+    : null;
+
+  const confirmLeave = useCallback(() => {
+    setMenuOpen(false);
+    Alert.alert('대화를 종료할까요?', '대화를 종료하면 다시 메시지를 보낼 수 없어요. 상대에게는 종료 사실만 전해지고, 아래에서 고르는 이유는 보이지 않아요.', [
+      { text: '취소', style: 'cancel' },
+      { text: '종료하기', style: 'destructive', onPress: () => setLeaving(true) },
+    ]);
+  }, []);
+
+  const doLeave = useCallback(
+    async (reason: ExitReason | null) => {
+      if (!detail) return;
+      setLeaveBusy(true);
+      setLeaveError(null);
+      try {
+        await leaveConversation(detail.matchId, reason);
+        setLeaving(false);
+        setLeaveReason(null);
+        await refetchDetail();
+        queryClient.invalidateQueries({ queryKey: ['conversations'] });
+        queryClient.invalidateQueries({ queryKey: ['today-recommendations'] });
+      } catch (e) {
+        setLeaveError(e instanceof Error ? e.message : '대화를 종료하지 못했어요.');
+      } finally {
+        setLeaveBusy(false);
+      }
+    },
+    [detail, refetchDetail, queryClient],
+  );
 
   /** 전송 — 작성 시 발급한 clientMessageId 를 재시도에도 그대로 쓴다 */
   const deliver = useCallback(
@@ -325,6 +367,9 @@ export default function ChatRoom() {
               }}
             />
           )}
+          {detail.matchStatus === 'active' && (
+            <Button kind="secondary" title="대화 나가기" onPress={confirmLeave} />
+          )}
           <Button
             kind="danger"
             title="신고 또는 차단"
@@ -336,6 +381,32 @@ export default function ChatRoom() {
               });
             }}
           />
+        </View>
+      )}
+
+      {leaving && detail && (
+        <View style={styles.menu}>
+          <Card>
+            <Text variant="heading" style={{ marginBottom: spacing.xs }}>종료하는 이유가 있다면 알려주세요</Text>
+            <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.md }}>
+              선택 사항이에요. 상대에게는 보이지 않고, 서비스를 개선하는 데만 쓰여요.
+            </Text>
+            <ChipGroup
+              options={EXIT_REASONS.map((r) => ({ value: r.value, label: r.label }))}
+              value={leaveReason}
+              onChange={(v) => setLeaveReason(v as ExitReason)}
+            />
+            {leaveError && (
+              <View style={{ marginTop: spacing.md }}>
+                <InlineNotice tone="danger" text={leaveError} />
+              </View>
+            )}
+            <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
+              <Button kind="danger" title="종료하기" onPress={() => doLeave(leaveReason)} loading={leaveBusy} disabled={!leaveReason} />
+              <Button kind="secondary" title="응답하지 않고 종료하기" onPress={() => doLeave(null)} disabled={leaveBusy} />
+              <Button kind="ghost" title="취소" onPress={() => { setLeaving(false); setLeaveReason(null); setLeaveError(null); }} disabled={leaveBusy} />
+            </View>
+          </Card>
         </View>
       )}
 
@@ -416,7 +487,7 @@ export default function ChatRoom() {
         {detail && !canChat ? (
           <View style={styles.inputBar}>
             <Text variant="caption" color={colors.sub} style={{ flex: 1, textAlign: 'center' }}>
-              {accessMessage(detail.access.reason)}
+              {accessMessage(detail.access.reason, closedText)}
             </Text>
           </View>
         ) : (

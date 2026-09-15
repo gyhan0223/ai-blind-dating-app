@@ -69,6 +69,10 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 - 제외: 본인 · 양방향 차단 쌍(`blocks`) · **신고 당사자 쌍**(`reports`, 어느 쪽이 신고했든 그 둘 사이만 — 신고만으로 다른 사용자에게까지 전역 제외하지 않는다)
   · 내가 좋아요한 상대 · 매치된 적 있는 상대(상태 무관) · 과거에 추천된 적 있는 상대(전체 기간).
 - 운영 제재(`suspended`/`banned`)와 탈퇴(`deleted`)는 `status` 로 걸러진다. 신고 처리·제재 정책 자체는 #15.
+- **동시 대화 3개 제한 (#24, 0026)**: 요청자의 진행 중(active) 매치가 3개면 후보를 훑지 않고 `slots_full`(HTTP 200 `slots_full: true`, 실행 기록 `result='slots_full'`) 로 끝낸다 —
+  후보 부족(`exhausted`)과 다른 결과다. 그날은 다시 훑지 않고(`recommendation_run_claim` skip) 자리가 생기면 **다음 날** 소개부터 재개된다. 진행 중 매치가 3개인 후보도 제외한다
+  (`DataSource.activeMatchCounts`, 뷰 `conversation_slot_usage`). 수락 시에는 서버 RPC `recommendation_accept` 가 양쪽 자리를 잠금과 함께 다시 확인한다 (`docs/conversation-policy.md`).
+- **재매칭 방지**: 매치된 적 있는 상대(상태 무관)는 영구 제외이며, DB 트리거가 종료된 쌍의 좋아요(`already_matched`)와 `closed → active` 재전이를 거부한다.
 - **조회 실패 ≠ 데이터 없음**: users/blocks/reports/likes/matches/recommendations/후보 조회가 실패하면 `lookup_failed`(HTTP 500)로 끝내고 추천을 만들지 않는다. 후보 부족은 `exhausted`(HTTP 200) 로 구분한다.
 
 ## 6. 오늘 저장된 추천의 재검증
@@ -94,6 +98,7 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 - 재추천 주기 (#23, `RECOMMENDATION_COOLDOWN_DAYS = 30`): 과거 추천 상대 중 `pending`/`accepted` 는 영구 제외(좋아요·매치 이력도 영구 제외),
   `skipped`/`expired` 는 30일이 지나면 다시 후보가 된다 — 좁은 cohort 에서 풀이 마르지 않게 한다. 0017 이 `unique(user_id, candidate_id)` 를
   `(user_id, candidate_id, for_date)` + "같은 쌍의 pending 은 하나" 로 바꿨다.
+- 배치 대상(`recommendation_batch_targets`)은 진행 중 매치가 3개인 사용자와 오늘 `slots_full` 로 끝난 사용자를 뺀다 (#24).
 - `strategy` 값(`high_confidence`/`exploration`/`fallback`)은 DB check 제약·analytics 호환용 라벨이다:
   scored 총점 ≥0.62 인 1순위 / ≥0.5 / 그 외(conditions_only 포함). 탐색 정책이나 정확도를 뜻하지 않는다.
 - **멱등성 (#22)**: `recommendation_run_claim(user_id, KST 날짜)` 가 (사용자, 날짜) 당 한 실행만 코어를 돌린다 (`recommendation_runs` 행 잠금 + lease 90초).
@@ -149,7 +154,7 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 
 ## 11. 검증
 
-- `supabase/functions/_shared/matching/selftest.ts` — 엔진·코어 단위 (in-memory DataSource). 실패 시 exit 1.
+- `supabase/functions/_shared/matching/selftest.ts` — 엔진·코어 단위 (in-memory DataSource). 실패 시 exit 1. #24: 요청자 가득 참 → slotsFull(재훑기·저장 없음), 가득 찬 후보 제외, claim skip(slots_full).
 - `supabase/tests/recommendation_db_test.mjs` — 실제 Postgres(마이그레이션+seed) 위에서 DB → 스냅샷 → 엔진 → 저장 → 카드 반환.
   seed 의 과거 외모 데이터를 지워도 같은 결과, 신규 무외모 사용자 추천, 인증·차단·신고·exhausted, reasons 불변.
   `run_local_check.sh` 가 함께 실행한다.

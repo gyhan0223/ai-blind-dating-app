@@ -1,14 +1,14 @@
 /**
  * 오늘의 소개 생성 Edge Function — 얇은 HTTP 어댑터.
  *
- * POST {} → { recommendations: [{ id, status, strategy, card, candidate_id }], daily_limit, exhausted?, in_progress? }
+ * POST {} → { recommendations: [{ id, status, strategy, card, candidate_id }], daily_limit, exhausted?, slots_full?, in_progress? }
  *
  * 실제 정책·계산은 _shared/matching/recommend.ts(runDailyRecommendation) 에 있다 (#40):
  *  * 하루 1명 — 무한 스와이프 없음. Plus 추천 개수 차등은 PLUS_EXTRA_RECOMMENDATION_ENABLED=false 로 비활성 (#29/#39)
  *  * 요청자·후보 모두 active·온보딩 완료·본인확인·얼굴 인증·성인 확인 플래그(users 행, 서버만 갱신)를 검사
  *  * 외모 취향·얼굴 벡터는 조회도 계산도 하지 않는다
  *  * 원시 점수·비공개 응답은 클라이언트에 내려주지 않는다 — card 스냅샷의 공개 필드만
- *  * 안전 조회 실패(500 lookup_failed)와 후보 부족(200 exhausted)은 다른 결과다
+ *  * 안전 조회 실패(500 lookup_failed)와 후보 부족(200 exhausted)과 대화 자리 없음(200 slots_full, #24)은 다른 결과다
  *
  * 멱등성 (#22): recommendation_run_claim 으로 (사용자, KST 날짜) 당 한 실행만 생성한다. 동시 요청은 기다렸다가
  * 저장된 추천을 읽는다. 끝내 다른 실행이 진행 중이면 in_progress=true (앱이 잠시 후 다시 요청).
@@ -85,6 +85,7 @@ Deno.serve(async (req) => {
         recommendations: outcome.recommendations,
         daily_limit: outcome.dailyLimit,
         ...(outcome.exhausted ? { exhausted: true } : {}),
+        ...(outcome.slotsFull ? { slots_full: true } : {}),
         ...('inProgress' in outcome && outcome.inProgress ? { in_progress: true } : {}),
       });
   }

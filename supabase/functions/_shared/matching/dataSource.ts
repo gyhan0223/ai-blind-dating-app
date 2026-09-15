@@ -61,6 +61,11 @@ export interface DataSource {
 
   // --- 계정·안전 ---
   userAccounts(ids: string[]): Promise<UserAccountRow[]>;
+  /**
+   * 사용자별 진행 중(active) 매치 수 (#24 — 동시 대화 3개 제한). 요청자가 가득 차면 소개를 중단하고,
+   * 가득 찬 후보는 제외한다. 없는 id 는 0 으로 본다. 조회 실패 시 throw.
+   */
+  activeMatchCounts(ids: string[]): Promise<Record<string, number>>;
   /** 요청자가 어느 쪽이든 포함된 차단 쌍 */
   blockPairs(userId: string): Promise<{ blocker_id: string; blocked_id: string }[]>;
   /** 요청자가 신고했거나 신고당한 쌍 (당사자 간 재추천 제한용 — 전역 제외 아님) */

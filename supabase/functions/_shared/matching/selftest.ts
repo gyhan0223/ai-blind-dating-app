@@ -18,7 +18,7 @@ import {
   tieBreakKey,
 } from './MatchingEngine.ts';
 import { buildPublicAnswerCards, composeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
-import { accountEligible, addDays, CARD_FIELDS, excludedByRecommendationHistory, MAX_CANDIDATES_SCANNED, RECOMMENDATION_COOLDOWN_DAYS, runDailyRecommendation } from './recommend.ts';
+import { accountEligible, addDays, CARD_FIELDS, CONVERSATION_SLOT_LIMIT, excludedByRecommendationHistory, MAX_CANDIDATES_SCANNED, RECOMMENDATION_COOLDOWN_DAYS, runDailyRecommendation } from './recommend.ts';
 import { runDailyRecommendationWithClaim, type ClaimClient } from './runWithClaim.ts';
 import { loadSnapshots } from './snapshot.ts';
 import { buildStarterCache, GENERAL_QUESTIONS, generateStarterQuestions, parseStarterCache, STARTER_MAX, STARTER_MIN } from './starterQuestions.ts';
@@ -391,7 +391,7 @@ type Fixture = {
   blocks: { blocker_id: string; blocked_id: string }[];
   reports: { reporter_id: string; reported_id: string }[];
   likes: { from: string; to: string }[];
-  matches: { a: string; b: string }[];
+  matches: { a: string; b: string; status?: 'active' | 'closed' | 'blocked' }[];
   recs: (StoredRecommendation & { user_id: string; for_date: string })[];
   failStages?: Set<string>;
 };
@@ -422,6 +422,12 @@ function memoryDataSource(f: Fixture): DataSource & { inserted: NewRecommendatio
     async preferenceSettings(ids) { touched.add('preference_settings'); return f.prefs.filter((p) => ids.includes(p.user_id as string)); },
     async dealbreakers() { touched.add('dealbreakers'); return []; },
     async userAccounts(ids) { fail('users'); touched.add('users'); return f.users.filter((u) => ids.includes(u.id)); },
+    async activeMatchCounts(ids) {
+      fail('slots'); touched.add('slots');
+      const out: Record<string, number> = {};
+      for (const id of ids) out[id] = f.matches.filter((m) => (m.status ?? 'active') === 'active' && (m.a === id || m.b === id)).length;
+      return out;
+    },
     async blockPairs(userId) { fail('blocks'); return f.blocks.filter((b) => b.blocker_id === userId || b.blocked_id === userId); },
     async reportPairs(userId) { fail('reports'); return f.reports.filter((r) => r.reporter_id === userId || r.reported_id === userId); },
     async likedUserIds(userId) { fail('likes'); return f.likes.filter((l) => l.from === userId).map((l) => l.to); },
@@ -669,6 +675,53 @@ await (async () => {
     calls.length = 0;
     const o6 = await runDailyRecommendationWithClaim(memoryDataSource(baseFixture()), mk(['busy']), RUN, { retries: 0 });
     check('busy + 저장된 행 없음 → inProgress', o6.kind === 'ok' && 'inProgress' in o6 && o6.inProgress === true && o6.recommendations.length === 0);
+  }
+
+  {
+    // 동시 대화 3개 제한 (#24): 요청자가 가득 차면 후보를 훑지 않고 slotsFull (exhausted 아님·insert 없음)
+    const f = baseFixture();
+    f.matches = [{ a: ME, b: 'x1' }, { a: ME, b: 'x2' }, { a: 'x3', b: ME }, { a: ME, b: 'x4', status: 'closed' }];
+    const ds = memoryDataSource(f);
+    const o = await runDailyRecommendation(ds, RUN);
+    check('요청자 진행 중 매치 3개 → slotsFull (closed 는 세지 않음)', o.kind === 'ok' && o.slotsFull === true && !o.exhausted && o.recommendations.length === 0);
+    check('slotsFull 이면 후보를 훑지 않고 저장하지 않는다', !ds.touched.has('profiles') && ds.inserted.length === 0);
+    // 종료 하나 → 자리 생김 → 다시 추천 생성
+    f.matches[2].status = 'closed';
+    const o2 = await runDailyRecommendation(memoryDataSource(f), RUN);
+    check('자리가 생기면 추천이 다시 생성된다', o2.kind === 'ok' && !o2.slotsFull && o2.recommendations.length === 1);
+    // 오늘 저장된 추천이 있으면 가득 차도 그대로 돌려준다 (새로 만들지 않음)
+    const f2 = baseFixture();
+    f2.matches = [{ a: ME, b: 'x1' }, { a: ME, b: 'x2' }, { a: 'x3', b: ME }];
+    f2.recs = [{ id: 'today', status: 'pending', strategy: 'fallback', card: {}, candidate_id: 'f2', user_id: ME, for_date: RUN.today }];
+    const o3 = await runDailyRecommendation(memoryDataSource(f2), RUN);
+    check('가득 찼어도 오늘 저장된 추천은 반환 (slotsFull 표시 없음 — 한도 도달)', o3.kind === 'ok' && !o3.slotsFull && o3.recommendations.length === 1);
+    // 후보가 가득 찼으면 제외 → 다른 후보
+    const f3 = baseFixture();
+    f3.matches = [{ a: 'f1', b: 'y1' }, { a: 'f1', b: 'y2' }, { a: 'y3', b: 'f1' }];
+    const ds3 = memoryDataSource(f3);
+    const o4 = await runDailyRecommendation(ds3, RUN);
+    check('진행 중 매치가 가득 찬 후보(f1)는 제외되고 다른 후보가 선택된다', o4.kind === 'ok' && o4.recommendations.length === 1 && o4.recommendations[0].candidate_id !== 'f1');
+    // 자리 조회 실패는 lookup_failed (자리 없음/후보 없음으로 위장하지 않는다)
+    const f4 = baseFixture();
+    f4.failStages = new Set(['slots']);
+    const o5 = await runDailyRecommendation(memoryDataSource(f4), RUN);
+    check('자리 조회 실패 → lookup_failed(slots)', o5.kind === 'lookup_failed' && o5.stage === 'slots');
+    check('CONVERSATION_SLOT_LIMIT = 3', CONVERSATION_SLOT_LIMIT === 3);
+    // claim 래퍼: 가득 참 → finish(slots_full) / skip(slots_full) → 재훑기 없음
+    const calls: string[] = [];
+    const mk = (script: ('claimed' | 'busy' | 'skip')[], result?: string): ClaimClient => ({
+      async claim() { const c = script.shift() ?? 'busy'; calls.push(`claim:${c}`); return { claim: c, result }; },
+      async finish(_u, _d, r, scanned, cap) { calls.push(`finish:${r}:${scanned}:${cap}`); },
+    });
+    f.matches[2].status = 'active';
+    f.recs = [];
+    const dsf = memoryDataSource(f);
+    const c1 = await runDailyRecommendationWithClaim(dsf, mk(['claimed']), RUN, { retries: 0 });
+    check('claimed + 가득 참 → finish(slots_full)', c1.kind === 'ok' && c1.slotsFull === true && calls.join() === 'claim:claimed,finish:slots_full:0:false');
+    calls.length = 0;
+    const dss = memoryDataSource(baseFixture());
+    const c2 = await runDailyRecommendationWithClaim(dss, mk(['skip'], 'slots_full'), RUN, { retries: 0 });
+    check('skip(slots_full) → 후보를 다시 훑지 않고 slotsFull', c2.kind === 'ok' && c2.slotsFull === true && !c2.exhausted && !dss.touched.has('profiles') && calls.join() === 'claim:skip');
   }
 
   // loadSnapshots: 얼굴 벡터·외모 이벤트 없이 스냅샷 생성

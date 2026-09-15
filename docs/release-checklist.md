@@ -118,7 +118,8 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       `cd apps/mobile && node --experimental-strip-types scripts/preferences-core-selftest.mjs` (#25)
       `cd supabase/functions/_shared/security && node --experimental-strip-types selftest.ts` (#27/#26 — fail-closed 판정)
       `cd apps/admin && node --experimental-strip-types scripts/admin-session-selftest.mjs` (#27 — 세션 토큰·로그인 잠금)
-      `cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts` (#39/#40 — 외모 제외·재정규화·안전 필터·공개 이유·tie-break, 실패 시 exit 1)
+      `cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts` (#39/#40/#24 — 외모 제외·재정규화·안전 필터·공개 이유·tie-break·자리 제한, 실패 시 exit 1)
+      `cd apps/mobile && node --experimental-strip-types scripts/chat-core-selftest.mjs` (#41/#24 — 채팅 병합·종료 안내 문구·자리 안내)
       `bash supabase/tests/run_local_check.sh` 에 포함된 `recommendation_db_test.mjs` (#40 — 실제 DB 위에서 외모 데이터 없이 추천 생성)
 - [ ] 마이그레이션 `0015_no_appearance_onboarding.sql` 이 production DB 에 적용되어 있다 (`profiles.relationship_goal/public_answers(/intro)` 컬럼, `users_guard_onboarding_completion` 트리거)
       — **앱 배포보다 먼저** 적용한다 (새 앱은 이 컬럼에 저장한다)
@@ -136,7 +137,14 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#41) **실기기 두 대**로 상호 수락 → 첫 메시지 → 시작 질문 선택·수정·전송 → 상호 의향 → 만남 확인 → 피드백을 끝까지 확인했다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)
 - [ ] (#41) 실기기에서 네트워크 끊김 → 복귀 시 놓친 메시지가 복구되고, 전송 실패 메시지가 "다시 보내기" 로 중복 없이 전송된다 — **아직 미수행**
 - [ ] (#12) 관리자 웹 `/policy/terms` · `/policy/privacy` · `/policy/community` 가 로그인 없이 열리고 `[ ]` 값(사업자·연락처·시행일·리전·본인확인 기관)이 채워져 있다. 법률 검토 완료. 앱 release 빌드에 `EXPO_PUBLIC_POLICY_BASE_URL` 이 설정되어 로그인·내 정보 화면 링크가 실제로 열린다
-- [ ] (#24) 마이그레이션 `0022_funnel_views.sql` 적용. 관리자 `/funnel` 이 열리고, 베타 시작 후 첫 주에 표본 5건을 raw query(`funnel_pair_facts`)와 대조한다
+- [ ] (#24) 마이그레이션 `0022_funnel_views.sql` · `0026_conversation_slots_exit_metrics.sql` 적용 (0026 은 `conversation_leave`/`recommendation_accept`/`recommendation_mark_viewed` RPC, `conversation_exits`, `matches.closed_*`, `conversation_pair_metrics`, 퍼널 뷰 재작성 — `sustained_7d` 컬럼 없음).
+      적용 직전 `select * from conversation_slot_overflow` 로 3개 초과 계정을 확인해 둔다 (기존 대화는 건드리지 않는다 — `docs/conversation-policy.md` 1절)
+- [ ] (#24) `daily-recommendation` · `daily-recommendation-batch` 재배포 (`conversation_slot_usage` 조회 — 0026 이전 DB 에 배포하면 lookup_failed 500). 관리자 웹·앱 순서로 배포
+- [ ] (#24) 사용자 JWT 로 `conversation_exits` 를 조회하면 본인 행만 보이고, `conversation_pair_facts`/`conversation_cohorts`/`conversation_slot_usage` 는 권한 오류다
+- [ ] (#24) 두 테스트 계정으로 A 가 나가기 → B 화면에 "상대방이 대화를 종료했어요", B 의 전송이 거부되고 신고 화면은 열린다. A 가 다시 나가기를 눌러도 `analytics_events.conversation_left` 는 1행
+- [ ] (#24) 진행 중 대화 3개인 계정으로 `daily-recommendation` 을 호출하면 200 `slots_full: true` 이고 새 `recommendations` 행이 없다. 4번째 수락(`recommendation_accept`)은 `no_slot_self` 로 아무것도 남기지 않는다
+- [ ] (#24) 관리자 `/funnel` 이 열리고(조회 오류 배너 없음), `/beta` 표에 7일 지속 열이 없다. 베타 시작 후 `psql $env:DATABASE_URL -v as_of="now()" -f supabase/tests/conversation_metrics_raw_check.sql` 결과 `mismatches = 0` 과 원본 cohort 집계를 `/funnel` 수치와 대조해 #24 에 기록한다 — **실제 프로젝트에서 아직 미수행**
+- [ ] (#24) **실기기 두 대**로 `docs/conversation-policy.md` 6절 시나리오(3개 채우기 → 4번째 수락 안내 → 나가기 → 상대 안내 → 재수락 → 재추천 없음)를 끝까지 확인했다 — **아직 미수행**
 - [ ] (#20) 마이그레이션 `0021_server_errors.sql` 적용. release 빌드에 `EXPO_PUBLIC_SENTRY_DSN`·`EXPO_PUBLIC_APP_ENV=production` 이 설정되어 있고 Sentry 에 첫 이벤트가 보인다 — **실기기 미검증**
 - [ ] (#20) Sentry 이벤트·`server_errors` 행에 전화번호·이메일·토큰·얼굴 경로·메시지 원문이 없다 (표본 확인). 관리자 `/errors` 가 열린다
 - [ ] (#15/#16) 마이그레이션 `0020_moderation.sql` 적용 · cron(`moderation_lift_expired_suspensions` 1시간) 등록. 관리자 웹 신고 화면에서 경고/7일 정지/영구 차단/기각이 동작하고 `moderation_actions` 에 기록된다

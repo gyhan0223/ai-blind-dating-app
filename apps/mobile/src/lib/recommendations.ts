@@ -1,4 +1,5 @@
 import { track } from './analytics';
+import type { AcceptResult } from './chatCore';
 import { supabase } from './supabase';
 
 /**
@@ -64,6 +65,8 @@ export type TodayRecommendations = {
   exhausted: boolean;
   /** 다른 요청(앱·배치)이 지금 생성 중이라 아직 결과가 없다 — 잠시 후 다시 조회 (#22) */
   inProgress: boolean;
+  /** 진행 중인 대화가 3개라 오늘의 새 소개를 만들지 않았다 (#24). 자리가 생기면 다음 소개부터 재개된다 */
+  slotsFull: boolean;
 };
 
 /** 오늘의 추천을 가져온다 (없으면 서버가 생성). 서버가 생성 중이면 짧게 기다렸다가 다시 요청한다. */
@@ -82,6 +85,7 @@ export async function fetchTodayRecommendations(): Promise<TodayRecommendations>
         dailyLimit: data?.daily_limit ?? 1,
         exhausted: data?.exhausted ?? false,
         inProgress,
+        slotsFull: data?.slots_full === true,
       };
     }
     await new Promise((r) => setTimeout(r, 1500));
@@ -163,58 +167,64 @@ export const SKIP_CATEGORIES: {
 ];
 
 /**
+ * 추천 카드를 실제로 표시했음을 서버에 기록한다 (#24 — 생성/확인/수락 구분). 멱등이며 실패해도 화면을 막지 않는다.
+ */
+export async function markRecommendationViewed(recommendationId: string): Promise<void> {
+  try {
+    await supabase.rpc('recommendation_mark_viewed', { p_recommendation_id: recommendationId });
+  } catch {
+    // 열람 기록 실패는 조용히 무시 (다음 표시 때 다시 시도된다)
+  }
+}
+
+export type DecisionResult = {
+  /** 상호 매치가 생겼는지 */
+  matched: boolean;
+  /** 수락 결과 (#24). skipped 면 null. no_slot_* 는 상대의 거절이 아니며 추천은 pending 으로 남는다 */
+  result: AcceptResult | null;
+};
+
+/**
  * 추천에 대한 결정.
- * 수락 시 like 를 저장하고, 상호 좋아요라면 DB 트리거가 매치를 만든다.
- * @returns 상호 매치가 생겼는지 여부
+ *  * 수락: 서버 RPC recommendation_accept 가 추천 상태·좋아요·매치 생성을 한 트랜잭션으로 처리한다 (#24).
+ *    자리 부족(no_slot_self / no_slot_partner)이면 아무것도 저장되지 않고 결과만 돌아온다 — 다시 시도하거나 넘길 수 있다.
+ *  * 넘김: 추천 상태와 사유만 저장한다.
  */
 export async function decideRecommendation(
   rec: Recommendation,
   decision: 'accepted' | 'skipped',
   skipCategory?: SkipCategory | null,
   skipDetail?: string | null,
-): Promise<{ matched: boolean }> {
+): Promise<DecisionResult> {
   const { data: auth } = await supabase.auth.getUser();
   const userId = auth.user?.id;
   if (!userId) throw new Error('로그인이 필요합니다.');
 
-  const { error: updateErr } = await supabase
-    .from('recommendations')
-    .update({
-      status: decision,
-      decided_at: new Date().toISOString(),
-      skip_reason: decision === 'skipped' ? (skipCategory ?? null) : null,
-      skip_reason_detail: decision === 'skipped' ? (skipDetail ?? null) : null,
-    })
-    .eq('id', rec.id);
-  if (updateErr) throw new Error('처리하지 못했습니다.');
-
   if (decision === 'skipped') {
+    const { error: updateErr } = await supabase
+      .from('recommendations')
+      .update({
+        status: 'skipped',
+        decided_at: new Date().toISOString(),
+        skip_reason: skipCategory ?? null,
+        skip_reason_detail: skipDetail ?? null,
+      })
+      .eq('id', rec.id);
+    if (updateErr) throw new Error('처리하지 못했습니다.');
     track('recommendation_skipped', {
       recommendation_id: rec.id,
       strategy: rec.strategy,
       reason: skipCategory ?? null,
       reason_detail: skipDetail ?? null,
     });
-    return { matched: false };
+    return { matched: false, result: null };
   }
 
-  const { error: likeErr } = await supabase.from('likes').insert({
-    from_user_id: userId,
-    to_user_id: rec.candidate_id,
-    recommendation_id: rec.id,
-  });
-  // 중복 좋아요(재시도)는 무시
-  if (likeErr && !`${likeErr.message}`.includes('duplicate')) {
-    throw new Error('처리하지 못했습니다.');
-  }
-  track('recommendation_accepted', { recommendation_id: rec.id, strategy: rec.strategy });
-
-  const [a, b] = [userId, rec.candidate_id].sort();
-  const { data: match } = await supabase
-    .from('matches')
-    .select('id')
-    .eq('user_a', a)
-    .eq('user_b', b)
-    .maybeSingle();
-  return { matched: match != null };
+  const { data, error } = await supabase.rpc('recommendation_accept', { p_recommendation_id: rec.id });
+  if (error) throw new Error('처리하지 못했습니다.');
+  const obj = (data ?? {}) as { result?: string; match_id?: string | null };
+  const result = (['matched', 'liked', 'no_slot_self', 'no_slot_partner', 'already_matched'] as const).find((r) => r === obj.result) ?? null;
+  if (!result) throw new Error('처리하지 못했습니다.');
+  // 수락 이벤트는 서버(RPC)가 기록한다 — 클라이언트 track 없음
+  return { matched: result === 'matched', result };
 }

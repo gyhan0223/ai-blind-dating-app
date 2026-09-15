@@ -225,3 +225,63 @@ export function isBothConfirmed(state: string): boolean {
 export function canReportOutcome(state: string, mutualInterestAt: string | null): boolean {
   return mutualInterestAt != null || (state !== 'none' && state !== 'interest_withdrawn');
 }
+
+// ---------------------------------------------------------------------------
+// 동시 대화 3개 제한 · 나가기 (#24) — 화면 문구는 서버 사실만 옮긴다 (호감·실패로 해석하지 않는다)
+// ---------------------------------------------------------------------------
+/** 서버 conversation_slot_limit() 와 같은 값 (서버가 최종 강제한다 — 화면은 안내만) */
+export const CONVERSATION_SLOT_LIMIT = 3;
+
+export type MatchCloseKind = 'left' | 'blocked' | 'account' | 'admin' | 'unknown';
+
+/** 나가기 이유 (선택 응답, 상대 비공개). 서버 conversation_exits.reason 허용값과 같다 */
+export type ExitReason = 'no_reply' | 'not_a_fit' | 'moved_elsewhere' | 'after_meetup' | 'other';
+export const EXIT_REASONS: { value: ExitReason; label: string }[] = [
+  { value: 'no_reply', label: '답장이 없어요' },
+  { value: 'not_a_fit', label: '대화가 잘 맞지 않아요' },
+  { value: 'moved_elsewhere', label: '이미 다른 연락수단으로 연락하고 있어요' },
+  { value: 'after_meetup', label: '만남 이후 종료하고 싶어요' },
+  { value: 'other', label: '기타' },
+];
+
+/** 진행 중 대화 수 안내 ("2/3"). 상대의 개수는 어디에도 표시하지 않는다 */
+export function slotsLabel(activeCount: number, limit = CONVERSATION_SLOT_LIMIT): string {
+  return `${Math.max(0, Math.min(activeCount, limit))}/${limit}`;
+}
+
+export function slotsAreFull(activeCount: number, limit = CONVERSATION_SLOT_LIMIT): boolean {
+  return activeCount >= limit;
+}
+
+/**
+ * 종료된 대화의 안내 문구. 종료 이유는 서버가 상대에게 주지 않으므로 여기에도 없다.
+ * 활성 매치면 null.
+ */
+export function closedNotice(input: {
+  matchStatus: string;
+  closeKind: MatchCloseKind | null | undefined;
+  closedBy: string | null | undefined;
+  myId: string | null | undefined;
+}): string | null {
+  if (input.matchStatus === 'active') return null;
+  if (input.closeKind === 'left') {
+    if (input.closedBy && input.myId && input.closedBy === input.myId) return '내가 종료한 대화예요';
+    return '상대방이 대화를 종료했어요';
+  }
+  return '종료된 대화예요';
+}
+
+/** 수락 RPC 결과 → 사용자 안내. 자리 부족은 상대의 거절이 아니다 */
+export type AcceptResult = 'matched' | 'liked' | 'no_slot_self' | 'no_slot_partner' | 'already_matched';
+export function acceptResultNotice(result: AcceptResult, limit = CONVERSATION_SLOT_LIMIT): string | null {
+  switch (result) {
+    case 'no_slot_self':
+      return `진행 중인 대화가 ${limit}개예요. 대화를 하나 종료하면 다음 소개부터 다시 시작돼요.`;
+    case 'no_slot_partner':
+      return '상대가 지금은 새 대화를 시작할 수 없어요. 오늘 다시 시도하거나 이번에는 넘길 수 있어요.';
+    case 'already_matched':
+      return '이전에 연결됐던 분이에요. 같은 분은 다시 소개되지 않아요.';
+    default:
+      return null;
+  }
+}
