@@ -57,7 +57,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0021 순서대로 — 0015~0021 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
+# 마이그레이션 적용 (0001 → 0022 순서대로 — 0015~0022 는 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -372,7 +372,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 
 ## 다음 개발 우선순위 (#30)
 
-1. #24 퍼널 측정 대시보드 (이벤트·집계 뷰는 #41 에서 제공 — `docs/meetup-flow.md` 5절). #22 멱등성·배치와 #23 재추천/재시도 주기는 구현됨 — 남은 것은 실제 프로젝트에 pg_cron 등록·운영 확인
+1. 실제 프로젝트 운영 확인: pg_cron 등록(추천 배치·Push 발송·익명화·정지 해제), 대시보드 `/funnel` 수치와 raw query 표본 대조(#24), 관찰 기간·cohort 기준은 `docs/funnel-metrics.md`
 2. #15/#16(신고 운영 정책·감사·rate limit·위험 신호), #17 Push, #13/#14 삭제 파이프라인은 구현됨 — 남은 것은 EAS 연결·APNs·실기기 수신, 실제 프로젝트에서 auth 삭제 경로·cron 확인, 법률 검토 뒤 사유·기간 확정
 3. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기), #11 얼굴 데이터 보관 정책
 4. #21 실기기 E2E (두 계정으로 소개 수락 → 대화 → 상호 의향 → 만남 확인 → 피드백 — #41 은 로컬 DB/순수 로직 검증까지만 마침)

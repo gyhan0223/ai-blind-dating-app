@@ -61,6 +61,11 @@ if [[ "${WITH_MEETUP_CONCURRENCY_TESTS:-1}" == "1" && -f meetup_concurrency_test
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash meetup_concurrency_test.sh
 fi
 
+if [[ "${WITH_FUNNEL_TESTS:-1}" == "1" && -f funnel_tests.sql ]]; then
+  echo "running funnel tests (#24 — 사용자/매치 쌍 퍼널 뷰 · legacy 분리 · 미응답 미집계)"
+  $PSQL -d "$DB_NAME" -f funnel_tests.sql
+fi
+
 if [[ "${WITH_SERVER_ERRORS_TESTS:-1}" == "1" && -f server_errors_tests.sql ]]; then
   echo "running server errors tests (#20 — 서버 전용 기록 · fingerprint · prune)"
   $PSQL -d "$DB_NAME" -f server_errors_tests.sql
