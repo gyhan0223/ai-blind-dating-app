@@ -33,6 +33,7 @@ export type FaceErrorCode =
   | 'user_action_required'
   | 'provider_unavailable'
   | 'already_verified'
+  | 'beta_admission_required'
   | 'unknown';
 
 export type FaceErrorAction = 'retry' | 'settings' | 'wait' | 'continue';
@@ -121,6 +122,11 @@ export const FACE_ERROR_MESSAGES: Record<FaceErrorCode, FaceErrorMessage> = {
     body: '다음 단계로 이동할게요.',
     action: 'continue',
   },
+  beta_admission_required: {
+    title: '아직 입장 전이에요',
+    body: '지금은 초대받은 분만 시작할 수 있어요. 초대코드를 입력하거나 대기 등록을 해 주세요.',
+    action: 'continue',
+  },
   unknown: {
     title: '얼굴 확인 중 문제가 생겼어요',
     body: '잠시 후 다시 시도해 주세요.',
@@ -155,6 +161,7 @@ export function mapStartFailure(res: StartResponseLike): { code: FaceErrorCode; 
   const err = typeof res.body?.error === 'string' ? res.body.error : '';
   if (res.status === 401) return { code: 'unknown' };
   if (err === 'already_verified') return { code: 'already_verified' };
+  if (err === 'beta_admission_required') return { code: 'beta_admission_required' }; // #26 — 앱은 입장 화면으로 보낸다
   if (err === 'rate_limited') {
     const retry = typeof res.body?.retryAfterSeconds === 'number' ? res.body.retryAfterSeconds : undefined;
     return { code: 'too_many_attempts', retryAfterSeconds: retry };

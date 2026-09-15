@@ -11,9 +11,14 @@
  *     (DB 트리거가 인증 전 완료를 거부하므로 클라이언트가 임의로 통과할 수 없다).
  */
 
-export type ResumeStep = 'identity' | 'face' | 'profile' | 'intro' | 'questionnaire' | 'values' | 'preferences' | 'done';
+export type ResumeStep = 'beta' | 'identity' | 'face' | 'profile' | 'intro' | 'questionnaire' | 'values' | 'preferences' | 'done';
+
+/** 폐쇄 베타 입장 상태 (#26) — 서버 RPC beta_access_state() 값. open = 게이트 꺼짐(일반 공개) */
+export type BetaAccess = 'open' | 'admitted' | 'waitlisted' | 'invite_required';
 
 export type OnboardingProgress = {
+  /** 베타 입장 상태 — 허가 전에는 본인확인으로 나아가지 않는다 (서버가 최종 강제) */
+  betaAccess: BetaAccess;
   identityVerified: boolean;
   faceVerified: boolean;
   /** profiles 행 존재 (기본 정보) */
@@ -31,6 +36,8 @@ export type OnboardingProgress = {
 
 /** 순서대로 첫 번째 미완료 단계를 돌려준다. 전부 완료면 'done'. */
 export function resolveOnboardingStep(p: OnboardingProgress): ResumeStep {
+  // 베타 게이트: 이미 인증까지 마친 사용자는 게이트가 나중에 켜져도 막지 않는다 (서버도 온보딩 완료 전이만 막는다)
+  if ((p.betaAccess === 'invite_required' || p.betaAccess === 'waitlisted') && !p.identityVerified) return 'beta';
   if (!p.identityVerified) return 'identity';
   if (!p.faceVerified) return 'face';
   if (!p.hasProfile) return 'profile';
@@ -43,7 +50,9 @@ export function resolveOnboardingStep(p: OnboardingProgress): ResumeStep {
 
 /** 단계 → 라우트 ('done' 은 홈) */
 export function routeForResumeStep(step: ResumeStep): string {
-  return step === 'done' ? '/(tabs)' : `/onboarding/${step}`;
+  if (step === 'done') return '/(tabs)';
+  if (step === 'beta') return '/auth/beta';
+  return `/onboarding/${step}`;
 }
 
 /**

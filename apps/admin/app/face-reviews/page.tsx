@@ -20,20 +20,21 @@ export const dynamic = 'force-dynamic';
  * - 승인 조건은 서버(admin-face-review)가 강제한다: Didit 라이브니스 Approved · liveness_passed · reference_path.
  *   조건이 없으면 관리자도 승인할 수 없다.
  * - 중복으로 매칭된 상대 사용자 정보·얼굴 이미지는 조회/표시하지 않는다. 세션 id 는 앞 8자만 보여준다.
- * - 처리자(ADMIN_ACTOR_LABEL)·시각·결과는 face_verification_reviews 에 기록된다.
+ * - 처리자(로그인한 운영자 이름, #27)·시각·결과는 face_verification_reviews 와 admin_audit_log 에 기록된다.
  */
 
-const ACTOR = () => (process.env.ADMIN_ACTOR_LABEL ?? 'admin-web').slice(0, 64);
 
 async function runAction(formData: FormData) {
   'use server';
   const { requireAdmin: guard } = await import('@/lib/adminAuth');
-  await guard();
+  const { recordAdminAudit } = await import('@/lib/audit');
+  const session = await guard();
   const action = String(formData.get('action') ?? '');
   const rowId = String(formData.get('rowId') ?? '');
   const note = String(formData.get('note') ?? '').trim().slice(0, 500);
   if (!['approve', 'reject', 'repair'].includes(action) || !rowId) redirect('/face-reviews?error=invalid');
-  const res = await callAdminFaceReview({ action: action as AdminFaceAction, rowId, actor: ACTOR(), note: note || null });
+  const res = await callAdminFaceReview({ action: action as AdminFaceAction, rowId, actor: session.actor, note: note || null });
+  await recordAdminAudit(session.actor, 'face_review', 'face_verification', rowId, { action, ok: res.ok, result: res.ok ? res.status : res.error });
   revalidatePath('/face-reviews');
   redirect(res.ok ? `/face-reviews?done=${encodeURIComponent(res.status)}` : `/face-reviews?error=${encodeURIComponent(res.error)}`);
 }

@@ -9,6 +9,7 @@
  * POST { action: 'reactivate' } → 탈퇴 상태 복구 (재로그인 후 호출)
  */
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
+import { enforceRateLimit } from '../_shared/rateLimit.ts';
 
 type Db = ReturnType<typeof serviceClient>;
 
@@ -54,6 +55,10 @@ Deno.serve(async (req) => {
 
   const body = await req.json().catch(() => ({}));
   const db = serviceClient();
+
+  // 남용 방지 (#27): 탈퇴/복구 토글 연타 방지 — 사용자당 5회/시간
+  const rl = await enforceRateLimit(db, 'delete-account', auth.userId, 5, 3600, 'delete-account');
+  if (rl) return rl;
 
   if (body.action === 'reactivate') {
     const { data: me } = await db.from('users').select('status, purged_at').eq('id', auth.userId).maybeSingle();

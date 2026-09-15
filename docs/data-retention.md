@@ -41,6 +41,9 @@
 | `blocks` | 차단 유지 | 유지 | 삭제(cascade) |
 | `analytics_events` · `device_events` | 측정·남용 탐지 | `user_id` null (연결 해제) | 〃 |
 | `recommendation_runs` | 배치 기록 | 삭제 | 삭제 |
+| `beta_waitlist` (#26) | 폐쇄 베타 대기 (지역·출생연도·성별) | 삭제 (트리거 `users_purged_waitlist`) | 삭제(cascade) |
+| `users.cohort_id` (#26) | cohort 측정 | 유지 (개인 식별 정보 아님) | 삭제 |
+| `rate_limit_counters` (#27) | 남용 방지 카운터 (사용자 id 키) | 2일 뒤 `rate_limit_prune` — 사용자별 삭제 없음 | 〃 |
 
 ## 3. 얼굴 데이터 (#11) — 인증 목적, 최소 수집
 

@@ -1,5 +1,6 @@
 import type { OnboardingStep } from '@/constants/options';
 import { hasRequiredPublicAnswers, QUESTIONS, relationshipGoalLabel } from '@/constants/questions';
+import { fetchBetaAccessState } from './beta';
 import { type OnboardingProgress, type ResumeStep, resolveOnboardingStep } from './onboardingCore';
 import type { AppUser } from './session';
 import { supabase } from './supabase';
@@ -26,7 +27,8 @@ export async function advanceOnboarding(next: OnboardingStep) {
  * 외모 취향 응답·얼굴 벡터는 조회하지 않는다 — 완료 조건이 아니다 (#39).
  */
 export async function loadOnboardingProgress(user: AppUser): Promise<OnboardingProgress> {
-  const [profileRes, responsesRes, privateRes, prefsRes] = await Promise.all([
+  const [beta, profileRes, responsesRes, privateRes, prefsRes] = await Promise.all([
+    fetchBetaAccessState(),
     supabase.from('profiles').select('user_id, relationship_goal, public_answers').eq('user_id', user.id).maybeSingle(),
     supabase
       .from('questionnaire_responses')
@@ -40,6 +42,7 @@ export async function loadOnboardingProgress(user: AppUser): Promise<OnboardingP
   }
   const profile = profileRes.data as { relationship_goal: string | null; public_answers: unknown } | null;
   return {
+    betaAccess: beta.state,
     identityVerified: user.identity_verified,
     faceVerified: user.face_verified,
     hasProfile: profile != null,

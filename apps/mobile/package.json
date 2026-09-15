@@ -57,7 +57,8 @@
     "sdk:verify-no-token-log": "bash scripts/verify-sdk-no-token-log.sh",
     "onboarding:selftest": "node --experimental-strip-types scripts/onboarding-resume-selftest.mjs",
     "chat:selftest": "node --experimental-strip-types scripts/chat-core-selftest.mjs",
-    "redact:selftest": "node --experimental-strip-types scripts/redact-selftest.mjs"
+    "redact:selftest": "node --experimental-strip-types scripts/redact-selftest.mjs",
+    "preferences:selftest": "node --experimental-strip-types scripts/preferences-core-selftest.mjs"
   },
   "private": true
 }

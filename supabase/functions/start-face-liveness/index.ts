@@ -19,6 +19,7 @@
  * (문서: docs/face-liveness-didit.md)
  */
 import { requireFaceProviderKind } from '../_shared/env/env.ts';
+import { enforceBetaAccess } from '../_shared/beta.ts';
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
 import { getFaceLivenessProvider } from '../_shared/face/FaceLivenessProvider.ts';
 import { handleStartFaceLiveness } from '../_shared/face/startFaceLivenessCore.ts';
@@ -46,10 +47,15 @@ Deno.serve(async (req) => {
 
   const body = await req.json().catch(() => ({}));
 
+  // 폐쇄 베타 (#26): 입장 허가 없는 계정은 얼굴 인증 세션을 만들 수 없다 (fail-closed)
+  const db = serviceClient();
+  const beta = await enforceBetaAccess(db, auth.userId, 'start-face-liveness');
+  if (beta) return beta;
+
   try {
     const res = await handleStartFaceLiveness(
       { userId: auth.userId, body },
-      { provider, db: new SupabaseFaceDb(serviceClient()), now: () => new Date(), log },
+      { provider, db: new SupabaseFaceDb(db), now: () => new Date(), log },
     );
     return json(res.body, res.status);
   } catch (err) {

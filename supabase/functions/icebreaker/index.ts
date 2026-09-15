@@ -11,6 +11,7 @@
  *    문구가 다시 노출되지 않게 한다.
  */
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
+import { enforceRateLimit } from '../_shared/rateLimit.ts';
 import {
   buildStarterCache,
   generateStarterQuestions,
@@ -29,6 +30,9 @@ Deno.serve(async (req) => {
   if (!conversationId) return json({ error: 'invalid_body' }, 400);
 
   const db = serviceClient();
+  // 남용 방지 (#27): 사용자당 30회/시간 (대화방마다 캐시되므로 정상 사용은 몇 번이면 충분)
+  const rl = await enforceRateLimit(db, 'icebreaker', auth.userId, 30, 3600, 'icebreaker');
+  if (rl) return rl;
   const { data: conv, error: convError } = await db
     .from('conversations')
     .select('id, icebreaker, matches(user_a, user_b, status)')

@@ -82,7 +82,7 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 ## Admin
 
 - [ ] `SUPABASE_SERVICE_ROLE_KEY` 가 서버 환경변수로만 존재한다 (`NEXT_PUBLIC_*` 금지, 브라우저 노출 없음)
-- [ ] `ADMIN_PASSWORD` 가 기본값(`change-me`)이 아니다
+- [ ] `ADMIN_PASSWORD` 가 기본값(`change-me`)이 아니다 · `ADMIN_SESSION_SECRET` 이 설정되어 있다 (#27)
 - [ ] 관리자 웹 **얼굴 검토** 화면이 열리고, 조건(라이브니스 Approved · liveness_passed · 참조 이미지) 없는 행은 승인이 409 로 거부된다
 - [ ] 얼굴 검토 화면에 중복 매칭된 상대 사용자 정보·얼굴 이미지가 표시되지 않는다 (세션 id 는 앞 8자만)
 
@@ -114,7 +114,10 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       `cd apps/mobile && npm run sdk:verify-no-token-log`
       `cd apps/admin && npx tsc --noEmit`
       `cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.mjs`
-      `cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs` (#39 — 외모 데이터 없는 완료·인증 미완료 홈 차단)
+      `cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs` (#39/#26 — 외모 데이터 없는 완료·인증 미완료 홈 차단·베타 입장 단계)
+      `cd apps/mobile && node --experimental-strip-types scripts/preferences-core-selftest.mjs` (#25)
+      `cd supabase/functions/_shared/security && node --experimental-strip-types selftest.ts` (#27/#26 — fail-closed 판정)
+      `cd apps/admin && node --experimental-strip-types scripts/admin-session-selftest.mjs` (#27 — 세션 토큰·로그인 잠금)
       `cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts` (#39/#40 — 외모 제외·재정규화·안전 필터·공개 이유·tie-break, 실패 시 exit 1)
       `bash supabase/tests/run_local_check.sh` 에 포함된 `recommendation_db_test.mjs` (#40 — 실제 DB 위에서 외모 데이터 없이 추천 생성)
 - [ ] 마이그레이션 `0015_no_appearance_onboarding.sql` 이 production DB 에 적용되어 있다 (`profiles.relationship_goal/public_answers(/intro)` 컬럼, `users_guard_onboarding_completion` 트리거)
@@ -146,3 +149,12 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#17) **실기기(Android 우선)** 에서 알림 권한 허용 → `push_tokens` 행 생성 → 상대가 메시지 전송 → 1분 안에 "새 메시지가 도착했어요" 수신 → 탭하면 해당 채팅방 — **아직 미수행**
 - [ ] (#17) 알림 본문에 메시지 원문·상대 닉네임이 없다 (잠금화면 확인). 알림 설정 스위치를 끄면 오지 않는다 (`skipped_reason='pref_off'`)
 - [ ] (#17) 로그아웃 후 이전 계정의 알림이 오지 않는다 (`push_tokens` 에 행 없음). iOS 는 Apple Developer·APNs 키 등록 후 검증
+- [ ] (#27) 마이그레이션 `0023_security_hardening.sql` 적용 (`rate_limit_hit`·`admin_audit_log`·추천 변경 가드·신고 상한). `verify-identity`·`icebreaker`·`delete-account`·`daily-recommendation`·`start-face-liveness` 재배포 — **0023/0025 보다 먼저 배포하면 안 된다** (rate limit·베타 RPC 가 없으면 fail-closed 로 503)
+- [ ] (#27) `bash supabase/tests/run_local_check.sh` 의 `security_tests.sql` 이 통과했다 (RLS 전수 · DEFINER allowlist · 뷰 비공개 · anon 0행). production DB 에서도 `select relname from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r' and not c.relrowsecurity` → 0행
+- [ ] (#27) 사용자 JWT 로 `recommendations` 의 `score_total`/`card` 를 update 하면 거부되고, 같은 사용자가 하루 11번째 신고를 넣으면 거부된다. `rate_limit_hit`·`admin_audit_record` 를 사용자 JWT 로 호출하면 거부된다
+- [ ] (#27) 관리자 웹: `ADMIN_SESSION_SECRET` 이 설정되어 있다 (16자+). 잘못된 비밀번호 5회 → 잠금 안내가 뜨고 `admin_audit_log` 에 `admin_login_failed/locked` 가 남는다. 정지·신고 처리·얼굴 검토·삭제 요청·베타 조치가 `/audit` 에 처리자 이름과 함께 보인다
+- [ ] (#27) 관리자 로그인 쿠키(`bonsim_admin`)가 `p.sig` 형식이고 12시간 뒤 만료된다. 예전 형식(sha256 고정값)으로는 로그인되지 않는다
+- [ ] (#25) 마이그레이션 `0024_profile_edit.sql` 적용. 온보딩 완료 계정으로 프로필 `birth_year`/`gender` update 가 거부되고, `preferences_save` 에 `appearance_importance` 를 넣으면 거부된다. 내 정보 → 소개/기본 정보/선호 조건/가치관 수정 화면이 열리고 저장 뒤 `analytics_events.profile_updated/preferences_updated` 에 컬럼 이름만 남는다 (값 없음) — **실기기 미검증**
+- [ ] (#26) 마이그레이션 `0025_beta_cohorts.sql` 적용. 관리자 `/beta` 에서 cohort 생성 → 게이트 켜기 → 새 계정으로 로그인하면 입장 화면(초대코드/대기)이 뜨고, 코드 없이 `verify-identity` 를 직접 호출하면 403 `beta_admission_required`, `profiles` insert 가 거부된다. 초대코드 입장 뒤 온보딩이 진행된다 — **실기기 미검증**
+- [ ] (#26) 대기 등록 계정에 `profiles`/`face_verifications`/`user_identities` 행이 없다. 운영자 "대기자 입장" 뒤 `notification_events.beta_admitted` 1건이 쌓이고 (cron `send-push`) 알림이 온다. 게이트를 끄면 누구나 가입되고 cohort 통계는 유지된다
+- [ ] (#26/#27) 잘못된 초대코드 11번째 시도가 `rate_limited` 로 거부된다. 로그인 후 `verify-identity` request 를 10분 안에 6번 호출하면 429 다

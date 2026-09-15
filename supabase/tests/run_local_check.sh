@@ -92,6 +92,21 @@ if [[ "${WITH_RECOMMENDATION_RUNS_TESTS:-1}" == "1" && -f recommendation_runs_te
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash recommendation_claim_concurrency_test.sh
 fi
 
+if [[ "${WITH_SECURITY_TESTS:-1}" == "1" && -f security_tests.sql ]]; then
+  echo "running security tests (#27 — RLS 전수 · SECURITY DEFINER allowlist · 뷰 비공개 · anon 0행 · 추천 변경 범위 · 신고 상한 · 서버 전용 RPC)"
+  $PSQL -d "$DB_NAME" -f security_tests.sql
+fi
+
+if [[ "${WITH_PROFILE_EDIT_TESTS:-1}" == "1" && -f profile_edit_tests.sql ]]; then
+  echo "running profile edit tests (#25 — 성별/출생연도 잠금 · preferences_save 원자성 · 변경 이벤트 컬럼명만)"
+  $PSQL -d "$DB_NAME" -f profile_edit_tests.sql
+fi
+
+if [[ "${WITH_BETA_TESTS:-1}" == "1" && -f beta_tests.sql ]]; then
+  echo "running beta tests (#26 — 게이트 · 초대코드 · 대기 목록 · 운영자 입장 · 정원 · 공개 전환)"
+  $PSQL -d "$DB_NAME" -f beta_tests.sql
+fi
+
 if [[ "${WITH_RECOMMENDATION_DB_TEST:-1}" == "1" && -f recommendation_db_test.mjs ]]; then
   if command -v node >/dev/null 2>&1; then
     echo "running recommendation db test (#40 — DB → snapshot → engine → card, 외모 데이터 없이)"

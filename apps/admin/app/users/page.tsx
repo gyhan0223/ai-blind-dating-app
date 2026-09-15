@@ -2,6 +2,7 @@ import { revalidatePath } from 'next/cache';
 import React from 'react';
 import { callAccountPurge } from '@/lib/accountDeletion';
 import { requireAdmin } from '@/lib/adminAuth';
+import { recordAdminAudit } from '@/lib/audit';
 import { moderateUser } from '@/lib/moderation';
 import { adminClient } from '@/lib/supabaseAdmin';
 
@@ -10,13 +11,14 @@ export const dynamic = 'force-dynamic';
 async function setUserStatus(formData: FormData) {
   'use server';
   const { requireAdmin: guard } = await import('@/lib/adminAuth');
-  await guard();
+  const session = await guard();
   const userId = String(formData.get('userId'));
   const status = String(formData.get('status'));
   if (!['active', 'suspended'].includes(status)) return;
   const db = adminClient();
-  // 상태 변경은 RPC 로만 (moderation_actions 감사 기록 — #15)
-  await moderateUser(db, { userId, action: status === 'suspended' ? 'suspend' : 'unsuspend', reason: '사용자 목록에서 수동 조치', reportId: null, actor: 'admin', days: null });
+  // 상태 변경은 RPC 로만 (moderation_actions 감사 기록 — #15). 처리자 = 로그인한 운영자 이름 (#27)
+  const res = await moderateUser(db, { userId, action: status === 'suspended' ? 'suspend' : 'unsuspend', reason: '사용자 목록에서 수동 조치', reportId: null, actor: session.actor, days: null });
+  await recordAdminAudit(session.actor, 'user_status_set', 'user', userId, { status, ok: res.ok });
   revalidatePath('/users');
 }
 
@@ -24,9 +26,10 @@ async function setUserStatus(formData: FormData) {
 async function purgeNow(formData: FormData) {
   'use server';
   const { requireAdmin: guard } = await import('@/lib/adminAuth');
-  await guard();
+  const session = await guard();
   const userId = String(formData.get('userId'));
-  await callAccountPurge(userId, false);
+  const res = await callAccountPurge(userId, false);
+  await recordAdminAudit(session.actor, 'user_purge_now', 'user', userId, { ok: res.ok, error: res.ok ? undefined : res.error });
   revalidatePath('/users');
 }
 
