@@ -100,8 +100,8 @@ const ds = {
   async matchedUserIds(userId) {
     return qjson(`select coalesce(json_agg(case when user_a = ${uuid(userId)} then user_b else user_a end), '[]') from public.matches where user_a = ${uuid(userId)} or user_b = ${uuid(userId)}`);
   },
-  async pastRecommendationCandidateIds(userId) {
-    return qjson(`select coalesce(json_agg(candidate_id), '[]') from public.recommendations where user_id = ${uuid(userId)}`);
+  async pastRecommendations(userId) {
+    return qjson(`select coalesce(json_agg(json_build_object('candidate_id', candidate_id, 'status', status, 'for_date', to_char(for_date, 'YYYY-MM-DD'))), '[]') from public.recommendations where user_id = ${uuid(userId)}`);
   },
   async recommendationsForDate(userId, forDate) {
     if (!DATE.test(forDate)) throw new Error('bad date');
@@ -258,6 +258,23 @@ check('신규 사용자에게 외모 데이터가 전혀 없다 (전제)', Numbe
   const out = await run(X);
   check('차단·신고 쌍을 빼면 후보 없음 → exhausted (완화 없음, 인증 미완료 Y3·정지 Y4 도 뽑지 않음)', out.kind === 'ok' && out.exhausted && out.recommendations.length === 0);
   check('exhausted 시 새 행이 생기지 않는다', Number(q(`select count(*) from public.recommendations where user_id = ${uuid(X)}`)) === 1);
+}
+
+// ---------------------------------------------------------------------------
+// 5b) 재추천 주기 (#23): 31일 전 skipped 상대는 다시 후보, 최근 skipped 는 제외
+// ---------------------------------------------------------------------------
+{
+  q(`delete from public.reports where reporter_id = ${uuid(Y2)} and reported_id = ${uuid(X)}`);
+  q(`delete from public.recommendations where user_id = ${uuid(X)}`);
+  q(`delete from public.recommendation_runs where user_id = ${uuid(X)}`);
+  // Y2 를 10일 전에 스킵 → 오늘은 제외 (Y1 은 차단) → exhausted
+  q(`insert into public.recommendations (user_id, candidate_id, for_date, status, card) values (${uuid(X)}, ${uuid(Y2)}, ${lit(TODAY)}::date - 10, 'skipped', '{}')`);
+  const recent = await run(X);
+  check('10일 전 스킵한 상대는 아직 제외 → exhausted', recent.kind === 'ok' && recent.exhausted);
+  q(`update public.recommendations set for_date = ${lit(TODAY)}::date - 31 where user_id = ${uuid(X)} and candidate_id = ${uuid(Y2)}`);
+  const again = await run(X);
+  check('31일 전 스킵한 상대(Y2)는 다시 추천된다', again.kind === 'ok' && !again.exhausted && again.recommendations[0]?.candidate_id === Y2);
+  check('과거 skipped 행은 보존되고 새 pending 행이 추가된다', Number(q(`select count(*) from public.recommendations where user_id = ${uuid(X)} and candidate_id = ${uuid(Y2)}`)) === 1 || Number(q(`select count(*) from public.recommendations where user_id = ${uuid(X)}`)) === 2);
 }
 
 // ---------------------------------------------------------------------------

@@ -61,6 +61,37 @@ if [[ "${WITH_MEETUP_CONCURRENCY_TESTS:-1}" == "1" && -f meetup_concurrency_test
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash meetup_concurrency_test.sh
 fi
 
+if [[ "${WITH_FUNNEL_TESTS:-1}" == "1" && -f funnel_tests.sql ]]; then
+  echo "running funnel tests (#24 — 사용자/매치 쌍 퍼널 뷰 · legacy 분리 · 미응답 미집계)"
+  $PSQL -d "$DB_NAME" -f funnel_tests.sql
+fi
+
+if [[ "${WITH_SERVER_ERRORS_TESTS:-1}" == "1" && -f server_errors_tests.sql ]]; then
+  echo "running server errors tests (#20 — 서버 전용 기록 · fingerprint · prune)"
+  $PSQL -d "$DB_NAME" -f server_errors_tests.sql
+fi
+
+if [[ "${WITH_MODERATION_TESTS:-1}" == "1" && -f moderation_tests.sql ]]; then
+  echo "running moderation tests (#15/#16 — rate limit · 반복 스팸 · 위험 신호(오탐 없음) · 신고 긴급 · 관리자 조치 감사)"
+  $PSQL -d "$DB_NAME" -f moderation_tests.sql
+fi
+
+if [[ "${WITH_ACCOUNT_DELETION_TESTS:-1}" == "1" && -f account_deletion_tests.sql ]]; then
+  echo "running account deletion tests (#13/#11/#14 — 유예 · 익명화 · 상대 이력 보존 · 서버 전용)"
+  $PSQL -d "$DB_NAME" -f account_deletion_tests.sql
+fi
+
+if [[ "${WITH_PUSH_TESTS:-1}" == "1" && -f push_tests.sql ]]; then
+  echo "running push tests (#17 — 토큰/설정 RLS · outbox 트리거 · dequeue/mark 서버 전용)"
+  $PSQL -d "$DB_NAME" -f push_tests.sql
+fi
+
+if [[ "${WITH_RECOMMENDATION_RUNS_TESTS:-1}" == "1" && -f recommendation_runs_tests.sql ]]; then
+  echo "running recommendation runs tests (#22 — claim/busy/skip · lease 만료 재획득 · 서버 전용)"
+  $PSQL -d "$DB_NAME" -f recommendation_runs_tests.sql
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash recommendation_claim_concurrency_test.sh
+fi
+
 if [[ "${WITH_RECOMMENDATION_DB_TEST:-1}" == "1" && -f recommendation_db_test.mjs ]]; then
   if command -v node >/dev/null 2>&1; then
     echo "running recommendation db test (#40 — DB → snapshot → engine → card, 외모 데이터 없이)"

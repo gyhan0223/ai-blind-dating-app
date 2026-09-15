@@ -5,8 +5,9 @@
  *  * 하루 1명. Plus 추천 개수 차등은 PLUS 플래그(호출자)가 꺼져 있어 항상 1 (#29/#39).
  *  * 요청자·후보 모두: status='active' · onboarding_completed · identity_verified · face_verified · age_verified.
  *    onboarding_completed 만 믿지 않는다. 얼굴 벡터(feature_vector) 유무는 인증 판단에 쓰지 않는다.
- *  * 제외: 본인 · 과거에 추천된 적 있는 상대(전체 기간 — 재추천 주기는 #23) · 내가 좋아요한 상대 ·
- *          매치된 적 있는 상대(상태 무관) · 양방향 차단 쌍 · 신고 당사자 쌍(양방향, 전역 제외 아님).
+ *  * 제외: 본인 · 과거 추천 상대 중 pending/accepted(영구) 와 최근 RECOMMENDATION_COOLDOWN_DAYS 안의 skipped/expired (#23) ·
+ *          내가 좋아요한 상대 · 매치된 적 있는 상대(상태 무관) · 양방향 차단 쌍 · 신고 당사자 쌍(양방향, 전역 제외 아님).
+ *    30일이 지난 skipped/expired 상대는 다시 후보가 된다 (좁은 cohort 에서 풀이 마르지 않게 — 좋아요·매치 이력은 영구 제외).
  *    운영 제재(suspended/banned)는 status 로 걸러진다. 신고만으로 다른 사용자에게까지 제외되지 않는다.
  *  * 안전·계정 조회(users/blocks/reports/likes/matches/recommendations) 실패 → lookup_failed. 추천을 계속하지 않는다.
  *    "후보 부족(exhausted)" 과는 다른 결과다.
@@ -14,12 +15,15 @@
  *      - pending  → expired 로 마감하고 응답에서 제외 (오늘 한도에서도 빠져 새 추천을 만든다)
  *      - accepted/skipped → 응답에서만 제외 (이미 상호작용한 추천은 보존하고 오늘 한도에 포함)
  *  * 후보 조회는 user_id 순으로 페이지를 돌며 제외 목록을 뺀 뒤 평가한다. MAX_CANDIDATES_SCANNED 까지
- *    끝까지 훑은 뒤에야 "후보 없음" 으로 판단한다 (앞의 N명만 보고 오판하지 않는다). 상한 초과 규모는 #23.
+ *    끝까지 훑은 뒤에야 "후보 없음" 으로 판단한다 (앞의 N명만 보고 오판하지 않는다).
+ *    상한에 걸리면 capReached=true 로 알린다 — 풀이 500명을 넘는 규모에서는 정렬·샤딩을 정해야 한다 (recommendation_runs.cap_reached 로 관측).
+ *  * 멱등성(#22): 같은 사용자의 동시 실행은 호출자(Edge Function)가 recommendation_run_claim 으로 직렬화한다.
+ *    그래도 insert 가 unique 충돌 등으로 실패하면 오늘 저장된 추천을 다시 읽어 돌려준다 (빈 응답으로 위장하지 않는다).
  *  * 순위: scored(총점 내림차순) → conditions_only, 동점은 (요청자, KST 날짜, 후보 id) 해시 tie-break.
  *    후보가 없어도 필수 조건을 완화하지 않는다. 신규끼리 배정 금지·외모 우대(#38)는 없다.
  *  * 카드에는 공개 필드 allowlist 만 담는다. 원시 점수·차원·비공개 응답·얼굴 데이터는 응답에 없다.
  */
-import type { DataSource, NewRecommendationRow, Row, StoredRecommendation, UserAccountRow } from './dataSource.ts';
+import type { DataSource, NewRecommendationRow, PastRecommendation, Row, StoredRecommendation, UserAccountRow } from './dataSource.ts';
 import { computeMatch, pickStrategy, rankCandidates } from './MatchingEngine.ts';
 import { buildPublicAnswerCards, composeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
 import { loadSnapshots } from './snapshot.ts';
@@ -27,6 +31,8 @@ import type { MatchResult, UserSnapshot } from './types.ts';
 
 export const CANDIDATE_PAGE_SIZE = 100;
 export const MAX_CANDIDATES_SCANNED = 500;
+/** skipped/expired 추천 상대를 다시 후보로 보기까지의 기간 (#23) */
+export const RECOMMENDATION_COOLDOWN_DAYS = 30;
 
 export interface RunInput {
   userId: string;
@@ -48,7 +54,30 @@ export type RunOutcome =
       exhausted: boolean;
       /** 이번 요청에서 평가한 후보 수 (관측용) */
       scanned: number;
+      /** MAX_CANDIDATES_SCANNED 에 걸려 풀을 끝까지 보지 못했는지 (관측용 — #23) */
+      capReached: boolean;
     };
+
+/** YYYY-MM-DD 문자열에 일 수를 더한다 (UTC 기준 날짜 산술 — 시간대 무관) */
+export function addDays(ymd: string, days: number): string {
+  const t = Date.parse(`${ymd}T00:00:00Z`);
+  return new Date(t + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * 과거 추천 중 지금 제외할 상대 (#23):
+ *  - pending / accepted : 영구 제외 (accepted 는 likes 로도 제외되지만 이중 방어)
+ *  - skipped / expired  : for_date 가 (today - cooldown) 이후면 제외, 그 전이면 다시 후보
+ */
+export function excludedByRecommendationHistory(past: PastRecommendation[], today: string, cooldownDays = RECOMMENDATION_COOLDOWN_DAYS): Set<string> {
+  const cutoff = addDays(today, -cooldownDays);
+  const out = new Set<string>();
+  for (const r of past) {
+    if (r.status === 'pending' || r.status === 'accepted') out.add(r.candidate_id);
+    else if (r.for_date >= cutoff) out.add(r.candidate_id);
+  }
+  return out;
+}
 
 /** 요청자·후보 공통 계정 조건 */
 export function accountEligible(u: UserAccountRow | null | undefined): boolean {
@@ -185,18 +214,18 @@ export async function runDailyRecommendation(ds: DataSource, input: RunInput): P
   }
 
   if (countedToday >= dailyLimit) {
-    return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: false, scanned: 0 };
+    return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: false, scanned: 0, capReached: false };
   }
 
   // 4) 제외 목록
   const excluded = new Set<string>([userId, ...blocked, ...reported]);
   try {
     const [past, liked, matched] = await Promise.all([
-      ds.pastRecommendationCandidateIds(userId),
+      ds.pastRecommendations(userId),
       ds.likedUserIds(userId),
       ds.matchedUserIds(userId),
     ]);
-    for (const id of [...past, ...liked, ...matched]) excluded.add(id);
+    for (const id of [...excludedByRecommendationHistory(past, today), ...liked, ...matched]) excluded.add(id);
   } catch {
     return { kind: 'lookup_failed', stage: 'history' };
   }
@@ -214,8 +243,13 @@ export async function runDailyRecommendation(ds: DataSource, input: RunInput): P
   const evaluated: { id: string; result: MatchResult; payload: { snap: UserSnapshot; account: UserAccountRow } }[] = [];
   let offset = 0;
   let scanned = 0;
+  let capReached = false;
   try {
-    while (scanned < MAX_CANDIDATES_SCANNED) {
+    while (true) {
+      if (scanned >= MAX_CANDIDATES_SCANNED) {
+        capReached = true;
+        break;
+      }
       const page = await ds.candidateIdsPage(meSnap.profile.seekingGender, meSnap.profile.gender, offset, CANDIDATE_PAGE_SIZE);
       if (page.length === 0) break;
       offset += page.length;
@@ -240,7 +274,7 @@ export async function runDailyRecommendation(ds: DataSource, input: RunInput): P
 
   const ranked = rankCandidates(evaluated, userId, today);
   if (ranked.length === 0) {
-    return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: true, scanned };
+    return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: true, scanned, capReached };
   }
 
   // 7) 부족한 개수만큼 생성
@@ -271,10 +305,15 @@ export async function runDailyRecommendation(ds: DataSource, input: RunInput): P
     try {
       created.push(await ds.insertRecommendation(row));
     } catch {
-      // 동시 요청으로 같은 후보가 이미 저장된 경우 등 — 이번 응답에서는 건너뛴다 (멱등성 완성은 #22)
-      continue;
+      // 다른 실행이 먼저 저장한 경우(unique 충돌 등) — 빈 응답이 아니라 오늘 저장된 행을 다시 읽어 돌려준다 (#22)
+      try {
+        const stored = (await ds.recommendationsForDate(userId, today)).filter((r) => r.status !== 'expired');
+        return { kind: 'ok', recommendations: stored, dailyLimit, exhausted: false, scanned, capReached };
+      } catch {
+        return { kind: 'lookup_failed', stage: 'reread_today' };
+      }
     }
   }
 
-  return { kind: 'ok', recommendations: [...kept, ...created], dailyLimit, exhausted: false, scanned };
+  return { kind: 'ok', recommendations: [...kept, ...created], dailyLimit, exhausted: false, scanned, capReached };
 }

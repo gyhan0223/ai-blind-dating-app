@@ -1,12 +1,13 @@
 import { router } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { View } from 'react-native';
+import { Pressable, View } from 'react-native';
 import { Button, Field, InlineNotice, Screen, Text } from '@/components/ui';
 import { track } from '@/lib/analytics';
 import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
 import { loadOtpCooldowns, saveOtpCooldowns } from '@/lib/otpCooldown';
 import { type CooldownMap, cooldownRemainingSec, formatCooldown, markSent } from '@/lib/otpCooldownCore';
 import { autoHyphen, formatPhoneKR, normalizePhoneKR } from '@/lib/phone';
+import { openPolicy, POLICY_LINKS_ENABLED } from '@/lib/policyLinks';
 import { supabase } from '@/lib/supabase';
 import { colors, spacing } from '@/theme/tokens';
 
@@ -229,6 +230,16 @@ export default function Login() {
           >
             가입 및 계속하기를 누르면 서비스 이용약관 및{'\n'}개인정보 처리방침에 동의하게 됩니다.
           </Text>
+          {POLICY_LINKS_ENABLED && (
+            <View style={{ flexDirection: 'row', justifyContent: 'center', gap: spacing.md, marginTop: spacing.sm }}>
+              <Pressable onPress={() => openPolicy('terms')} hitSlop={8} accessibilityRole="link">
+                <Text variant="caption" color={colors.accent}>이용약관</Text>
+              </Pressable>
+              <Pressable onPress={() => openPolicy('privacy')} hitSlop={8} accessibilityRole="link">
+                <Text variant="caption" color={colors.accent}>개인정보 처리방침</Text>
+              </Pressable>
+            </View>
+          )}
         </>
       ) : (
         <View style={{ gap: spacing.sm }}>

@@ -121,6 +121,9 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       — **앱 배포보다 먼저** 적용한다 (새 앱은 이 컬럼에 저장한다)
 - [ ] (#41) 마이그레이션 `0016_meetup_flow.sql` 이 production DB 에 적용되어 있다 (`send_message`/`meetup_set_intent`/`meetup_report_outcome`/`meetup_submit_feedback`/`conversation_access` RPC,
       `meetup_outcomes`·`notification_events` 테이블, `messages.client_message_id`, `matches.mutual_interest_at/meetup_confirmed_at`) — 앱과 **같은 릴리스 창**에서 (예전 앱의 만남 화면 저장은 이 시점부터 실패한다)
+- [ ] (#22/#23) 마이그레이션 `0017_recommendation_runs.sql` 이 적용되어 있고(`recommendation_runs`, `recommendation_run_claim/finish`, `recommendation_batch_targets`, recommendations unique 변경),
+      `daily-recommendation` · `daily-recommendation-batch` 가 재배포되어 있으며 pg_cron 에 배치 스케줄이 등록되어 있다 (`select * from cron.job`)
+- [ ] (#22) 같은 계정으로 `daily-recommendation` 을 동시에 두 번 호출해도 오늘 `recommendations` 행이 1건이다. `daily-recommendation-batch` 를 사용자 JWT 로 호출하면 401 이다
 - [ ] (#41) `icebreaker` Edge Function 이 최신 코드로 재배포되어 있다 (v2 캐시 · 공개 필드만 조회). 배포 후 `select count(*) from conversations where icebreaker ? 'lead'` 가 줄어든다 (과거 캐시 덮어쓰기)
 - [ ] (#41) 사용자 JWT 로 `matches` 의 `meetup_state`/`meetup_completed_at` 을 update 하면 0행이고, `meetup_intentions`/`meetup_outcomes`/`meetup_feedback` 에 insert 하면 거부된다
 - [ ] (#41) 두 테스트 계정으로 A 만 yes 일 때 B 의 `meetup_intentions` 조회가 0행이고 매치 `meetup_state` 가 `none` 이다. B 도 yes 면 `mutual_interest` 가 되고 `analytics_events.meetup_mutual_interest` 가 참가자당 1행이다
@@ -129,4 +132,17 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#41) `meetup_pair_summary` 뷰와 `notification_events` 를 사용자 JWT 로 select 하면 권한 오류다
 - [ ] (#41) **실기기 두 대**로 상호 수락 → 첫 메시지 → 시작 질문 선택·수정·전송 → 상호 의향 → 만남 확인 → 피드백을 끝까지 확인했다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)
 - [ ] (#41) 실기기에서 네트워크 끊김 → 복귀 시 놓친 메시지가 복구되고, 전송 실패 메시지가 "다시 보내기" 로 중복 없이 전송된다 — **아직 미수행**
-- [ ] (#41/#17) Push 는 미구현이다 — 앱·문서에 "알림이 간다" 고 약속하지 않는다. `notification_events` outbox 만 쌓인다
+- [ ] (#12) 관리자 웹 `/policy/terms` · `/policy/privacy` · `/policy/community` 가 로그인 없이 열리고 `[ ]` 값(사업자·연락처·시행일·리전·본인확인 기관)이 채워져 있다. 법률 검토 완료. 앱 release 빌드에 `EXPO_PUBLIC_POLICY_BASE_URL` 이 설정되어 로그인·내 정보 화면 링크가 실제로 열린다
+- [ ] (#24) 마이그레이션 `0022_funnel_views.sql` 적용. 관리자 `/funnel` 이 열리고, 베타 시작 후 첫 주에 표본 5건을 raw query(`funnel_pair_facts`)와 대조한다
+- [ ] (#20) 마이그레이션 `0021_server_errors.sql` 적용. release 빌드에 `EXPO_PUBLIC_SENTRY_DSN`·`EXPO_PUBLIC_APP_ENV=production` 이 설정되어 있고 Sentry 에 첫 이벤트가 보인다 — **실기기 미검증**
+- [ ] (#20) Sentry 이벤트·`server_errors` 행에 전화번호·이메일·토큰·얼굴 경로·메시지 원문이 없다 (표본 확인). 관리자 `/errors` 가 열린다
+- [ ] (#15/#16) 마이그레이션 `0020_moderation.sql` 적용 · cron(`moderation_lift_expired_suspensions` 1시간) 등록. 관리자 웹 신고 화면에서 경고/7일 정지/영구 차단/기각이 동작하고 `moderation_actions` 에 기록된다
+- [ ] (#16) 같은 대화에 60초 안 21번째 메시지가 `rate_limited`, 같은 본문 4번째가 `repeated_content` 로 거부되고 앱이 안내 문구를 보여준다. 정상 대화("주말에 카페 갈래요?")는 `moderation_signals` 에 기록되지 않는다
+- [ ] (#13/#11/#14) 마이그레이션 `0019_account_deletion.sql` 적용 · `account-purge` 배포 · cron(`account-purge` batch 일 1회) 등록.
+      탈퇴 테스트 계정을 `deleted_at` 31일 전으로 바꾼 뒤 batch 호출 → `profiles`·`face_verifications` 행 0, storage `faces/<uid>/` 비어 있음, 상대 대화에 "(탈퇴한 사용자의 메시지입니다)" — **실제 프로젝트에서 미수행**
+- [ ] (#14) 관리자 웹 `/delete-account` 가 로그인 없이 열리고 요청이 `/deletion-requests` 에 나타난다. 스토어 제출 정보의 계정 삭제 URL 이 이 주소다
+- [ ] (#17) 마이그레이션 `0018_push_notifications.sql` 적용 · `send-push` 배포 · cron 등록 (`select * from cron.job where jobname = 'send-push'`)
+- [ ] (#17) 사용자 JWT 로 `notification_events_dequeue` 를 호출하면 거부되고, `push_tokens` 는 본인 행만 보인다
+- [ ] (#17) **실기기(Android 우선)** 에서 알림 권한 허용 → `push_tokens` 행 생성 → 상대가 메시지 전송 → 1분 안에 "새 메시지가 도착했어요" 수신 → 탭하면 해당 채팅방 — **아직 미수행**
+- [ ] (#17) 알림 본문에 메시지 원문·상대 닉네임이 없다 (잠금화면 확인). 알림 설정 스위치를 끄면 오지 않는다 (`skipped_reason='pref_off'`)
+- [ ] (#17) 로그아웃 후 이전 계정의 알림이 오지 않는다 (`push_tokens` 에 행 없음). iOS 는 Apple Developer·APNs 키 등록 후 검증

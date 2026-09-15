@@ -16,6 +16,7 @@ export type Concern = 'appearance_mismatch' | 'conversation' | 'goal_mismatch' |
 export type MeetupStatus = {
   matchId: string;
   matchStatus: string;
+  partnerId: string | null;
   meetupState: MeetupState;
   /** 처음 서로의 의향이 확인된 시각 (철회돼도 남는 과거 사실) */
   mutualInterestAt: string | null;
@@ -74,7 +75,7 @@ export async function fetchMeetupStatus(matchId: string): Promise<MeetupStatus> 
   const userId = await requireUserId();
 
   const [matchRes, intentRes, outcomeRes, feedbackRes] = await Promise.all([
-    supabase.from('matches').select('id, status, meetup_state, mutual_interest_at').eq('id', matchId).maybeSingle(),
+    supabase.from('matches').select('id, status, meetup_state, mutual_interest_at, user_a, user_b').eq('id', matchId).maybeSingle(),
     supabase.from('meetup_intentions').select('user_id, intent, available_dates, preferred_region').eq('match_id', matchId),
     supabase.from('meetup_outcomes').select('outcome, not_met_reason').eq('match_id', matchId).eq('user_id', userId).maybeSingle(),
     supabase
@@ -103,6 +104,7 @@ export async function fetchMeetupStatus(matchId: string): Promise<MeetupStatus> 
   return {
     matchId,
     matchStatus: match.status,
+    partnerId: match.user_a === userId ? match.user_b : match.user_a,
     meetupState: state,
     mutualInterestAt: match.mutual_interest_at ?? null,
     myIntent: (mine?.intent as MeetupIntent | undefined) ?? null,

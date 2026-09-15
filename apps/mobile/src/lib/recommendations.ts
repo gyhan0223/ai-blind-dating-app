@@ -57,23 +57,36 @@ export type Recommendation = {
   card: RecommendationCard;
 };
 
-/** 오늘의 추천을 가져온다 (없으면 서버가 생성). */
-export async function fetchTodayRecommendations(): Promise<{
+export type TodayRecommendations = {
   recommendations: Recommendation[];
   dailyLimit: number;
+  /** 오늘 후보가 없다 (서버가 1시간 동안 다시 훑지 않는다 — #23) */
   exhausted: boolean;
-}> {
-  const { data, error } = await supabase.functions.invoke('daily-recommendation', { body: {} });
-  if (error) throw new Error('추천을 불러오지 못했습니다.');
-  const recommendations = ((data?.recommendations ?? []) as Recommendation[]).map((r) => ({
-    ...r,
-    card: sanitizeCard(r.card),
-  }));
-  return {
-    recommendations,
-    dailyLimit: data?.daily_limit ?? 1,
-    exhausted: data?.exhausted ?? false,
-  };
+  /** 다른 요청(앱·배치)이 지금 생성 중이라 아직 결과가 없다 — 잠시 후 다시 조회 (#22) */
+  inProgress: boolean;
+};
+
+/** 오늘의 추천을 가져온다 (없으면 서버가 생성). 서버가 생성 중이면 짧게 기다렸다가 다시 요청한다. */
+export async function fetchTodayRecommendations(): Promise<TodayRecommendations> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, error } = await supabase.functions.invoke('daily-recommendation', { body: {} });
+    if (error) throw new Error('추천을 불러오지 못했습니다.');
+    const recommendations = ((data?.recommendations ?? []) as Recommendation[]).map((r) => ({
+      ...r,
+      card: sanitizeCard(r.card),
+    }));
+    const inProgress = data?.in_progress === true && recommendations.length === 0;
+    if (!inProgress || attempt === 2) {
+      return {
+        recommendations,
+        dailyLimit: data?.daily_limit ?? 1,
+        exhausted: data?.exhausted ?? false,
+        inProgress,
+      };
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error('추천을 불러오지 못했습니다.');
 }
 
 /**

@@ -3,7 +3,7 @@
  * 모든 조회는 error 를 확인하고 실패 시 throw 한다 (빈 결과로 위장하지 않는다).
  */
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
-import type { DataSource, NewRecommendationRow, Row, StoredRecommendation, UserAccountRow } from './dataSource.ts';
+import type { DataSource, NewRecommendationRow, PastRecommendation, Row, StoredRecommendation, UserAccountRow } from './dataSource.ts';
 
 function unwrap<T>(res: { data: T | null; error: { message: string } | null }, what: string): T {
   if (res.error) throw new Error(`${what}: ${res.error.message}`);
@@ -87,12 +87,11 @@ export function supabaseDataSource(db: SupabaseClient): DataSource {
       ) as { user_a: string; user_b: string }[];
       return rows.map((m) => (m.user_a === userId ? m.user_b : m.user_a));
     },
-    async pastRecommendationCandidateIds(userId) {
-      const rows = unwrap(
-        await db.from('recommendations').select('candidate_id').eq('user_id', userId),
+    async pastRecommendations(userId) {
+      return unwrap(
+        await db.from('recommendations').select('candidate_id, status, for_date').eq('user_id', userId),
         'recommendations(past)',
-      ) as { candidate_id: string }[];
-      return rows.map((r) => r.candidate_id);
+      ) as PastRecommendation[];
     },
 
     async recommendationsForDate(userId, forDate) {

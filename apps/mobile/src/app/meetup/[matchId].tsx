@@ -314,7 +314,14 @@ export default function MeetupScreen() {
         </Card>
       )}
 
-      <View style={{ marginTop: spacing.md }}>
+      <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
+        {data.partnerId && (
+          <Button
+            kind="ghost"
+            title="이 상대 신고 또는 차단"
+            onPress={() => router.push({ pathname: '/report/[userId]', params: { userId: data.partnerId!, matchId: matchId! } })}
+          />
+        )}
         <Button kind="ghost" title="돌아가기" onPress={() => router.back()} />
       </View>
     </Screen>

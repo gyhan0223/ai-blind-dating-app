@@ -7,6 +7,7 @@
     "@expo/ui": "~57.0.12",
     "@expo/vector-icons": "^15.1.1",
     "@react-native-async-storage/async-storage": "2.2.0",
+    "@sentry/react-native": "~7.11.0",
     "@supabase/supabase-js": "^2.112.3",
     "@tanstack/react-query": "^5.101.4",
     "expo": "~57.0.15",
@@ -18,6 +19,7 @@
     "expo-glass-effect": "~57.0.1",
     "expo-image": "~57.0.3",
     "expo-linking": "~57.0.7",
+    "expo-notifications": "~57.0.13",
     "expo-router": "~57.0.15",
     "expo-secure-store": "~57.0.0",
     "expo-splash-screen": "~57.0.7",
@@ -54,7 +56,8 @@
     "face:selftest": "node --experimental-strip-types scripts/face-liveness-selftest.mjs",
     "sdk:verify-no-token-log": "bash scripts/verify-sdk-no-token-log.sh",
     "onboarding:selftest": "node --experimental-strip-types scripts/onboarding-resume-selftest.mjs",
-    "chat:selftest": "node --experimental-strip-types scripts/chat-core-selftest.mjs"
+    "chat:selftest": "node --experimental-strip-types scripts/chat-core-selftest.mjs",
+    "redact:selftest": "node --experimental-strip-types scripts/redact-selftest.mjs"
   },
   "private": true
 }

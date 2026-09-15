@@ -296,16 +296,29 @@ export async function fetchStarterQuestions(conversationId: string): Promise<Sta
 export type ReportReason =
   | 'unpleasant_conversation'
   | 'sexual_remarks'
+  | 'harassment'
   | 'threat'
+  | 'stalking'
+  | 'scam_money'
+  | 'personal_info_request'
   | 'impersonation'
+  | 'false_info'
+  | 'underage'
   | 'spam'
   | 'other';
 
-export const REPORT_REASONS: { value: ReportReason; label: string }[] = [
+/** 사유 목록 (docs/moderation-policy.md). urgentAllowed: 신고자가 "긴급" 을 표시할 수 있는 사유. 위협·스토킹·미성년 의심은 서버가 자동 긴급 */
+export const REPORT_REASONS: { value: ReportReason; label: string; urgentAllowed?: boolean }[] = [
   { value: 'unpleasant_conversation', label: '불쾌한 대화' },
-  { value: 'sexual_remarks', label: '성적인 발언' },
-  { value: 'threat', label: '위협적인 언행' },
+  { value: 'sexual_remarks', label: '성적인 발언', urgentAllowed: true },
+  { value: 'harassment', label: '성희롱·괴롭힘', urgentAllowed: true },
+  { value: 'threat', label: '위협적인 언행', urgentAllowed: true },
+  { value: 'stalking', label: '스토킹', urgentAllowed: true },
+  { value: 'scam_money', label: '금전 요구·사기', urgentAllowed: true },
+  { value: 'personal_info_request', label: '연락처·신상 요구' },
   { value: 'impersonation', label: '사칭이 의심됨' },
+  { value: 'false_info', label: '프로필 허위 정보' },
+  { value: 'underage', label: '미성년자 의심' },
   { value: 'spam', label: '스팸·광고' },
   { value: 'other', label: '기타' },
 ];
@@ -315,14 +328,17 @@ export async function reportUser(
   reason: ReportReason,
   detail: string,
   matchId?: string,
+  urgent = false,
 ): Promise<void> {
   const userId = await requireUserId();
+  const allowUrgent = REPORT_REASONS.find((r) => r.value === reason)?.urgentAllowed === true;
   const { error } = await supabase.from('reports').insert({
     reporter_id: userId,
     reported_id: reportedId,
     match_id: matchId ?? null,
     reason,
     detail: detail.trim() || null,
+    severity: urgent && allowUrgent ? 'urgent' : 'normal',
   });
   if (error) throw new Error('신고를 접수하지 못했습니다.');
 }

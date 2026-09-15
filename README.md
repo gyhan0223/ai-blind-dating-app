@@ -57,7 +57,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0016 순서대로 — 0015/0016 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
+# 마이그레이션 적용 (0001 → 0022 순서대로 — 0015~0022 는 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -73,12 +73,15 @@ supabase secrets set ALLOW_DEV_LOGIN=1    # dev-login opt-in (production 에선 
 # Edge Functions 배포 (개발/스테이징)
 supabase functions deploy verify-identity
 supabase functions deploy delete-account
+supabase functions deploy account-purge           # 탈퇴 30일 뒤 익명화 배치·운영자 완전 삭제 (service role 전용) — docs/data-retention.md
 supabase functions deploy dev-login       # 개발/스테이징 전용 — production 에는 배포 금지!
 supabase functions deploy complete-face-verification   # 개발 전용 Mock 승인 — FACE_VERIFICATION_PROVIDER=mock 일 때만 기동
 supabase functions deploy start-face-liveness           # 실제 얼굴 라이브니스 (Didit API v3) — docs/face-liveness-didit.md
 supabase functions deploy didit-webhook --no-verify-jwt # Didit V3 결과 웹훅 (서명 검증) — 반드시 --no-verify-jwt
 supabase functions deploy admin-face-review             # 관리자 얼굴 인증 검토 (service role 전용 — 관리자 웹이 호출)
 supabase functions deploy daily-recommendation
+supabase functions deploy daily-recommendation-batch  # 스케줄러용 (service role 전용) — pg_cron 등록은 docs/matching-policy.md 10절
+supabase functions deploy send-push                     # Push 발송기 (service role 전용, cron 1분) — docs/push-notifications.md
 supabase functions deploy icebreaker
 
 # SMS OTP 실발송 (Issue #4) — Supabase Auth "Send SMS" HTTP Hook → SOLAPI.
@@ -204,6 +207,11 @@ cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.
 # 온보딩 재진입 판정 테스트 (#39 — 외모 데이터 없는 완료 · 'appearance' 단계 사용자 복귀 · 인증 미완료 홈 차단)
 cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs
 # DB: 인증 전 온보딩 완료 차단 트리거 · 공개 자기소개 제약 (onboarding_guard_tests.sql — 위 run_local_check.sh 에 포함)
+# 민감정보 마스킹 테스트 (#20 — 앱·서버 동일 규칙, Sentry 이벤트에서 연락처·원문 제거)
+cd apps/mobile && node --experimental-strip-types scripts/redact-selftest.mjs
+cd supabase/functions/_shared/observability && node --experimental-strip-types selftest.ts
+# Push 발송 순수 로직 (#17 — 고정 문구·원문 없음·같은 대화 묶음·티켓 처리)
+cd supabase/functions/_shared/notifications && node --experimental-strip-types selftest.ts
 # 채팅 순수 로직 테스트 (#41 — 조회/Realtime 중복 병합 · 낙관적 메시지 교체 · cursor 정렬 · 과거 캐시 무효 · 오류 분류)
 cd apps/mobile && node --experimental-strip-types scripts/chat-core-selftest.mjs
 # DB: 만남 흐름 (#41 — 멱등 전송 · 일방 의향 비공개 · 상호 1회 · 철회 · 만남 확인 집계 · 비공개 피드백 · 차단/정지) 과
@@ -244,7 +252,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
   비공개 응답만 바꾸면 내부 순위는 달라질 수 있어도 이유는 같다. 근거가 없으면 비운다.
 - `strategy` 는 DB/analytics 호환 라벨이며 탐색 정책·정확도를 뜻하지 않는다. Plus +1 은 플래그로 비활성 (#29).
 - 안전 조회 실패(500 `lookup_failed`)와 후보 부족(200 `exhausted`)은 다른 결과다. 후보가 없어도 조건을 완화하지 않는다.
-- 하루 한 명의 동시 요청 멱등성은 #22, 재추천 주기·후보 부족 대기 정책은 #23.
+- 하루 한 명의 동시 요청 멱등성은 `recommendation_run_claim`(#22, `docs/matching-policy.md` 7·10절), skipped/expired 상대의 30일 재추천 주기와 후보 부족 시 1시간 재시도 주기는 #23 (같은 문서).
 
 ## 온보딩 순서 (#39)
 
@@ -294,9 +302,9 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
   (secret 은 서버 환경변수, 클라이언트 번들 미포함).
 - **전화번호 변경**: 새 번호 OTP + 본인확인 후 사용자가 확인하면
   `action: 'recover'` 가 기존 계정에 새 번호를 연결 (자동 overwrite 없음).
-- **계정 삭제** (`delete-account`): 콘텐츠 비활성화 / 세션 무효화 / identity 보존을
-  별도 함수로 분리. identity 보존으로 재가입 시 복구로 이어짐. banned 는 계정 삭제
-  후에도 identity 에 남아 재가입 차단.
+- **계정 삭제** (`delete-account` → 30일 유예 → `account-purge`): 탈퇴 즉시 추천·대화 중단, 유예 안에는 같은 번호로 복구,
+  유예 뒤 프로필·응답·추천·만남 응답·알림·얼굴 자산(storage·Didit 세션) 삭제와 메시지 본문 자리표시 처리 (`docs/data-retention.md`).
+  identity 는 해시·banned 만 남아 재가입 차단이 유지된다. 앱 밖 삭제 요청 페이지(관리자 웹 `/delete-account`, #14)는 운영자 확인 뒤 완전 삭제.
 - **얼굴 인증 = 보조 신호**: DI/identityKey 가 primary duplicate-account control,
   얼굴은 **Didit 능동형 라이브니스(3D Action & Flash)** 로 실제 사람 확인 + Face Search 1:N 중복 의심 시
   `in_review` (auto-ban 없음). 승인은 서명 검증된 웹훅 + 서버 재조회로만 — `docs/face-liveness-didit.md`.
@@ -332,7 +340,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
    (`supabase/tests/meetup_flow_tests.sql` — JWT 컨텍스트, `docs/meetup-flow.md`).
 4. **인증 플래그(본인/얼굴/나이)와 계정 상태는 서버 전용** — DB 트리거가 클라이언트 변경 차단.
 5. 민감 설문은 선택 응답 + 공개 여부 별도 저장, 대화 분석은 `conversation_analysis_consent` 동의 필드로 준비만.
-6. 로그에 얼굴 경로/민감정보를 남기지 않음.
+6. 로그에 얼굴 경로/민감정보를 남기지 않음 — 앱(Sentry beforeSend)·서버(`server_errors`) 모두 전송 전 마스킹 (`docs/monitoring.md`, selftest 로 검증).
 
 ## 현재 Mock 인 부분 (실서비스 전 교체)
 
@@ -346,7 +354,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 | 얼굴 특징 벡터 | 미생성 (null) — 인증용 reference image 만 서버 전용 private 저장 | MVP 범위 밖 (#8 — 별도 채택·별도 동의 후 검토) |
 | 외모 취향 테스트 | **제거됨** (#39 — 온보딩·수정 화면에 없음, 기존 `appearance_preference_events` 행만 보존) | MVP 범위 밖 (#9/#10) |
 | 대화 시작 질문 | **공개 답변·취미 기반 선택형 2~3개 구현 완료** (#41 — 규칙 기반, 자동 발송 없음, LLM 없음) | — (AI 대화 분석은 #28, MVP 범위 밖) |
-| Push 알림 | 서버 outbox(`notification_events`)만 — 새 메시지·상호 만남 관심을 중복 없이 기록 | 토큰 등록·발송기·deep link (#17) |
+| Push 알림 | **구현 완료, 실기기 미검증** (#17 — `expo-notifications` 토큰 등록·종류별 설정·outbox → `send-push` 발송기·알림 탭 딥링크. `docs/push-notifications.md`) | EAS projectId 연결(#18)·APNs 키·실기기 수신 확인·cron 등록 |
 | 결제 | 구조만 (subscriptions 테이블) — **앱 진입점 숨김, 서버 Plus 플래그 off** (#29) | MVP 검증 이후 feature flag 로 재도입 |
 | 이메일 로그인 | 시드 데모 계정·관리자 웹 전용으로 분리 | 일반 사용자 앱은 전화번호 OTP 만 사용 (완료) |
 | 시드 데모 사용자 | `is_demo=true` 12명 | 실배포 시 제거 |
@@ -358,14 +366,16 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 - 외모 점수/외모 취향 추천/인기 순위/부스트/Super Like/SNS 피드 없음
 - 얼굴 데이터는 인증(실제 사람 확인·중복 가입 방지)에만 사용
 - 한쪽만 좋아요한 사실, 거절 사실, 개인 피드백은 상대에게 비공개
+- 신고·차단은 채팅 헤더에서 한 번에 (`docs/moderation-policy.md`). 위험 패턴은 신호로만 기록하고 자동 제재하지 않는다. 모든 제재는 감사 기록으로 남는다
 - 채팅은 텍스트 전용 (사진 없는 경험 유지)
 - 추천 이유는 확인된 데이터에서만 — 궁합·적합도를 보장하는 표현 없음
 
 ## 다음 개발 우선순위 (#30)
 
-1. #22 하루 한 명 스케줄러·멱등성(동시 요청) · #23 후보 부족 정책·재추천 주기 · #24 퍼널 측정 대시보드 (이벤트·집계 뷰는 #41 에서 제공 — `docs/meetup-flow.md` 5절)
-2. #17 Push 발송기(outbox 연결) · #15/#16 신고 운영·스팸 방지 · #13 삭제 파이프라인 (#41 데이터는 cascade 로 연결됨)
-3. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기), #11 얼굴 데이터 보관 정책
-4. #21 실기기 E2E (두 계정으로 소개 수락 → 대화 → 상호 의향 → 만남 확인 → 피드백 — #41 은 로컬 DB/순수 로직 검증까지만 마침)
-5. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)
+1. 실제 프로젝트 운영 확인: pg_cron 등록(추천 배치·Push 발송·익명화·정지 해제), 대시보드 `/funnel` 수치와 raw query 표본 대조(#24), 관찰 기간·cohort 기준은 `docs/funnel-metrics.md`
+2. #15/#16(신고 운영 정책·감사·rate limit·위험 신호), #17 Push, #13/#14 삭제 파이프라인은 구현됨 — 남은 것은 EAS 연결·APNs·실기기 수신, 실제 프로젝트에서 auth 삭제 경로·cron 확인, 법률 검토 뒤 사유·기간 확정
+3. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기). #11 보관·삭제 정책은 `docs/data-retention.md` 로 구현됨
+4. #12 정책 문서: 초안·공개 URL·앱 링크는 있음(`docs/policy-docs.md`) — 법률 검토·`[ ]` 값 기입·생체정보 별도 동의 화면 남음
+5. #21 실기기 E2E (두 계정으로 소개 수락 → 대화 → 상호 의향 → 만남 확인 → 피드백 — #41 은 로컬 DB/순수 로직 검증까지만 마침) · #18/#19 EAS·스토어 제출
+6. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)
 5. MVP 이후 별도 채택 시 검토: #8 얼굴 임베딩 · #9/#10 외모 취향 매칭 · #28 AI 대화 분석 · #29 Plus/결제 재도입

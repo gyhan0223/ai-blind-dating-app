@@ -24,7 +24,7 @@ export type LocalStatus = 'sending' | 'failed';
 export type ChatMessage = ServerMessage & {
   status?: LocalStatus;
   /** 실패 사유 — 사용자에게 보여줄 짧은 분류 */
-  failure?: 'blocked' | 'mismatch' | 'network';
+  failure?: 'blocked' | 'mismatch' | 'network' | 'rate_limited' | 'repeated';
 };
 
 export type MessageCursor = { createdAt: string; id: string };
@@ -170,6 +170,8 @@ export function newClientMessageId(): string {
 export function classifySendError(message: string | null | undefined): NonNullable<ChatMessage['failure']> {
   const m = message ?? '';
   if (m.includes('message_content_mismatch')) return 'mismatch';
+  if (m.includes('rate_limited')) return 'rate_limited';
+  if (m.includes('repeated_content')) return 'repeated';
   if (m.includes('row-level security') || m.includes('42501') || m.includes('permission denied')) return 'blocked';
   return 'network';
 }

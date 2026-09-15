@@ -15,9 +15,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <span className="brand">본심 Admin</span>
           <nav>
             <Link href="/">대시보드</Link>
+            <Link href="/funnel">퍼널</Link>
             <Link href="/users">사용자</Link>
             <Link href="/reports">신고</Link>
             <Link href="/face-reviews">얼굴 검토</Link>
+            <Link href="/deletion-requests">삭제 요청</Link>
+            <Link href="/errors">서버 오류</Link>
           </nav>
         </header>
         <main className="container">{children}</main>
