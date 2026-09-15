@@ -26,6 +26,7 @@ set -euo pipefail
 PROD_FUNCTIONS=(
   verify-identity
   delete-account
+  account-purge
   start-face-liveness
   didit-webhook
   admin-face-review

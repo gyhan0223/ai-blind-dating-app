@@ -12,8 +12,8 @@ import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.t
 
 type Db = ReturnType<typeof serviceClient>;
 
-/** 1) 콘텐츠 비활성화 — 매칭/추천에서 보이지 않게 한다.
- *  대화 기록 등은 상대방 보호를 위해 유지 (정책 확정 시 이 함수에서 익명화/삭제 구현).
+/** 1) 콘텐츠 비활성화 — 매칭/추천에서 보이지 않게 한다 (소프트 삭제, deleted_at 은 DB 트리거가 기록).
+ *  30일 유예 뒤 account-purge(batch) 가 개인정보를 익명화한다 (#13 — docs/data-retention.md). 그 전에는 같은 번호로 복구 가능.
  *  #41 로 추가된 사용자별 데이터(meetup_intentions·meetup_outcomes·meetup_feedback·notification_events)는
  *  모두 users(id) on delete cascade 라 계정 행을 hard delete 하면 함께 삭제된다 (#13 파이프라인 연결 — docs/meetup-flow.md 9절).
  *  status='deleted' 가 되면 can_chat_in/meetup_set_intent 가 양쪽 계정 active 를 요구하므로 기존 매치로도 더 이상 연락되지 않는다. */
@@ -56,10 +56,11 @@ Deno.serve(async (req) => {
   const db = serviceClient();
 
   if (body.action === 'reactivate') {
-    const { data: me } = await db.from('users').select('status').eq('id', auth.userId).maybeSingle();
+    const { data: me } = await db.from('users').select('status, purged_at').eq('id', auth.userId).maybeSingle();
     if (me?.status !== 'deleted') return json({ error: 'not_deleted' }, 400);
     await db.from('users').update({ status: 'active' }).eq('id', auth.userId);
-    return json({ reactivated: true });
+    // 익명화가 끝난 계정은 데이터가 없다 — 앱은 온보딩을 처음부터 안내한다 (인증 플래그도 초기화되어 있다)
+    return json({ reactivated: true, fresh_start: me.purged_at != null });
   }
 
   if (body.action !== 'delete') return json({ error: 'unknown_action' }, 400);

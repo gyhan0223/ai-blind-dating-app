@@ -132,6 +132,9 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#41) `meetup_pair_summary` 뷰와 `notification_events` 를 사용자 JWT 로 select 하면 권한 오류다
 - [ ] (#41) **실기기 두 대**로 상호 수락 → 첫 메시지 → 시작 질문 선택·수정·전송 → 상호 의향 → 만남 확인 → 피드백을 끝까지 확인했다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)
 - [ ] (#41) 실기기에서 네트워크 끊김 → 복귀 시 놓친 메시지가 복구되고, 전송 실패 메시지가 "다시 보내기" 로 중복 없이 전송된다 — **아직 미수행**
+- [ ] (#13/#11/#14) 마이그레이션 `0019_account_deletion.sql` 적용 · `account-purge` 배포 · cron(`account-purge` batch 일 1회) 등록.
+      탈퇴 테스트 계정을 `deleted_at` 31일 전으로 바꾼 뒤 batch 호출 → `profiles`·`face_verifications` 행 0, storage `faces/<uid>/` 비어 있음, 상대 대화에 "(탈퇴한 사용자의 메시지입니다)" — **실제 프로젝트에서 미수행**
+- [ ] (#14) 관리자 웹 `/delete-account` 가 로그인 없이 열리고 요청이 `/deletion-requests` 에 나타난다. 스토어 제출 정보의 계정 삭제 URL 이 이 주소다
 - [ ] (#17) 마이그레이션 `0018_push_notifications.sql` 적용 · `send-push` 배포 · cron 등록 (`select * from cron.job where jobname = 'send-push'`)
 - [ ] (#17) 사용자 JWT 로 `notification_events_dequeue` 를 호출하면 거부되고, `push_tokens` 는 본인 행만 보인다
 - [ ] (#17) **실기기(Android 우선)** 에서 알림 권한 허용 → `push_tokens` 행 생성 → 상대가 메시지 전송 → 1분 안에 "새 메시지가 도착했어요" 수신 → 탭하면 해당 채팅방 — **아직 미수행**

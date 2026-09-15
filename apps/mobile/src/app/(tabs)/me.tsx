@@ -81,7 +81,7 @@ export default function MeScreen() {
   };
 
   const confirmDelete = () => {
-    Alert.alert('정말 탈퇴할까요?', '추천과 매칭이 중단돼요. 같은 번호로 다시 로그인하면 복구할 수 있어요.', [
+    Alert.alert('정말 탈퇴할까요?', '추천과 대화가 바로 중단돼요. 30일 안에는 같은 번호로 로그인해 복구할 수 있고, 그 뒤에는 프로필·대화·인증 정보가 삭제돼요.', [
       { text: '취소', style: 'cancel' },
       {
         text: '탈퇴하기',
@@ -187,8 +187,8 @@ export default function MeScreen() {
         </Text>
         <Divider />
         <Text variant="caption" color={colors.sub}>
-          탈퇴하면 추천과 매칭이 즉시 중단돼요.{'\n'}
-          중복 가입 방지를 위해 본인확인 기록은 정책에 따라 보관될 수 있어요.
+          탈퇴하면 추천과 대화가 즉시 중단되고, 30일 뒤 프로필·설문·대화 내용·얼굴 인증 정보가 삭제돼요.{'\n'}
+          중복 가입·차단 우회 방지를 위한 본인확인 기록(해시)은 정책에 따라 보관될 수 있어요.
         </Text>
       </Card>
 

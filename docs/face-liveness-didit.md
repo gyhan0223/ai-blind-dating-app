@@ -303,7 +303,7 @@ npx expo start --dev-client                # 설치한 개발 빌드가 이 Metr
 목적 분리: 얼굴 데이터는 **라이브니스·중복계정 방지(인증) 목적** 으로만 쓴다. MVP(#30/#39) 는 외모 매칭·얼굴 임베딩을 하지 않는다.
 향후 #8 이 별도로 채택되어 reference image 를 임베딩 입력으로 쓰려면 **별도 동의** 와 #11 의 보관 범위 재검토가 먼저다.
 
-회원 탈퇴 시 삭제 경로 (후속 작업 TODO — `delete-account` 에 아직 연결되지 않음):
+회원 탈퇴 시 삭제 경로 (**#13/#11 로 구현됨** — `account-purge` Edge Function, 탈퇴 30일 뒤 배치 또는 운영자 즉시 실행. 상세 `docs/data-retention.md` 3절):
 1. storage `faces/<user_id>/liveness/*` 삭제 (service role). 2. `face_verifications` 행의 `reference_path` 제거/익명화.
 3. Didit 측 삭제: `DiditFaceLivenessProvider.deleteSession(session_id)` (`DELETE /v3/session/{id}/delete/`, 2xx 성공) 를 해당 사용자의 모든 `provider_session_id` 에 대해 호출.
 4. Face Search 인덱스 제거 여부를 Didit 정책으로 확인.
@@ -313,7 +313,7 @@ npx expo start --dev-client                # 설치한 개발 빌드가 이 Metr
 - [ ] TODO: 민감정보(생체정보) 처리 항목·목적·보유기간 고지 및 **별도 동의** 문구
 - [ ] TODO: Didit(Provider) 에 대한 처리위탁·**국외 이전** 고지 (서버 위치·이전받는 자·항목·목적·보유기간)
 - [ ] TODO: 처리 목적을 **인증(라이브니스·중복 가입 방지)** 으로 한정해 고지. 외모 매칭 목적은 MVP 에 없으므로 고지/동의 대상이 아니다 (#8 채택 시 추가 동의)
-- [ ] TODO: 탈퇴 시 Provider 데이터 삭제 절차·기간 고지
+- [ ] TODO: 탈퇴 시 Provider 데이터 삭제 절차·기간 고지 (절차는 `docs/data-retention.md` — 고지 문구는 #12)
 - [ ] TODO: Didit 과의 DPA 및 보존 기간 설정 확인
 
 ## 11. Provider 장애 / 운영 대응

@@ -57,7 +57,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0018 순서대로 — 0015~0018 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
+# 마이그레이션 적용 (0001 → 0019 순서대로 — 0015~0019 는 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -73,6 +73,7 @@ supabase secrets set ALLOW_DEV_LOGIN=1    # dev-login opt-in (production 에선 
 # Edge Functions 배포 (개발/스테이징)
 supabase functions deploy verify-identity
 supabase functions deploy delete-account
+supabase functions deploy account-purge           # 탈퇴 30일 뒤 익명화 배치·운영자 완전 삭제 (service role 전용) — docs/data-retention.md
 supabase functions deploy dev-login       # 개발/스테이징 전용 — production 에는 배포 금지!
 supabase functions deploy complete-face-verification   # 개발 전용 Mock 승인 — FACE_VERIFICATION_PROVIDER=mock 일 때만 기동
 supabase functions deploy start-face-liveness           # 실제 얼굴 라이브니스 (Didit API v3) — docs/face-liveness-didit.md
@@ -296,9 +297,9 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
   (secret 은 서버 환경변수, 클라이언트 번들 미포함).
 - **전화번호 변경**: 새 번호 OTP + 본인확인 후 사용자가 확인하면
   `action: 'recover'` 가 기존 계정에 새 번호를 연결 (자동 overwrite 없음).
-- **계정 삭제** (`delete-account`): 콘텐츠 비활성화 / 세션 무효화 / identity 보존을
-  별도 함수로 분리. identity 보존으로 재가입 시 복구로 이어짐. banned 는 계정 삭제
-  후에도 identity 에 남아 재가입 차단.
+- **계정 삭제** (`delete-account` → 30일 유예 → `account-purge`): 탈퇴 즉시 추천·대화 중단, 유예 안에는 같은 번호로 복구,
+  유예 뒤 프로필·응답·추천·만남 응답·알림·얼굴 자산(storage·Didit 세션) 삭제와 메시지 본문 자리표시 처리 (`docs/data-retention.md`).
+  identity 는 해시·banned 만 남아 재가입 차단이 유지된다. 앱 밖 삭제 요청 페이지(관리자 웹 `/delete-account`, #14)는 운영자 확인 뒤 완전 삭제.
 - **얼굴 인증 = 보조 신호**: DI/identityKey 가 primary duplicate-account control,
   얼굴은 **Didit 능동형 라이브니스(3D Action & Flash)** 로 실제 사람 확인 + Face Search 1:N 중복 의심 시
   `in_review` (auto-ban 없음). 승인은 서명 검증된 웹훅 + 서버 재조회로만 — `docs/face-liveness-didit.md`.
@@ -366,7 +367,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 ## 다음 개발 우선순위 (#30)
 
 1. #24 퍼널 측정 대시보드 (이벤트·집계 뷰는 #41 에서 제공 — `docs/meetup-flow.md` 5절). #22 멱등성·배치와 #23 재추천/재시도 주기는 구현됨 — 남은 것은 실제 프로젝트에 pg_cron 등록·운영 확인
-2. #15/#16 신고 운영·스팸 방지 · #13 삭제 파이프라인 (#41 데이터는 cascade 로 연결됨). #17 Push 는 구현됨 — 남은 것은 EAS 연결·APNs·실기기 수신
+2. #15/#16 신고 운영·스팸 방지. #17 Push·#13/#14 삭제 파이프라인·요청 페이지는 구현됨 — 남은 것은 EAS 연결·APNs·실기기 수신, 실제 프로젝트에서 auth 삭제 경로·cron 확인
 3. 인증·계정 P0: #5 실제 본인인증 Provider, #6 E2E, #7 인증용 라이브니스 남은 검증(실기기), #11 얼굴 데이터 보관 정책
 4. #21 실기기 E2E (두 계정으로 소개 수락 → 대화 → 상호 의향 → 만남 확인 → 피드백 — #41 은 로컬 DB/순수 로직 검증까지만 마침)
 5. #25 공개 프로필·비외모 선호조건 수정 화면 (P1)

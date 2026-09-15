@@ -107,3 +107,11 @@ input[type='password'], input[type='text'] {
 
 .error { color: var(--danger); font-size: 13px; }
 .muted { color: var(--sub); font-size: 13px; }
+
+/* 공개 페이지 (/delete-account — 로그인 없음) */
+.public-page { max-width: 640px; margin: 0 auto; line-height: 1.6; }
+.public-page p, .public-page li { font-size: 14px; }
+.public-form { display: flex; flex-direction: column; gap: 12px; margin: 16px 0 24px; }
+.public-form label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--sub); }
+.public-form input, .public-form textarea { font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.notice { padding: 10px 14px; background: #edf1ee; color: var(--accent); border-radius: 8px; }
