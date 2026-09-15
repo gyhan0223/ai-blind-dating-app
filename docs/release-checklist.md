@@ -132,6 +132,7 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#41) `meetup_pair_summary` 뷰와 `notification_events` 를 사용자 JWT 로 select 하면 권한 오류다
 - [ ] (#41) **실기기 두 대**로 상호 수락 → 첫 메시지 → 시작 질문 선택·수정·전송 → 상호 의향 → 만남 확인 → 피드백을 끝까지 확인했다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)
 - [ ] (#41) 실기기에서 네트워크 끊김 → 복귀 시 놓친 메시지가 복구되고, 전송 실패 메시지가 "다시 보내기" 로 중복 없이 전송된다 — **아직 미수행**
+- [ ] (#12) 관리자 웹 `/policy/terms` · `/policy/privacy` · `/policy/community` 가 로그인 없이 열리고 `[ ]` 값(사업자·연락처·시행일·리전·본인확인 기관)이 채워져 있다. 법률 검토 완료. 앱 release 빌드에 `EXPO_PUBLIC_POLICY_BASE_URL` 이 설정되어 로그인·내 정보 화면 링크가 실제로 열린다
 - [ ] (#24) 마이그레이션 `0022_funnel_views.sql` 적용. 관리자 `/funnel` 이 열리고, 베타 시작 후 첫 주에 표본 5건을 raw query(`funnel_pair_facts`)와 대조한다
 - [ ] (#20) 마이그레이션 `0021_server_errors.sql` 적용. release 빌드에 `EXPO_PUBLIC_SENTRY_DSN`·`EXPO_PUBLIC_APP_ENV=production` 이 설정되어 있고 Sentry 에 첫 이벤트가 보인다 — **실기기 미검증**
 - [ ] (#20) Sentry 이벤트·`server_errors` 행에 전화번호·이메일·토큰·얼굴 경로·메시지 원문이 없다 (표본 확인). 관리자 `/errors` 가 열린다

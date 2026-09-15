@@ -14,6 +14,7 @@ import {
   saveNotificationPreferences,
   unregisterPushToken,
 } from '@/lib/push';
+import { openPolicy, POLICY_LINKS_ENABLED } from '@/lib/policyLinks';
 import { useSession } from '@/lib/session';
 import { supabase } from '@/lib/supabase';
 import { colors, radius, spacing } from '@/theme/tokens';
@@ -185,6 +186,13 @@ export default function MeScreen() {
           인증에 쓴 얼굴 정보는 상대에게 공개되지 않고, 소개 상대를 고르는 데도 쓰이지 않아요.{'\n'}
           가치관 설문과 피드백은 소개 기준에만 참고되고 상대에게 그대로 보이지 않아요.
         </Text>
+        {POLICY_LINKS_ENABLED && (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md, marginTop: spacing.md }}>
+            <Button kind="ghost" title="이용약관" onPress={() => openPolicy('terms')} />
+            <Button kind="ghost" title="개인정보 처리방침" onPress={() => openPolicy('privacy')} />
+            <Button kind="ghost" title="커뮤니티 가이드라인" onPress={() => openPolicy('community')} />
+          </View>
+        )}
         <Divider />
         <Text variant="caption" color={colors.sub}>
           탈퇴하면 추천과 대화가 즉시 중단되고, 30일 뒤 프로필·설문·대화 내용·얼굴 인증 정보가 삭제돼요.{'\n'}
