@@ -12,6 +12,7 @@
  *   - Provider API Key/Workflow ID 는 앱에 없다. 앱이 받는 것은 1회용 session_token 뿐이며 저장하지 않는다.
  *   - 로그에 토큰/세션 id/경로를 남기지 않는다.
  *   - 클라이언트는 face_verifications 를 읽을 수만 있고(본인 행), 쓰기는 서버 전용이다.
+ *   - 개발용 Mock 승인은 이 모듈에 두지 않는다 (@/dev/devModules, #3).
  *   - 사용자가 예전에 올린 front/left/right.jpg 는 라이브니스가 검증된 이미지가 아니므로 더 이상 사용하지 않는다.
  */
 import { FACE_CONSENT } from '@/constants/faceConsent';
@@ -140,13 +141,4 @@ export async function recordFaceConsent(): Promise<RecordFaceConsentResult> {
   return { ok: false, code: 'unknown' };
 }
 
-/**
- * 개발 전용 — Mock provider 로 즉시 승인 (complete-face-verification).
- * 반드시 `__DEV__ && DEV_TOOLS_ENABLED` 가드 안에서만 호출한다. production 서버에서는 이 함수가
- * 배포되지 않으며(allowlist 제외) 배포돼 있어도 FACE_VERIFICATION_PROVIDER=didit 이면 기동을 거부한다.
- */
-export async function devMockApproveFace(scenario: 'approved' | 'duplicate' = 'approved'): Promise<{ verified: boolean; status: string }> {
-  const { data, error } = await supabase.functions.invoke('complete-face-verification', { body: { scenario } });
-  if (error) throw new Error('개발용 얼굴 인증 통과에 실패했어요. complete-face-verification 함수와 FACE_VERIFICATION_PROVIDER=mock 설정을 확인하세요.');
-  return { verified: data?.verified === true, status: typeof data?.status === 'string' ? data.status : 'unknown' };
-}
+// 개발용 Mock 승인(complete-face-verification 호출)은 @/dev/devModules 로 옮겼다 (#3) — 이 모듈은 release 번들에 남으므로 개발 경로를 두지 않는다.

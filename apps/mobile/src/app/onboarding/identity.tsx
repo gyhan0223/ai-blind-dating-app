@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { View } from 'react-native';
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, ChipGroup, Field, InlineNotice, Screen, Text } from '@/components/ui';
-import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
+import { DEV_TOOLS_ENABLED, loadDevModules } from '@/lib/devTools';
 import { isBetaDenied, rateLimitedText, readEdgeError } from '@/lib/edge';
 import { advanceOnboarding } from '@/lib/onboarding';
 import { formatPhoneKR } from '@/lib/phone';
@@ -25,6 +25,9 @@ const CARRIERS = [
  * 서버가 실제 사람 기준의 계정 존재/차단 여부를 판단한다.
  * 검증·중복 판단은 전부 서버(verify-identity Edge Function)가 담당한다 (현재 Mock Provider).
  */
+/** 개발 빌드에서만 로드 — release 번들에 없다 (#3) */
+const devModules = loadDevModules();
+
 export default function IdentityStep() {
   const { session, refreshAppUser, signOut } = useSession();
   const [name, setName] = useState('');
@@ -128,41 +131,40 @@ export default function IdentityStep() {
    * identityKey 분기(신규/복구/차단)는 서버가 실제와 동일하게 판단하므로
    * fixture 번호 시나리오도 이 버튼으로 그대로 테스트할 수 있다.
    */
-  const devPass = async () => {
-    const dName = name.trim() || '테스트사용자';
-    const dBirth = birth.length === 8 ? birth : '19960515';
-    const dCarrier = carrier ?? 'skt';
-    // recover 등 후속 호출이 같은 payload 를 쓰도록 상태도 채워 둔다
-    setName(dName);
-    setBirth(dBirth);
-    setCarrier(dCarrier);
-    setCode('123456');
-    const p = {
-      name: dName,
-      birthDate: `${dBirth.slice(0, 4)}-${dBirth.slice(4, 6)}-${dBirth.slice(6, 8)}`,
-      carrier: dCarrier,
-    };
-    setLoading(true);
-    setError(null);
-    const { data: reqData, error: reqErr } = await supabase.functions.invoke('verify-identity', {
-      body: { action: 'request', ...p },
-    });
-    if (reqErr || !reqData?.requestId) {
-      setLoading(false);
-      setError('인증 요청에 실패했어요. verify-identity 함수가 배포되어 있는지 확인해 주세요.');
-      return;
-    }
-    setRequestId(reqData.requestId);
-    const { data, error: err } = await supabase.functions.invoke('verify-identity', {
-      body: { action: 'confirm', requestId: reqData.requestId, code: '123456', ...p },
-    });
-    setLoading(false);
-    if (err) {
-      setError('인증에 실패했어요. 잠시 후 다시 시도해 주세요.');
-      return;
-    }
-    await handleConfirmOutcome(data);
-  };
+  // 구현은 @/dev/devModules (release 번들에 없다). 리터럴 __DEV__ 삼항이라 핸들러 본문도 release 에서 제거된다
+  const devPass = __DEV__
+    ? async () => {
+        if (!devModules) return;
+        const dName = name.trim() || '테스트사용자';
+        const dBirth = birth.length === 8 ? birth : '19960515';
+        const dCarrier = carrier ?? 'skt';
+        // recover 등 후속 호출이 같은 payload 를 쓰도록 상태도 채워 둔다
+        setName(dName);
+        setBirth(dBirth);
+        setCarrier(dCarrier);
+        setCode('123456');
+        const p = {
+          name: dName,
+          birthDate: `${dBirth.slice(0, 4)}-${dBirth.slice(4, 6)}-${dBirth.slice(6, 8)}`,
+          carrier: dCarrier,
+        };
+        setLoading(true);
+        setError(null);
+        const res = await devModules.devIdentityPass(p);
+        setLoading(false);
+        if (!res.ok) {
+          if (res.stage === 'request') {
+            setError('인증 요청에 실패했어요. verify-identity 함수가 배포되어 있는지 확인해 주세요.');
+          } else {
+            setRequestId(res.requestId);
+            setError('인증에 실패했어요. 잠시 후 다시 시도해 주세요.');
+          }
+          return;
+        }
+        setRequestId(res.requestId);
+        await handleConfirmOutcome(res.data);
+      }
+    : undefined;
 
   const recover = async () => {
     setLoading(true);
@@ -239,11 +241,11 @@ export default function IdentityStep() {
             loading={loading}
             disabled={!name.trim() || birth.length !== 8 || !carrier}
           />
-          {__DEV__ && DEV_TOOLS_ENABLED && (
+          {__DEV__ && DEV_TOOLS_ENABLED && devModules && (
             <View style={{ marginTop: spacing.sm }}>
               <Button
                 kind="secondary"
-                title="테스트로 통과하기 (개발용)"
+                title={devModules.DEV_BUTTON_LABELS.identityPass}
                 onPress={devPass}
                 loading={loading}
               />

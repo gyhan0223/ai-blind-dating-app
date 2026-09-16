@@ -15,3 +15,22 @@ export const DEV_TOOLS_ENABLED = computeDevToolsEnabled(
   __DEV__,
   process.env.EXPO_PUBLIC_DEV_LOGIN,
 );
+
+export type DevModules = typeof import('@/dev/devModules');
+
+/**
+ * 개발 전용 모듈(dev-login · Mock 얼굴 승인 · 시드 계정 로그인)을 개발 빌드에서만 불러온다 (#3).
+ *
+ * 버튼을 숨기는 것과 코드가 release 산출물에서 제거되는 것은 다르다 — 이전에는 `devMockApproveFace` 같은 함수가 일반 모듈에
+ * 정적으로 import 되어 있어 버튼이 사라져도 'complete-face-verification' 호출 코드가 번들에 남았다.
+ * 여기서는 `if (__DEV__) require(...)` 만 쓴다: Metro 는 production 변환에서 __DEV__ 를 false 로 치환하고 도달 불가능한 분기를
+ * 제거한 뒤 의존성을 수집하므로 `@/dev/*` 모듈 전체가 release 번들에서 빠진다.
+ * 검증: `npm run release:check` (실제 expo export 산출물 grep) — 문자열을 바꿔 검사를 피하지 않는다.
+ */
+export function loadDevModules(): DevModules | null {
+  if (__DEV__) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('@/dev/devModules') as DevModules;
+  }
+  return null;
+}

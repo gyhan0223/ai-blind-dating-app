@@ -4,12 +4,11 @@ import { ActivityIndicator, Linking, Platform, Pressable, View } from 'react-nat
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, Card, InlineNotice, Screen, Text } from '@/components/ui';
 import { FACE_CONSENT, FACE_CONSENT_ROWS } from '@/constants/faceConsent';
-import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
+import { DEV_TOOLS_ENABLED, loadDevModules } from '@/lib/devTools';
 import { advanceOnboarding } from '@/lib/onboarding';
 import { openPolicy, POLICY_LINKS_ENABLED } from '@/lib/policyLinks';
 import { useSession } from '@/lib/session';
 import {
-  devMockApproveFace,
   FACE_ERROR_MESSAGES,
   type FaceScreenState,
   getLatestFaceVerification,
@@ -48,6 +47,9 @@ import { colors, radius, spacing } from '@/theme/tokens';
  * 얼굴 이미지는 앱에 저장되지 않고 상대에게도 절대 공개되지 않는다.
  * 인증 목적으로만 쓰이며 외모 평가·이상형 추천에는 사용하지 않는다 (#39 — 얼굴 임베딩은 MVP 이후 별도 검토).
  */
+/** 개발 빌드에서만 로드 — Mock 승인(complete-face-verification) 호출 코드는 release 번들에 없다 (#3) */
+const devModules = loadDevModules();
+
 export default function FaceStep() {
   const { session, refreshAppUser } = useSession();
   const userId = session?.user.id;
@@ -307,27 +309,30 @@ export default function FaceStep() {
     if (Platform.OS !== 'web') await Linking.openSettings();
   };
 
-  /** 개발 전용 — 카메라 없는 시뮬레이터에서 Mock 승인 (release 번들에서는 리터럴 __DEV__ 가드로 제거된다) */
-  const devSkip = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const res = await devMockApproveFace();
-      if (res.verified) {
-        setState({ kind: 'approved' });
-      } else {
-        setState(res.status === 'in_review' ? { kind: 'in_review', sessionId: null } : { kind: 'error', code: 'liveness_failed' });
+  /** 개발 전용 — 카메라 없는 시뮬레이터에서 Mock 승인 (구현은 @/dev/devModules — release 번들에 포함되지 않는다) */
+  // 리터럴 __DEV__ 삼항 — release 번들에서는 핸들러 본문까지 제거된다
+  const devSkip = __DEV__
+    ? async () => {
+        if (busy || !devModules) return;
+        setBusy(true);
+        try {
+          const res = await devModules.devMockApproveFace();
+          if (res.verified) {
+            setState({ kind: 'approved' });
+          } else {
+            setState(res.status === 'in_review' ? { kind: 'in_review', sessionId: null } : { kind: 'error', code: 'liveness_failed' });
+          }
+        } catch {
+          setState({ kind: 'error', code: 'provider_unavailable' });
+        } finally {
+          setBusy(false);
+        }
       }
-    } catch {
-      setState({ kind: 'error', code: 'provider_unavailable' });
-    } finally {
-      setBusy(false);
-    }
-  };
+    : undefined;
 
   const devButton =
-    __DEV__ && DEV_TOOLS_ENABLED ? (
-      <Button kind="ghost" title="개발 모드: 얼굴 인증 통과 (Mock)" onPress={devSkip} disabled={busy} />
+    __DEV__ && DEV_TOOLS_ENABLED && devModules ? (
+      <Button kind="ghost" title={devModules.DEV_BUTTON_LABELS.faceMock} onPress={devSkip} disabled={busy} />
     ) : null;
 
   // ── 렌더 ────────────────────────────────────────────────────────────────

@@ -58,7 +58,11 @@
     "onboarding:selftest": "node --experimental-strip-types scripts/onboarding-resume-selftest.mjs",
     "chat:selftest": "node --experimental-strip-types scripts/chat-core-selftest.mjs",
     "redact:selftest": "node --experimental-strip-types scripts/redact-selftest.mjs",
-    "preferences:selftest": "node --experimental-strip-types scripts/preferences-core-selftest.mjs"
+    "preferences:selftest": "node --experimental-strip-types scripts/preferences-core-selftest.mjs",
+    "devtools:selftest": "node --experimental-strip-types scripts/devtools-selftest.mjs",
+    "release:check": "node scripts/check-release-bundle.mjs",
+    "release:check:android": "node scripts/check-release-bundle.mjs --android-only",
+    "release:check:selfcheck": "node scripts/check-release-bundle.mjs --selfcheck"
   },
   "private": true
 }
