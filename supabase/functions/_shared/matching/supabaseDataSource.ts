@@ -62,6 +62,16 @@ export function supabaseDataSource(db: SupabaseClient): DataSource {
         'users',
       ) as UserAccountRow[];
     },
+    async activeMatchCounts(ids) {
+      if (ids.length === 0) return {};
+      const rows = unwrap(
+        await db.from('conversation_slot_usage').select('user_id, active_matches').in('user_id', ids),
+        'conversation_slot_usage',
+      ) as { user_id: string; active_matches: number }[];
+      const out: Record<string, number> = {};
+      for (const r of rows) out[r.user_id] = Number(r.active_matches) || 0;
+      return out;
+    },
     async blockPairs(userId) {
       return unwrap(
         await db.from('blocks').select('blocker_id, blocked_id').or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`),

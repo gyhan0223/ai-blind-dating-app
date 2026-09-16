@@ -10,10 +10,14 @@
  *   - 오류 분류 · 클라이언트 식별자 형식 · 만남 상태 의미
  */
 import {
+  acceptResultNotice,
   beforeCursorFilter,
   canReportOutcome,
   classifySendError,
+  closedNotice,
   compareMessages,
+  CONVERSATION_SLOT_LIMIT,
+  EXIT_REASONS,
   isBothConfirmed,
   isMutualNow,
   makeLocalMessage,
@@ -25,6 +29,8 @@ import {
   removeLocal,
   resyncSince,
   setLocalStatus,
+  slotsAreFull,
+  slotsLabel,
 } from '../src/lib/chatCore.ts';
 
 let passed = 0;
@@ -141,6 +147,22 @@ const row = (id, created_at, sender = them, extra = {}) => ({
   check('legacy completed 는 양측 확인이 아니다', !isBothConfirmed('completed') && isBothConfirmed('met_confirmed'));
   check('결과 기록 가능: 상호 관심 이력이 있으면 철회 후에도', canReportOutcome('interest_withdrawn', '2026-09-14T00:00:00Z') && canReportOutcome('completed', null) && !canReportOutcome('none', null) && !canReportOutcome('interest_withdrawn', null));
 }
+
+
+// --- 동시 대화 3개 제한 · 나가기 (#24) ---------------------------------------
+check('자리 한도 3', CONVERSATION_SLOT_LIMIT === 3);
+check('slotsLabel 은 내 개수/한도 (상한 초과도 한도로 표시)', slotsLabel(0) === '0/3' && slotsLabel(2) === '2/3' && slotsLabel(5) === '3/3');
+check('slotsAreFull 경계', !slotsAreFull(2) && slotsAreFull(3) && slotsAreFull(4));
+check('나가기 이유 5개 · 허용값', EXIT_REASONS.length === 5 && EXIT_REASONS.map((r) => r.value).join() === 'no_reply,not_a_fit,moved_elsewhere,after_meetup,other');
+check('활성 매치는 종료 문구 없음', closedNotice({ matchStatus: 'active', closeKind: null, closedBy: null, myId: 'me' }) === null);
+check('상대가 나감 → 상대방이 대화를 종료했어요', closedNotice({ matchStatus: 'closed', closeKind: 'left', closedBy: 'other', myId: 'me' }) === '상대방이 대화를 종료했어요');
+check('내가 나감 → 내가 종료한 대화', closedNotice({ matchStatus: 'closed', closeKind: 'left', closedBy: 'me', myId: 'me' }) === '내가 종료한 대화예요');
+check('차단/계정/운영/미상 종료는 주체를 드러내지 않는다', ['blocked', 'account', 'admin', 'unknown', null].every((k) => closedNotice({ matchStatus: 'closed', closeKind: k, closedBy: null, myId: 'me' }) === '종료된 대화예요'));
+check('종료 문구에 이유가 없다', !EXIT_REASONS.some((r) => closedNotice({ matchStatus: 'closed', closeKind: 'left', closedBy: 'other', myId: 'me' }).includes(r.label)));
+check('자리 부족(본인) 안내', (acceptResultNotice('no_slot_self') ?? '').includes('3개'));
+check('자리 부족(상대) 안내는 거절이 아니다', (acceptResultNotice('no_slot_partner') ?? '').includes('다시 시도') && !(acceptResultNotice('no_slot_partner') ?? '').includes('거절'));
+check('matched/liked 는 안내 없음', acceptResultNotice('matched') === null && acceptResultNotice('liked') === null);
+check('already_matched 안내', (acceptResultNotice('already_matched') ?? '').includes('다시 소개되지'));
 
 console.log(`chat core selftest: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

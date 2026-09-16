@@ -30,7 +30,8 @@
 | `recommendations` (내가 받은 것) | 추천 이력 | 삭제 | 삭제 |
 | `recommendations` (상대가 받은 내 카드) | 상대의 추천 이력 | `card='{}'` 로 비움, pending 은 expired | 삭제(cascade) |
 | `likes` | 매칭 | 삭제 (양방향) | 삭제 |
-| `matches` · `conversations` · `conversation_metrics` | 상대의 대화 이력·집계 | 유지 (active 는 closed 로). 개인 식별 정보 없음 | 삭제(cascade) |
+| `matches` · `conversations` · `conversation_metrics` | 상대의 대화 이력·집계·재매칭 방지 | 유지 (active 는 closed 로, `close_kind='account'`). 개인 식별 정보 없음 | 삭제(cascade) — 이후 새 계정으로 재가입하면 과거 상대와 다시 매칭될 수 있다 (`docs/conversation-policy.md` 3절) |
+| `conversation_exits` (#24, 나가기 이유 — 본인만 조회) | 종료 이유 집계 | 유지 (user_id 는 계정 스켈레톤을 가리킴, 개인 식별 정보 없음) | 삭제(cascade) |
 | `messages` (내가 보낸 것) | 상대의 대화 이력·신고 증거 | 본문 → "(탈퇴한 사용자의 메시지입니다)", client_message_id null. 행 유지 | 삭제(cascade) |
 | `meetup_intentions` · `meetup_outcomes` · `meetup_feedback` (내 응답) | 만남 흐름·측정 | 삭제. 상대의 응답과 매치 집계 상태(`met_confirmed` 등)는 유지 | 삭제 |
 | `push_tokens` · `notification_preferences` · `notification_events`(수신) | 알림 | 삭제 (탈퇴 즉시 토큰 삭제) | 삭제 |

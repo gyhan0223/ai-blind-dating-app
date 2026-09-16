@@ -22,6 +22,9 @@
  *  * 순위: scored(총점 내림차순) → conditions_only, 동점은 (요청자, KST 날짜, 후보 id) 해시 tie-break.
  *    후보가 없어도 필수 조건을 완화하지 않는다. 신규끼리 배정 금지·외모 우대(#38)는 없다.
  *  * 카드에는 공개 필드 allowlist 만 담는다. 원시 점수·차원·비공개 응답·얼굴 데이터는 응답에 없다.
+ *  * 동시 대화 3개 제한 (#24): 요청자의 진행 중 매치가 CONVERSATION_SLOT_LIMIT 이상이면 오늘의 새 소개를 만들지 않고
+ *    slotsFull=true 로 끝낸다 (후보 부족 exhausted 와 다른 결과 — 실행 기록 result='slots_full', 그날은 다시 훑지 않는다).
+ *    진행 중 매치가 가득 찬 후보도 제외한다. 오늘 이미 저장된 추천은 그대로 돌려준다 (수락은 서버 RPC 가 자리를 다시 확인한다).
  */
 import type { DataSource, NewRecommendationRow, PastRecommendation, Row, StoredRecommendation, UserAccountRow } from './dataSource.ts';
 import { computeMatch, pickStrategy, rankCandidates } from './MatchingEngine.ts';
@@ -33,6 +36,8 @@ export const CANDIDATE_PAGE_SIZE = 100;
 export const MAX_CANDIDATES_SCANNED = 500;
 /** skipped/expired 추천 상대를 다시 후보로 보기까지의 기간 (#23) */
 export const RECOMMENDATION_COOLDOWN_DAYS = 30;
+/** 사용자당 진행 중 매치 최대 개수 (#24) — DB 의 conversation_slot_limit() 와 같은 값 */
+export const CONVERSATION_SLOT_LIMIT = 3;
 
 export interface RunInput {
   userId: string;
@@ -56,6 +61,8 @@ export type RunOutcome =
       scanned: number;
       /** MAX_CANDIDATES_SCANNED 에 걸려 풀을 끝까지 보지 못했는지 (관측용 — #23) */
       capReached: boolean;
+      /** 요청자의 진행 중 매치가 가득 차 새 소개를 만들지 않았다 (#24). exhausted 와 다르다 */
+      slotsFull?: boolean;
     };
 
 /** YYYY-MM-DD 문자열에 일 수를 더한다 (UTC 기준 날짜 산술 — 시간대 무관) */
@@ -217,6 +224,16 @@ export async function runDailyRecommendation(ds: DataSource, input: RunInput): P
     return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: false, scanned: 0, capReached: false };
   }
 
+  // 3.5) 대화 자리 (#24): 진행 중 매치가 가득 찼으면 오늘의 새 소개를 만들지 않는다 (후보 부족과 구분)
+  try {
+    const mine = (await ds.activeMatchCounts([userId]))[userId] ?? 0;
+    if (mine >= CONVERSATION_SLOT_LIMIT) {
+      return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: false, scanned: 0, capReached: false, slotsFull: true };
+    }
+  } catch {
+    return { kind: 'lookup_failed', stage: 'slots' };
+  }
+
   // 4) 제외 목록
   const excluded = new Set<string>([userId, ...blocked, ...reported]);
   try {
@@ -255,13 +272,14 @@ export async function runDailyRecommendation(ds: DataSource, input: RunInput): P
       offset += page.length;
       const ids = page.filter((id) => !excluded.has(id));
       if (ids.length > 0) {
-        const [snapshots, accounts] = await Promise.all([loadSnapshots(ds, ids), ds.userAccounts(ids)]);
+        const [snapshots, accounts, slots] = await Promise.all([loadSnapshots(ds, ids), ds.userAccounts(ids), ds.activeMatchCounts(ids)]);
         const accountMap = new Map(accounts.map((u) => [u.id, u]));
         for (const id of ids) {
           scanned += 1;
           const snap = snapshots.get(id);
           const account = accountMap.get(id);
           if (!snap || !accountEligible(account)) continue; // 조회 조건과 무관하게 한 번 더 확인
+          if ((slots[id] ?? 0) >= CONVERSATION_SLOT_LIMIT) continue; // 진행 중 대화가 가득 찬 후보는 제외 (#24)
           const result = computeMatch(meSnap, snap, nowYear);
           if (result.eligible && result.score) evaluated.push({ id, result, payload: { snap, account: account! } });
         }

@@ -88,6 +88,13 @@ const ds = {
       `select coalesce(json_agg(json_build_object('id', id, 'status', status, 'onboarding_completed', onboarding_completed, 'identity_verified', identity_verified, 'face_verified', face_verified, 'age_verified', age_verified)), '[]') from public.users where id = any(${uuidArray(ids)})`,
     );
   },
+  async activeMatchCounts(ids) {
+    if (ids.length === 0) return {};
+    const rows = qjson(`select coalesce(json_agg(json_build_object('user_id', user_id, 'active_matches', active_matches)), '[]') from public.conversation_slot_usage where user_id = any(${uuidArray(ids)})`);
+    const out = {};
+    for (const r of rows) out[r.user_id] = Number(r.active_matches) || 0;
+    return out;
+  },
   async blockPairs(userId) {
     return qjson(`select coalesce(json_agg(json_build_object('blocker_id', blocker_id, 'blocked_id', blocked_id)), '[]') from public.blocks where blocker_id = ${uuid(userId)} or blocked_id = ${uuid(userId)}`);
   },
@@ -283,6 +290,36 @@ check('신규 사용자에게 외모 데이터가 전혀 없다 (전제)', Numbe
 {
   const page = await ds.candidateIdsPage('female', 'female', 0, 1000);
   check('candidateIdsPage 에 인증 미완료(Y3)·정지(Y4) 없음, Y1·Y2 있음', !page.includes(Y3) && !page.includes(Y4) && page.includes(Y1) && page.includes(Y2));
+}
+
+// ---------------------------------------------------------------------------
+// 7) 동시 대화 3개 제한 (#24): 요청자가 가득 차면 slotsFull (exhausted 아님·새 행 없음), 가득 찬 후보는 제외
+// ---------------------------------------------------------------------------
+{
+  q(`delete from public.recommendations where user_id = ${uuid(X)}`);
+  q(`delete from public.recommendation_runs where user_id = ${uuid(X)}`);
+  // X 에게 활성 매치 3개 (서버 직접 insert — 테스트용 상대는 실제 후보와 무관한 id)
+  const partners = ['aa240000-0000-4000-8000-00000000a001', 'aa240000-0000-4000-8000-00000000a002', 'aa240000-0000-4000-8000-00000000a003'];
+  for (const pid of partners) {
+    q(`insert into auth.users (id, email) values (${uuid(pid)}, 'slot-${pid.slice(-4)}@test.dev') on conflict do nothing`);
+    q(`insert into public.matches (user_a, user_b) values (least(${uuid(X)}, ${uuid(pid)}), greatest(${uuid(X)}, ${uuid(pid)})) on conflict do nothing`);
+  }
+  const full = await run(X);
+  check('요청자 진행 중 매치 3개 → slotsFull (후보 부족 아님)', full.kind === 'ok' && full.slotsFull === true && !full.exhausted && full.recommendations.length === 0);
+  check('slotsFull 이면 새 추천 행이 생기지 않는다', Number(q(`select count(*) from public.recommendations where user_id = ${uuid(X)}`)) === 0);
+  // 하나 종료 → 자리 → 다시 생성 (Y2 는 31일 전 skipped 라 후보)
+  q(`update public.matches set status = 'closed' where user_a = least(${uuid(X)}, ${uuid(partners[0])}) and user_b = greatest(${uuid(X)}, ${uuid(partners[0])})`);
+  q(`delete from public.recommendation_runs where user_id = ${uuid(X)}`);
+  const freed = await run(X);
+  check('자리가 생기면 다시 추천된다', freed.kind === 'ok' && !freed.slotsFull && freed.recommendations.length === 1);
+  // 후보(Y2)가 가득 차면 제외 → 후보 없음
+  q(`delete from public.recommendations where user_id = ${uuid(X)}`);
+  q(`delete from public.recommendation_runs where user_id = ${uuid(X)}`);
+  for (const pid of partners) {
+    q(`insert into public.matches (user_a, user_b) values (least(${uuid(Y2)}, ${uuid(pid)}), greatest(${uuid(Y2)}, ${uuid(pid)})) on conflict do nothing`);
+  }
+  const noCandidate = await run(X);
+  check('진행 중 매치가 가득 찬 후보(Y2)는 제외 → exhausted (slotsFull 아님)', noCandidate.kind === 'ok' && noCandidate.exhausted && !noCandidate.slotsFull);
 }
 
 console.log(`\nrecommendation db test: ${passed} passed, ${failed} failed`);

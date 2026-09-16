@@ -140,7 +140,7 @@ export default async function BetaPage() {
       {o.cohorts.length > 0 && (
         <table>
           <thead>
-            <tr><th>slug</th><th>조건</th><th>모집</th><th>입장(남/여)</th><th>온보딩</th><th>추천</th><th>매치</th><th>양방향</th><th>7일 지속</th><th>상호 만남</th><th>양측 확인</th><th>코드</th><th></th></tr>
+            <tr><th>slug</th><th>조건</th><th>모집</th><th>입장(남/여)</th><th>온보딩</th><th>추천 생성</th><th>추천 확인</th><th>매치</th><th>양방향</th><th>상호 만남</th><th>양측 확인</th><th>코드</th><th></th></tr>
           </thead>
           <tbody>
             {o.cohorts.map((c) => (
@@ -154,9 +154,9 @@ export default async function BetaPage() {
                 <td>{c.admitted} ({c.admitted_male}/{c.admitted_female})</td>
                 <td>{c.onboarded}</td>
                 <td>{c.got_recommendation}</td>
+                <td>{c.viewed_recommendation}</td>
                 <td>{c.matched}</td>
                 <td>{c.two_way}</td>
-                <td>{c.sustained_7d}</td>
                 <td>{c.mutual_interest}</td>
                 <td>{c.both_confirmed}</td>
                 <td className="muted" style={{ fontSize: 12 }}>활성 {c.active_codes} · 남은 사용 {c.remaining_uses}</td>
