@@ -187,6 +187,8 @@ export function mapServerStatus(input: {
   if (input.status === 'pending' && input.userActionRequired) {
     return { kind: 'error', code: 'user_action_required' };
   }
+  // #11: 이 세션이 다른 세션에 대체(expired/superseded)됐더라도 서버가 users.face_verified=true 를 알리면 인증은 끝난 것이다
+  if (input.status === 'expired' && input.faceVerified) return { kind: 'approved' };
   switch (input.status) {
     case 'approved':
       if (input.faceVerified) return { kind: 'approved' };

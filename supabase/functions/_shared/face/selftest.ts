@@ -170,6 +170,16 @@ class MemoryFaceDb implements FaceDb {
     if (!input.referencePath.startsWith(`${row.userId}/liveness/`)) return { ok: false, reason: 'reference_missing' };
     if (!(input.livenessPassed || row.livenessPassed)) return { ok: false, reason: 'liveness_not_passed' };
     if (row.status === 'rejected') return { ok: false, reason: 'rejected_row' };
+    // 0029: 다른 approved 행이 있으면 이 행은 superseded (expired) 로 마감
+    if (row.status !== 'approved') {
+      const other = this.rows.find((r) => r.userId === row.userId && r.status === 'approved' && r.id !== row.id);
+      if (other) {
+        row.status = 'expired';
+        row.providerReason = 'superseded';
+        row.referencePath = row.referencePath ?? input.referencePath;
+        return { ok: false, reason: 'superseded' };
+      }
+    }
     let changed = false;
     if (row.status !== 'approved' || row.referencePath !== input.referencePath || !row.livenessPassed) {
       row.status = 'approved';
@@ -224,9 +234,9 @@ class MemoryFaceDb implements FaceDb {
     return { ok: true, status: 'rejected', faceVerified: false };
   }
 
-  async storeReferenceImage(userId: string, bytes: Uint8Array, contentType: string) {
+  async storeReferenceImage(userId: string, rowId: string, bytes: Uint8Array, contentType: string) {
     if (this.failStore) return { ok: false as const };
-    const path = referenceImagePath(userId, contentType);
+    const path = referenceImagePath(userId, rowId, contentType);
     this.stored.push({ path, bytes: bytes.byteLength, contentType });
     return { ok: true as const, path };
   }
@@ -663,8 +673,8 @@ async function main() {
     provider.decisionJson = v3Decision('sess-1');
     const appr = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, deps);
     eq('sync approved', appr.body, { ok: true, status: 'approved', faceVerified: true, userActionRequired: false });
-    eq('sync reference stored in private liveness path', db.stored.map((s) => s.path), [`${USER_A}/liveness/reference.jpg`]);
-    eq('sync row reference_path', db.rows[0].referencePath, `${USER_A}/liveness/reference.jpg`);
+    eq('sync reference stored in private liveness path', db.stored.map((s) => s.path), [`${USER_A}/liveness/row-1/reference.jpg`]);
+    eq('sync row reference_path', db.rows[0].referencePath, `${USER_A}/liveness/row-1/reference.jpg`);
     eq('sync approve rpc called once', db.approveCalls, 1);
     eq('sync approved reason', db.rows[0].providerReason, 'liveness_approved');
 
@@ -862,7 +872,7 @@ async function main() {
     provider.imageOk = true;
     const fixed = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, deps);
     eq('image recovered → approved', fixed.body, { ok: true, status: 'approved', faceVerified: true, userActionRequired: false });
-    eq('image recovered stored path', db.rows[0].referencePath, `${USER_A}/liveness/reference.jpg`);
+    eq('image recovered stored path', db.rows[0].referencePath, `${USER_A}/liveness/row-1/reference.jpg`);
 
     // Provider 가 reference_image 자체를 주지 않는 경우
     const db2 = new MemoryFaceDb();
@@ -931,7 +941,7 @@ async function main() {
     const repaired2 = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, deps);
     eq('repair missing reference via sync', repaired2.body.faceVerified, true);
     eq('repair missing reference re-downloaded', db.stored.length, stored + 1);
-    eq('repair missing reference path set', db.rows[0].referencePath, `${USER_A}/liveness/reference.jpg`);
+    eq('repair missing reference path set', db.rows[0].referencePath, `${USER_A}/liveness/row-1/reference.jpg`);
 
     // (c) 웹훅 경로에서도 복구 (Approved 재전송)
     db.verifiedUsers.delete(USER_A);
@@ -950,6 +960,62 @@ async function main() {
     const changed = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, deps);
     eq('repair with liveness no longer approved → not verified', changed.body.faceVerified, false);
     ok('repair never verifies without liveness', !db.verifiedUsers.has(USER_A));
+  }
+
+  // ── #11 이전 세션의 늦은 승인은 최신 승인을 덮어쓰지 못한다 (세션별 경로 · superseded) ─
+  {
+    const db = new MemoryFaceDb();
+    const provider = new FakeProvider();
+    const deps = { ...makeDeps(db, provider), webhookSecret: SECRET };
+    await handleStartFaceLiveness({ userId: USER_A, body: {} }, deps); // row-1 / sess-1
+    provider.createResult = { ok: true, sessionId: 'sess-2', sessionToken: 'tok-2', expiresAt: null, providerStatus: 'Not Started' };
+    await handleStartFaceLiveness({ userId: USER_A, body: {} }, deps); // row-1 superseded, row-2 / sess-2
+    eq('old session superseded on restart', [db.rows[0].status, db.rows[0].providerReason], ['expired', 'superseded']);
+
+    provider.decisionJson = v3Decision('sess-2');
+    const appr = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-2' } }, deps);
+    eq('new session approved', appr.body.status, 'approved');
+    eq('new session image in its own folder', db.stored.map((s) => s.path), [`${USER_A}/liveness/row-2/reference.jpg`]);
+
+    // 이전 세션(sess-1)의 웹훅이 늦게 Approved 로 도착
+    provider.decisionJson = v3Decision('sess-1');
+    const stored = db.stored.length;
+    const rpc = db.approveCalls;
+    const late = await handleDiditWebhook(await signedWebhook(v3Event({ event_id: 'evt-late-old', session_id: 'sess-1', created_at: nowSec + 30, timestamp: nowSec + 30 })), deps);
+    eq('late old-session webhook ignored as superseded', late.body, { ignored: 'superseded', status: 'expired' });
+    eq('late old-session did not download image', db.stored.length, stored);
+    eq('late old-session did not call approve rpc', db.approveCalls, rpc);
+    eq('old row stays expired/superseded', [db.rows[0].status, db.rows[0].providerReason], ['expired', 'superseded']);
+    eq('current row untouched', [db.rows[1].status, db.rows[1].referencePath], ['approved', `${USER_A}/liveness/row-2/reference.jpg`]);
+    ok('user still verified', db.verifiedUsers.has(USER_A));
+    // 앱이 이전 세션 id 로 sync 해도 사용자 플래그는 true 로 돌려준다 (다음 단계 진행 근거)
+    const oldSync = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, deps);
+    eq('sync of superseded session reports user verified', oldSync.body, { ok: true, status: 'expired', faceVerified: true, userActionRequired: false });
+
+    // 경쟁: 플래그 검사 시점엔 미인증이었지만 RPC 시점에 다른 approved 행이 있는 경우 → RPC 가 superseded 로 마감, 저장된 이미지는 세션별 경로라 현재 인증과 겹치지 않는다
+    const db2 = new MemoryFaceDb();
+    const p2 = new FakeProvider();
+    const deps2 = { ...makeDeps(db2, p2), webhookSecret: SECRET };
+    await handleStartFaceLiveness({ userId: USER_A, body: {} }, deps2); // row-1 / sess-1 pending
+    db2.rows.push({ ...db2.rows[0], id: 'row-9', providerSessionId: 'sess-9', status: 'approved', livenessPassed: true, referencePath: `${USER_A}/liveness/row-9/reference.jpg` });
+    // (users.face_verified 는 아직 false — 비정상/경쟁 상태)
+    p2.decisionJson = v3Decision('sess-1');
+    const race = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, deps2);
+    eq('race: rpc refuses second approval as superseded', race.body.status, 'expired');
+    eq('race: old row closed with its own image path for cleanup', [db2.rows[0].status, db2.rows[0].providerReason, db2.rows[0].referencePath], ['expired', 'superseded', `${USER_A}/liveness/row-1/reference.jpg`]);
+    eq('race: approved row path not overwritten', db2.rows[1].referencePath, `${USER_A}/liveness/row-9/reference.jpg`);
+    ok('race: stored paths distinct', db2.stored.every((s) => s.path !== `${USER_A}/liveness/row-9/reference.jpg`));
+
+    // in_review 행(관리자 검토 중)은 사용자가 다른 세션으로 인증되지 않은 한 그대로 유지된다
+    const db3 = new MemoryFaceDb();
+    const p3 = new FakeProvider();
+    const deps3 = { ...makeDeps(db3, p3), webhookSecret: SECRET };
+    await handleStartFaceLiveness({ userId: USER_A, body: {} }, deps3);
+    p3.decisionJson = v3Decision('sess-1', { liveness_checks: [livenessNode({ matches: [{ x: 1 }] })] });
+    await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, deps3);
+    eq('in_review row kept for admin', db3.rows[0].status, 'in_review');
+    const again = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, deps3);
+    eq('in_review sync again stays in_review (duplicate)', again.body.status, 'in_review');
   }
 
   // ── 관리자 검토 (in_review 해소) ──────────────────────────────────────
@@ -1037,8 +1103,9 @@ async function main() {
     eq('image http error', (await downloadImage(fakeFetch(403, 'image/jpeg', 10), 'https://x/y.jpg', opts)), { ok: false, reason: 'http_error' });
     const okImg = await downloadImage(fakeFetch(200, 'image/png; charset=binary', 10), 'https://x/y.png', opts);
     ok('image ok png', okImg.ok && okImg.contentType === 'image/png' && okImg.bytes.byteLength === 10);
-    eq('reference path jpeg', referenceImagePath(USER_A, 'image/jpeg'), `${USER_A}/liveness/reference.jpg`);
-    eq('reference path png', referenceImagePath(USER_A, 'image/png'), `${USER_A}/liveness/reference.png`);
+    eq('reference path jpeg', referenceImagePath(USER_A, 'row-1', 'image/jpeg'), `${USER_A}/liveness/row-1/reference.jpg`);
+    eq('reference path png', referenceImagePath(USER_A, 'row-2', 'image/png'), `${USER_A}/liveness/row-2/reference.png`);
+    ok('reference paths differ per session', referenceImagePath(USER_A, 'row-1', 'image/jpeg') !== referenceImagePath(USER_A, 'row-2', 'image/jpeg'));
   }
 
   console.log(`face selftest: ${passed} passed, ${failed} failed`);

@@ -178,7 +178,8 @@ async function syncSession(
     return { status: 200, body: { ok: true, status: 'approved', faceVerified: repaired.faceVerified, userActionRequired: false } };
   }
   if (row.status === 'rejected' || row.status === 'expired') {
-    return { status: 200, body: { ok: true, status: row.status, faceVerified: false, userActionRequired: false } };
+    // 종료된 세션 — 사용자가 다른 세션으로 이미 인증됐을 수 있으므로(superseded, #11) 플래그는 실제 값을 돌려준다
+    return { status: 200, body: { ok: true, status: row.status, faceVerified: await db.isUserFaceVerified(userId), userActionRequired: false } };
   }
 
   const decision = await provider.getDecision(sessionId, { userId: row.userId });
@@ -190,7 +191,8 @@ async function syncSession(
 
   const applied = await applyDecisionToRow({ row, decision: decision.decision, eventAt: deps.now(), db, provider, log });
   const status = applied.status;
-  const faceVerified = status === 'approved' ? await db.isUserFaceVerified(userId) : false;
+  // faceVerified 는 항상 users.face_verified 의 실제 값 — 이 세션이 다른 세션에 대체(superseded)됐어도 사용자는 인증된 상태일 수 있다 (#11)
+  const faceVerified = await db.isUserFaceVerified(userId);
   const userActionRequired =
     status === 'pending' && (decision.decision.userActionRequired || providerStatusRequiresUserAction(row.providerStatus));
   return { status: 200, body: { ok: true, status, faceVerified, userActionRequired } };

@@ -59,6 +59,7 @@ eq('server approved row but flag false → keep processing', mapServerStatus({ s
 eq('server in_review', mapServerStatus({ status: 'in_review', faceVerified: false, sessionId: 's1' }), { kind: 'in_review', sessionId: 's1' });
 eq('server rejected → generic failure (no reason exposed)', mapServerStatus({ status: 'rejected', faceVerified: false, sessionId: 's1' }), { kind: 'error', code: 'liveness_failed' });
 eq('server expired', mapServerStatus({ status: 'expired', faceVerified: false, sessionId: 's1' }), { kind: 'error', code: 'session_expired' });
+eq('server expired but user verified (superseded session, #11) → approved', mapServerStatus({ status: 'expired', faceVerified: true, sessionId: 's1' }), { kind: 'approved' });
 eq('server pending', mapServerStatus({ status: 'pending', faceVerified: false, sessionId: 's1', processing: { startedAt: NOW } }), { kind: 'processing', sessionId: 's1', startedAt: NOW });
 
 // ── 취소 후 재시도 ─────────────────────────────────────────────────────────
