@@ -62,6 +62,7 @@ Issue #3 기준 환경 모델. 핵심 원칙은 두 가지다.
 | `DIDIT_WORKFLOW_ID` | didit 사용 시 필수 | **필수** (didit 시) | **필수** | 아니오 (비공개 취급) | Liveness-only 워크플로 ID (라이브니스 노드 1개, 3D Action & Flash, 최대 3회, Face Search). Decision/웹훅 `workflow_id` 대조 |
 | `DIDIT_WEBHOOK_SECRET` | didit 사용 시 필수 | **필수** (didit 시) — staging 앱의 secret | **필수** — production 앱의 secret | **예** | didit-webhook 의 `X-Signature-V2` 검증. 콘솔 웹훅 destination 은 **V3** 여야 한다. 없으면 모든 웹훅 500 |
 | `DIDIT_API_BASE_URL` | — | — | — | 아니오 | 선택. 기본 `https://verification.didit.me`. https 가 아니면 기동 실패 |
+| `FACE_CONSENT_VERSION` | 생략 가능 | 생략 가능 (설정 시 코드 버전과 일치) | **필수** — `faceConsentPolicy.ts` 의 `version` 과 동일 | 아니오 | #12 얼굴 정보 처리 동의 문서 버전 승인. production 에서 미설정·불일치·문서 draft 면 start-face-liveness 가 새 세션을 503 으로 거부 (`docs/face-consent.md`) |
 | `ALLOW_DEV_LOGIN` | `1` (dev-login 쓸 때) | 필요 시 `1` | **설정 금지** — 설정돼도 403 | 아니오 | dev-login opt-in |
 | `DEV_LOGIN_PASSWORD` | 생략 가능 (seed 기본값) | 고유 값 권장 | 해당 없음 (dev-login 미배포) | 예 | dev-login 계정 비밀번호 |
 | `DEV_LOGIN_ALLOW_ANY_PHONE` | 필요 시 `1` | 필요 시 `1` | 해당 없음 | 아니오 | 테스트 대역 외 번호 허용 |
@@ -78,7 +79,8 @@ Issue #3 기준 환경 모델. 핵심 원칙은 두 가지다.
 | `SUPABASE_URL` | 아니오 | 환경별 프로젝트 URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | **예** | 서버 컴포넌트에서만 사용. `NEXT_PUBLIC_*` 로 절대 노출 금지 |
 | `ADMIN_PASSWORD` | **예** | 관리자 로그인. 로그인 5회 실패 시 IP 당 15분 잠금 (#27) |
-| `ADMIN_SESSION_SECRET` | **예** | 세션 쿠키 서명 키(16자+, #27). 없으면 `ADMIN_PASSWORD` 에서 파생 — 비밀번호 변경 시 전 세션 무효. production 권장 설정 |
+| `ADMIN_SESSION_SECRET` | **예** | 세션 쿠키 서명 키(#27). **production(NODE_ENV=production) 필수, 32자+** — 없으면 로그인·세션 검증이 실패한다. development 는 16자+ 또는 미설정 시 `ADMIN_PASSWORD` 파생 |
+| `ADMIN_TRUST_PROXY_HEADERS` | 아니오 | `1` 이면 로그인 제한 키에 `x-forwarded-for`/`x-real-ip` 를 사용 (신뢰할 수 있는 프록시 뒤에서만). 기본은 헤더를 믿지 않고 모든 클라이언트가 한 키를 공유 (`docs/security.md` 4절) |
 | `ADMIN_ACTOR_LABEL` | 아니오 | 선택. 로그인 화면에서 처리자 이름을 비웠을 때 감사 기록(`admin_audit_log.actor` · `face_verification_reviews.actor`)에 남는 기본 이름. 기본 `admin-web` |
 
 ## dev-login 정책 (fail-closed allowlist)
