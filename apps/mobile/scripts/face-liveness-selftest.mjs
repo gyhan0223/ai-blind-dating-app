@@ -22,6 +22,7 @@ import {
   mapSdkResult,
   mapServerStatus,
   mapStartFailure,
+  needsFaceConsent,
   nextStateAfterSdk,
   PROCESSING_TIMEOUT_MS,
   providerStatusRequiresUserAction,
@@ -155,6 +156,19 @@ for (const [code, msg] of Object.entries(FACE_ERROR_MESSAGES)) {
   const text = `${msg.title} ${msg.body}`;
   eq(`message ${code} has no provider/duplicate leak`, /didit|중복|유사|다른 계정/i.test(text), false);
   eq(`message ${code} is korean`, /[가-힣]/.test(text), true);
+}
+
+// ── #12 얼굴 정보 처리 별도 동의 ──────────────────────────────────────────
+eq('start 403 consent_required → consent code', mapStartFailure({ status: 403, body: { error: 'consent_required', currentVersion: 'v' } }), { code: 'consent_required' });
+eq('start 409 consent_version_mismatch', mapStartFailure({ status: 409, body: { error: 'consent_version_mismatch' } }), { code: 'consent_version_mismatch' });
+eq('start 503 consent_policy_not_ready', mapStartFailure({ status: 503, body: { error: 'consent_policy_not_ready' } }), { code: 'consent_policy_not_ready' });
+eq('no consent rows → needs consent', needsFaceConsent([], 'v2'), true);
+eq('old version only → needs consent', needsFaceConsent([{ doc_version: 'v1', revoked_at: null }], 'v2'), true);
+eq('current version → no consent screen', needsFaceConsent([{ doc_version: 'v2', revoked_at: null }], 'v2'), false);
+eq('revoked current version → needs consent', needsFaceConsent([{ doc_version: 'v2', revoked_at: '2026-01-01' }], 'v2'), true);
+eq('lookup failure → unknown (server decides)', needsFaceConsent(null, 'v2'), null);
+for (const code of ['consent_required', 'consent_version_mismatch', 'consent_policy_not_ready']) {
+  eq(`${code} message has no dev placeholder`, /TODO|\[확인 필요\]|draft/i.test(FACE_ERROR_MESSAGES[code].body), false);
 }
 
 console.log(`face flow selftest: ${passed} passed, ${failed} failed`);

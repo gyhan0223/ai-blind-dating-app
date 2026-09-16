@@ -93,6 +93,11 @@ if [[ "${WITH_FACE_SESSION_ASSETS_TESTS:-1}" == "1" && -f face_session_assets_te
   $PSQL -d "$DB_NAME" -f face_session_assets_tests.sql
 fi
 
+if [[ "${WITH_FACE_CONSENTS_TESTS:-1}" == "1" && -f face_consents_tests.sql ]]; then
+  echo "running face consents tests (#12 — 클라이언트 쓰기/위조 차단 · 서버 시각 · 멱등 · 본인 조회 · 익명화/hard delete 삭제)"
+  $PSQL -d "$DB_NAME" -f face_consents_tests.sql
+fi
+
 if [[ "${WITH_PUSH_TESTS:-1}" == "1" && -f push_tests.sql ]]; then
   echo "running push tests (#17 — 토큰/설정 RLS · outbox 트리거 · dequeue/mark 서버 전용)"
   $PSQL -d "$DB_NAME" -f push_tests.sql

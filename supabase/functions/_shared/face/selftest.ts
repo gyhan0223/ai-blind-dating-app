@@ -56,6 +56,8 @@ import {
   type ProviderSessionResult,
 } from './FaceLivenessProvider.ts';
 import { handleStartFaceLiveness } from './startFaceLivenessCore.ts';
+import type { FaceConsentDb } from '../consent/faceConsentDb.ts';
+import { FACE_CONSENT_POLICY, faceConsentReadiness } from '../consent/faceConsentPolicy.ts';
 
 let passed = 0;
 let failed = 0;
@@ -289,6 +291,33 @@ class FakeProvider implements FaceLivenessProvider {
   }
 }
 
+/** 인메모리 동의 기록 (0030 규칙: (user, kind, version) 유일, 시각은 서버) */
+class MemoryConsentDb implements FaceConsentDb {
+  rows: { userId: string; kind: string; version: string; grantedAt: string }[] = [];
+  failRead = false;
+  failWrite = false;
+  recordCalls = 0;
+  async hasCurrentConsent(userId: string, kind: string, version: string) {
+    if (this.failRead) return { ok: false as const };
+    const r = this.rows.find((c) => c.userId === userId && c.kind === kind && c.version === version);
+    return { ok: true as const, consented: !!r, grantedAt: r?.grantedAt ?? null };
+  }
+  async recordConsent(userId: string, kind: string, version: string) {
+    this.recordCalls += 1;
+    if (this.failWrite) return { ok: false as const };
+    let r = this.rows.find((c) => c.userId === userId && c.kind === kind && c.version === version);
+    const created = !r;
+    if (!r) {
+      r = { userId, kind, version, grantedAt: '2026-09-04T00:00:00.000Z' };
+      this.rows.push(r);
+    }
+    return { ok: true as const, grantedAt: r.grantedAt, created };
+  }
+}
+
+const CONSENT_VERSION = FACE_CONSENT_POLICY.version;
+const readyPolicy = { kind: FACE_CONSENT_POLICY.kind, version: CONSENT_VERSION, readiness: { ready: true as const } };
+
 const USER_A = '55555555-5555-5555-5555-555555555555';
 const USER_B = '66666666-6666-6666-6666-666666666666';
 const SECRET = 'test-webhook-secret-not-real';
@@ -338,9 +367,14 @@ async function signedWebhook(body: Record<string, unknown>, secret = SECRET) {
 const NOW = new Date('2026-09-04T00:00:00Z');
 const nowSec = Math.floor(NOW.getTime() / 1000);
 
-function makeDeps(db: MemoryFaceDb, provider: FakeProvider) {
+/** 기본 deps — 동의는 미리 기록된 상태 (동의 자체는 아래 #12 절에서 검증) */
+function makeDeps(db: MemoryFaceDb, provider: FakeProvider, consents?: MemoryConsentDb) {
   db.now = () => NOW;
-  return { db, provider, now: () => NOW, log: silentLogger };
+  const c = consents ?? new MemoryConsentDb();
+  if (!consents) {
+    for (const u of [USER_A, USER_B]) c.rows.push({ userId: u, kind: FACE_CONSENT_POLICY.kind, version: CONSENT_VERSION, grantedAt: '2026-09-01T00:00:00.000Z' });
+  }
+  return { db, provider, consents: c, consentPolicy: readyPolicy, now: () => NOW, log: silentLogger };
 }
 
 /** V3 웹훅 payload 축약 (event_id · webhook_type 포함) */
@@ -1090,6 +1124,99 @@ async function main() {
     const repaired = await handleAdminFaceReview({ body: { action: 'repair', rowId, actor: 'ops' } }, deps);
     eq('admin repair ok', repaired.body, { ok: true, status: 'approved', faceVerified: true });
     eq('admin repair on non-approved → 409', (await handleAdminFaceReview({ body: { action: 'repair', rowId: db2.rows[0].id, actor: 'ops' } }, deps2)).status, 409);
+  }
+
+  // ── #12 얼굴 정보 처리 별도 동의 — 서버 검증 ─────────────────────────
+  {
+    const db = new MemoryFaceDb();
+    const provider = new FakeProvider();
+    const consents = new MemoryConsentDb();
+    const deps = { ...makeDeps(db, provider, consents), webhookSecret: SECRET };
+
+    // 미동의 start → 403, Provider 호출 없음, 행도 만들지 않는다
+    const noConsent = await handleStartFaceLiveness({ userId: USER_A, body: {} }, deps);
+    eq('start without consent → 403 consent_required', [noConsent.status, noConsent.body], [403, { error: 'consent_required', currentVersion: CONSENT_VERSION }]);
+    eq('start without consent → no provider call', provider.createCalls, 0);
+    eq('start without consent → no row', db.rows.length, 0);
+
+    // 타인 동의 위조: body 의 userId/version/시각은 무시 — JWT 사용자에게만, 서버 버전·서버 시각으로 기록
+    const forged = await handleStartFaceLiveness(
+      { userId: USER_A, body: { action: 'consent', version: CONSENT_VERSION, userId: USER_B, user_id: USER_B, consentedAt: '1999-01-01T00:00:00Z' } },
+      deps,
+    );
+    eq('consent recorded for JWT user only', [forged.status, consents.rows.map((r) => r.userId)], [200, [USER_A]]);
+    eq('consent time from server', consents.rows[0].grantedAt, '2026-09-04T00:00:00.000Z');
+    eq('consent response', forged.body, { ok: true, kind: 'face_biometric', version: CONSENT_VERSION, consentedAt: '2026-09-04T00:00:00.000Z' });
+    ok('other user still unconsented', !(await consents.hasCurrentConsent(USER_B, 'face_biometric', CONSENT_VERSION) as { consented: boolean }).consented);
+
+    // 중복 동의 요청 멱등
+    const dup = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'consent', version: CONSENT_VERSION } }, deps);
+    eq('duplicate consent idempotent', [dup.status, consents.rows.length], [200, 1]);
+
+    // 구버전·잘못된 버전·종류 불일치
+    eq('old version consent refused', (await handleStartFaceLiveness({ userId: USER_A, body: { action: 'consent', version: '2000-01-01.0' } }, deps)).body, { error: 'consent_version_mismatch', currentVersion: CONSENT_VERSION });
+    eq('invalid version → 400', (await handleStartFaceLiveness({ userId: USER_A, body: { action: 'consent', version: 'bad version!' } }, deps)).status, 400);
+    eq('other kind → 400', (await handleStartFaceLiveness({ userId: USER_A, body: { action: 'consent', version: CONSENT_VERSION, kind: 'marketing' } }, deps)).status, 400);
+
+    // 동의 뒤 start 성공
+    const started = await handleStartFaceLiveness({ userId: USER_A, body: {} }, deps);
+    eq('start after consent ok', [started.status, provider.createCalls], [200, 1]);
+
+    // 구버전 동의만 있는 사용자(B) — 정책 버전이 올라간 상황 재현
+    consents.rows.push({ userId: USER_B, kind: 'face_biometric', version: '2000-01-01.0', grantedAt: '2000-01-01T00:00:00.000Z' });
+    const oldOnly = await handleStartFaceLiveness({ userId: USER_B, body: {} }, deps);
+    eq('old-version consent only → consent_required', oldOnly.status, 403);
+
+    // 조회 실패 → 503, Provider 호출 없음 (fail-closed)
+    consents.failRead = true;
+    const readFail = await handleStartFaceLiveness({ userId: USER_A, body: {} }, deps);
+    eq('consent lookup failure → 503 without provider call', [readFail.status, readFail.body.error, provider.createCalls], [503, 'consent_unavailable', 1]);
+    consents.failRead = false;
+    // 기록 실패 → 503 (동의 없이 start 하면 403 — Provider 호출 없음)
+    consents.failWrite = true;
+    const c2 = new MemoryConsentDb();
+    c2.failWrite = true;
+    const deps2 = { ...makeDeps(new MemoryFaceDb(), provider, c2), webhookSecret: SECRET };
+    eq('consent write failure → 503', (await handleStartFaceLiveness({ userId: USER_A, body: { action: 'consent', version: CONSENT_VERSION } }, deps2)).status, 503);
+    eq('start after failed consent → 403, no provider call', [(await handleStartFaceLiveness({ userId: USER_A, body: {} }, deps2)).status, provider.createCalls], [403, 1]);
+    consents.failWrite = false;
+
+    // 이미 인증된 사용자는 동의와 무관하게 already_verified (기존 승인 유지 — 재동의 강제 없음)
+    db.verifiedUsers.add(USER_B);
+    eq('verified user start → already_verified regardless of consent', (await handleStartFaceLiveness({ userId: USER_B, body: {} }, deps)).body.error, 'already_verified');
+    db.verifiedUsers.delete(USER_B);
+
+    // 진행 중 세션의 sync · 웹훅은 동의를 요구하지 않는다 (서버 간 처리 회귀 방지)
+    consents.rows.length = 0; // 동의 기록이 사라진 극단 상황
+    provider.decisionJson = v3Decision('sess-1');
+    const synced = await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, deps);
+    eq('sync works without consent row', synced.body.status, 'approved');
+    const db3 = new MemoryFaceDb();
+    const p3 = new FakeProvider();
+    const c3 = new MemoryConsentDb();
+    const deps3 = { ...makeDeps(db3, p3, c3), webhookSecret: SECRET };
+    c3.rows.push({ userId: USER_A, kind: 'face_biometric', version: CONSENT_VERSION, grantedAt: 'x' });
+    await handleStartFaceLiveness({ userId: USER_A, body: {} }, deps3);
+    c3.rows.length = 0;
+    p3.decisionJson = v3Decision('sess-1');
+    eq('webhook works without consent row', (await handleDiditWebhook(good, deps3)).body, { ok: true, status: 'approved' });
+
+    // production 준비 상태: draft 정책 / 미확정 항목 / FACE_CONSENT_VERSION 불일치 → start·consent 모두 503, Provider 호출 없음
+    const prodReadiness = faceConsentReadiness(FACE_CONSENT_POLICY, { appEnv: 'production', configuredVersion: CONSENT_VERSION });
+    ok('draft policy not ready for production', !prodReadiness.ready && prodReadiness.reasons.includes('policy_status_not_final'));
+    ok('unresolved disclosures reported', !prodReadiness.ready && prodReadiness.reasons.some((r) => r.startsWith('unresolved_disclosures:')));
+    eq('production without FACE_CONSENT_VERSION', (faceConsentReadiness({ ...FACE_CONSENT_POLICY, status: 'final', disclosures: { ...FACE_CONSENT_POLICY.disclosures, processor_country: 'x', processor_retention: 'y', contact: 'z' } }, { appEnv: 'production', configuredVersion: undefined }) as { reasons: string[] }).reasons, ['FACE_CONSENT_VERSION_missing']);
+    eq('production version mismatch', (faceConsentReadiness({ ...FACE_CONSENT_POLICY, status: 'final', disclosures: { ...FACE_CONSENT_POLICY.disclosures, processor_country: 'x', processor_retention: 'y', contact: 'z' } }, { appEnv: 'production', configuredVersion: 'other' }) as { reasons: string[] }).reasons, ['FACE_CONSENT_VERSION_mismatch']);
+    eq('production final+resolved+matching → ready', faceConsentReadiness({ ...FACE_CONSENT_POLICY, status: 'final', disclosures: { ...FACE_CONSENT_POLICY.disclosures, processor_country: 'x', processor_retention: 'y', contact: 'z' } }, { appEnv: 'production', configuredVersion: CONSENT_VERSION }), { ready: true });
+    eq('development draft allowed', faceConsentReadiness(FACE_CONSENT_POLICY, { appEnv: 'development', configuredVersion: undefined }), { ready: true });
+    eq('development configured mismatch flagged', faceConsentReadiness(FACE_CONSENT_POLICY, { appEnv: 'staging', configuredVersion: 'other' }), { ready: false, reasons: ['FACE_CONSENT_VERSION_mismatch'] });
+    const notReadyDeps = { ...makeDeps(new MemoryFaceDb(), provider), consentPolicy: { ...readyPolicy, readiness: prodReadiness } };
+    const calls = provider.createCalls;
+    eq('not ready → start 503', (await handleStartFaceLiveness({ userId: USER_A, body: {} }, notReadyDeps)).body.error, 'consent_policy_not_ready');
+    eq('not ready → consent 503', (await handleStartFaceLiveness({ userId: USER_A, body: { action: 'consent', version: CONSENT_VERSION } }, notReadyDeps)).body.error, 'consent_policy_not_ready');
+    eq('not ready → no provider call', provider.createCalls, calls);
+    // 준비되지 않아도 진행 중 세션 sync 는 계속 동작한다 (deps3: sess-1 승인 완료 상태)
+    eq('not ready → sync still works', (await handleStartFaceLiveness({ userId: USER_A, body: { action: 'sync', sessionId: 'sess-1' } }, { ...deps3, consentPolicy: { ...readyPolicy, readiness: prodReadiness } })).body.status, 'approved');
   }
 
   // ── reference image 다운로드 제한 ─────────────────────────────────────

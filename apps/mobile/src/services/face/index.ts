@@ -14,12 +14,15 @@
  *   - 클라이언트는 face_verifications 를 읽을 수만 있고(본인 행), 쓰기는 서버 전용이다.
  *   - 사용자가 예전에 올린 front/left/right.jpg 는 라이브니스가 검증된 이미지가 아니므로 더 이상 사용하지 않는다.
  */
+import { FACE_CONSENT } from '@/constants/faceConsent';
 import { supabase } from '@/lib/supabase';
 import {
+  type FaceConsentRowLike,
   type FaceErrorCode,
   type FaceVerificationRowLike,
   type FaceVerificationStatus,
   mapStartFailure,
+  needsFaceConsent,
 } from './faceFlowCore';
 
 export { isDiditSdkAvailable, runDiditLiveness } from './diditSdk';
@@ -101,6 +104,40 @@ export async function getLatestFaceVerification(userId: string): Promise<FaceVer
     .limit(1)
     .maybeSingle();
   return (data as FaceVerificationRowLike | null) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// 얼굴 정보 처리 별도 동의 (#12)
+//   - 앱은 본인 동의 행을 읽어 화면을 정하고(RLS: 본인 행만), 동의는 서버 액션으로만 기록한다 (사용자·버전·시각은 서버가 정한다).
+//   - 서버가 현재 버전의 동의 기록이 없다고 하면(403 consent_required) 체크박스 상태와 무관하게 세션은 만들어지지 않는다.
+// ---------------------------------------------------------------------------
+
+/** 현재 버전의 동의가 필요한가. true=동의 화면, false=이미 동의, null=조회 실패(서버가 최종 판단) */
+export async function needsFaceConsentForUser(userId: string): Promise<boolean | null> {
+  const { data, error } = await supabase
+    .from('face_consents')
+    .select('doc_version, revoked_at')
+    .eq('user_id', userId)
+    .eq('kind', FACE_CONSENT.kind)
+    .eq('doc_version', FACE_CONSENT.version)
+    .limit(1);
+  if (error) return null;
+  return needsFaceConsent((data as FaceConsentRowLike[] | null) ?? [], FACE_CONSENT.version);
+}
+
+export type RecordFaceConsentResult = { ok: true } | { ok: false; code: FaceErrorCode };
+
+/** 동의 기록 — 서버가 문서 버전을 대조하고 서버 시각으로 저장한다. 같은 버전 재요청은 멱등 */
+export async function recordFaceConsent(): Promise<RecordFaceConsentResult> {
+  const res = await invokeFace({ action: 'consent', kind: FACE_CONSENT.kind, version: FACE_CONSENT.version });
+  if (res.status === 200 && res.body?.ok === true) return { ok: true };
+  const err = typeof res.body?.error === 'string' ? res.body.error : '';
+  if (err === 'consent_version_mismatch') return { ok: false, code: 'consent_version_mismatch' };
+  if (err === 'consent_policy_not_ready') return { ok: false, code: 'consent_policy_not_ready' };
+  if (err === 'beta_admission_required') return { ok: false, code: 'beta_admission_required' };
+  if (res.status === 0) return { ok: false, code: 'network' };
+  if (res.status === 503) return { ok: false, code: 'provider_unavailable' };
+  return { ok: false, code: 'unknown' };
 }
 
 /**
