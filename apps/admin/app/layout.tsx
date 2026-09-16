@@ -26,6 +26,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           <nav>
             <Link href="/">대시보드</Link>
             <Link href="/funnel">퍼널</Link>
+            <Link href="/recommendation-pool">추천 풀</Link>
             <Link href="/users">사용자</Link>
             <Link href="/reports">신고</Link>
             <Link href="/face-reviews">얼굴 검토</Link>

@@ -63,13 +63,22 @@ export type TodayRecommendations = {
   dailyLimit: number;
   /** 오늘 후보가 없다 (서버가 1시간 동안 다시 훑지 않는다 — #23) */
   exhausted: boolean;
+  /**
+   * exhausted 이면서 서버가 탐색 상한(500명)에 걸려 전체 후보를 다 보지 못했다 (#23).
+   * "조건에 맞는 분이 전혀 없다" 고 단정할 수 없는 상태 — 화면 문구를 구분한다
+   */
+  capReached: boolean;
   /** 다른 요청(앱·배치)이 지금 생성 중이라 아직 결과가 없다 — 잠시 후 다시 조회 (#22) */
   inProgress: boolean;
   /** 진행 중인 대화가 3개라 오늘의 새 소개를 만들지 않았다 (#24). 자리가 생기면 다음 소개부터 재개된다 */
   slotsFull: boolean;
 };
 
-/** 오늘의 추천을 가져온다 (없으면 서버가 생성). 서버가 생성 중이면 짧게 기다렸다가 다시 요청한다. */
+/**
+ * 오늘의 추천을 가져온다 (없으면 서버가 생성). 서버가 생성 중이면 짧게 기다렸다가 다시 요청한다.
+ * 서버 오류(HTTP 500 lookup_failed 등)는 throw — 화면은 이를 "후보 부족" 으로 바꾸지 않는다.
+ * "다시 확인" 은 같은 요청을 다시 보낼 뿐이다: 후보 부족 뒤 1시간 안의 재요청은 서버가 다시 훑지 않고 같은 답을 준다 (#23 재시도 주기 우회 없음).
+ */
 export async function fetchTodayRecommendations(): Promise<TodayRecommendations> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const { data, error } = await supabase.functions.invoke('daily-recommendation', { body: {} });
@@ -80,10 +89,12 @@ export async function fetchTodayRecommendations(): Promise<TodayRecommendations>
     }));
     const inProgress = data?.in_progress === true && recommendations.length === 0;
     if (!inProgress || attempt === 2) {
+      const exhausted = data?.exhausted === true;
       return {
         recommendations,
         dailyLimit: data?.daily_limit ?? 1,
-        exhausted: data?.exhausted ?? false,
+        exhausted,
+        capReached: exhausted && data?.cap_reached === true,
         inProgress,
         slotsFull: data?.slots_full === true,
       };

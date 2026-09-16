@@ -67,7 +67,8 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 - 성인 확인은 `age_verified`(본인확인 결과)다. 출생연도 근사 나이로 대체하지 않는다.
 - 얼굴 벡터가 null 이어도 `face_verified=true` 면 통과한다. 벡터가 있다고 인증으로 보지 않는다.
 - 제외: 본인 · 양방향 차단 쌍(`blocks`) · **신고 당사자 쌍**(`reports`, 어느 쪽이 신고했든 그 둘 사이만 — 신고만으로 다른 사용자에게까지 전역 제외하지 않는다)
-  · 내가 좋아요한 상대 · 매치된 적 있는 상대(상태 무관) · 과거에 추천된 적 있는 상대(전체 기간).
+  · 내가 좋아요한 상대 · 매치된 적 있는 상태 무관 상대 · 과거 추천 상대 중 `pending`/`accepted`(영구) 와 최근 30일 안의 `skipped`/`expired`
+  (7절 재추천 주기 — 30일이 지난 skipped/expired 상대는 다시 후보가 된다. 예전 문서의 "전체 기간 제외" 는 0017 이전 정책이다).
 - 운영 제재(`suspended`/`banned`)와 탈퇴(`deleted`)는 `status` 로 걸러진다. 신고 처리·제재 정책 자체는 #15.
 - **동시 대화 3개 제한 (#24, 0026)**: 요청자의 진행 중(active) 매치가 3개면 후보를 훑지 않고 `slots_full`(HTTP 200 `slots_full: true`, 실행 기록 `result='slots_full'`) 로 끝낸다 —
   후보 부족(`exhausted`)과 다른 결과다. 그날은 다시 훑지 않고(`recommendation_run_claim` skip) 자리가 생기면 **다음 날** 소개부터 재개된다. 진행 중 매치가 3개인 후보도 제외한다
@@ -104,8 +105,9 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 - **멱등성 (#22)**: `recommendation_run_claim(user_id, KST 날짜)` 가 (사용자, 날짜) 당 한 실행만 코어를 돌린다 (`recommendation_runs` 행 잠금 + lease 90초).
   동시 요청은 `busy` 를 받고 잠시 기다렸다가 저장된 오늘 추천을 읽는다. 실행이 죽으면 lease 만료 후 다른 요청이 다시 맡는다.
   코어의 insert 가 충돌해도 빈 응답 대신 오늘 저장된 행을 다시 읽어 돌려준다. 검증: `recommendation_runs_tests.sql` · `recommendation_claim_concurrency_test.sh` · selftest.
-- **후보 부족 재시도 주기 (#23)**: `exhausted` 로 끝난 뒤 1시간 안의 재요청은 후보를 다시 훑지 않고 같은 답을 돌려준다(`skip`). 앱은
-  "오늘은 소개할 분이 없어요 — 새로운 분이 가입하거나 시간이 지나면 다시 찾아본다, 조건을 임의로 넓히지 않는다" 를 보여준다. 배치도 같은 규칙으로 건너뛴다.
+- **후보 부족 재시도 주기 (#23)**: `exhausted` 로 끝난 뒤 1시간 안의 재요청은 후보를 다시 훑지 않고 같은 답을 돌려준다(`skip`, 실행 기록의 `cap_reached` 를 함께 돌려준다).
+  앱은 전체 탐색을 끝낸 경우 "오늘은 소개할 분이 없어요 — 필수 조건을 동의 없이 넓히지 않는다" 를, 탐색 상한에 걸린 경우(`cap_reached: true`) "아직 다 살펴보지 못했어요" 를 보여 준다
+  (12절). 앱의 "다시 확인" 은 같은 요청을 다시 보낼 뿐이라 이 주기를 우회하지 않는다. 배치도 같은 규칙으로 건너뛴다.
 
 ## 8. 추천 이유는 공개된 사실만
 
@@ -151,15 +153,118 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 - 배치가 아직 안 돌았어도 앱을 열면 `daily-recommendation` 이 바로 생성한다. 배치는 "아침에 미리 준비" 용이다 (Push 는 #17).
 - 배포: `0017_recommendation_runs.sql` → `supabase functions deploy daily-recommendation daily-recommendation-batch` → cron 등록.
   0017 은 `recommendations` 의 unique 제약을 바꾸므로 seed 의 `on conflict (user_id, candidate_id, for_date)` 와 같이 배포한다.
-
-## 11. 검증
-
-- `supabase/functions/_shared/matching/selftest.ts` — 엔진·코어 단위 (in-memory DataSource). 실패 시 exit 1. #24: 요청자 가득 참 → slotsFull(재훑기·저장 없음), 가득 찬 후보 제외, claim skip(slots_full).
-- `supabase/tests/recommendation_db_test.mjs` — 실제 Postgres(마이그레이션+seed) 위에서 DB → 스냅샷 → 엔진 → 저장 → 카드 반환.
-  seed 의 과거 외모 데이터를 지워도 같은 결과, 신규 무외모 사용자 추천, 인증·차단·신고·exhausted, reasons 불변.
-  `run_local_check.sh` 가 함께 실행한다.
-- 실제 Didit 인증·실기기·원격 Supabase(PostgREST) 경로는 로컬에서 실행하지 않는다 — 배포 후 확인 대상.
+  관측 컬럼·통계 함수(#23)는 `0027_recommendation_observability.sql` — 배포 순서는 12절.
 
 ## 11. 선호·프로필 수정의 반영 시점 (#25)
 
-DataSource 는 추천 **생성 시점** 에 `profiles / preference_settings / dealbreakers / private_profiles` 를 읽는다. 사용자가 내 정보에서 조건을 바꾸면 다음 추천 생성부터 반영되고, 이미 만들어진 오늘의 추천은 다시 계산하지 않는다 (앱이 안내). 자세한 내용은 `docs/profile-edit.md`.
+DataSource 는 추천 **생성 시점** 에 `profiles / preference_settings / dealbreakers / private_profiles` 를 읽는다. 사용자가 내 정보에서 조건을 바꾸면 다음 추천 생성부터 반영되고, 이미 만들어진 오늘의 추천은 다시 계산하지 않는다 (앱이 안내 — 홈의 후보 없음 카드에서도 "선호 조건 보기" 로 같은 화면에 간다). 자세한 내용은 `docs/profile-edit.md`.
+
+## 12. 후보 부족 처리와 운영 관측 (#23, 0027)
+
+초기 풀이 작아 추천이 안 만들어져도 필수 조건을 완화하지 않는다. 대신 **왜 안 만들어졌는지** 와 **후보가 몇 명이었는지** 를 실행 기록으로 남기고 운영자가 본다.
+외모 점수·얼굴 벡터·LLM 은 관측에도 쓰지 않는다. 엔진의 필터를 통계 쪽에서 복제하지 않는다 — 엔진이 실행 중 본 값을 그대로 기록한다.
+
+### 12.1 실행 결과 (`recommendation_runs`, 사용자·KST 날짜당 1행 = 최종 결과)
+
+| 결과 | 조건 | 기록 |
+|---|---|---|
+| 새 추천 생성 | `result='ok'` + `recommendation_id` | `eligible_count`(적격 후보 수), `strategy`/`basis`(저장된 추천 행에서 복사) |
+| 탐색을 끝냈지만 적격 후보 없음 | `result='exhausted'`, `cap_reached=false` | `eligible_count=0`, `scanned`(평가한 후보 수) |
+| 탐색 상한 도달 | `result='exhausted'`, `cap_reached=true` | `eligible_count` 는 훑은 범위 안의 **하한** — 전체 규모가 아니다 |
+| 요청자 대화 3개로 중단 | `result='slots_full'` | `eligible_count=null`(훑지 않음) |
+| 데이터 조회·처리 오류 | `status='failed'`, `result in ('lookup_failed','error')` | `error_stage`(실패 단계). 0명으로 세지 않는다 |
+| 이미 생성된 결과 반환 / 재시도 대기 / 생성 중 | claim `skip` / `busy` — **행을 만들지도 바꾸지도 않는다** | 재방문·재시도·앱과 배치 중첩은 집계에 들어가지 않는다 |
+
+- **적격 후보** = 양방향 필수 조건 · 인증/계정 상태 · 차단/신고 쌍 · 추천(30일 쿨다운)/좋아요/매치 이력 · 상대의 대화 자리(3개)를 모두 통과한 후보 (선택된 상대 포함). `scanned`(제외 목록을 뺀 뒤 평가한 수)와 다르다.
+- `strategy`(`high_confidence`/`exploration`/`fallback`)는 DB check·analytics **호환용 내부 라벨**이다 (scored 총점 ≥0.62 인 1순위 / ≥0.5 / 그 외). 매칭 정확도·궁합 확률을 뜻하지 않으며 사용자에게 그런 표현으로 노출하지 않는다.
+  `fallback` 도 필수 조건을 통과한 후보(ranked)에서만 나온다. `basis`(`scored`/`conditions_only`)를 함께 기록해 "점수를 계산한 추천" 과 "조건만 통과한 추천" 을 구분한다.
+- 0027 이전 실행 기록과 훑지 않은 실행의 `eligible_count` 는 `null` = **미측정**이다. 추정해 채우지 않는다.
+
+### 12.2 전략 분석 이벤트 (`analytics_events.recommendation_created`)
+
+- `recommendations` insert 트리거가 **같은 트랜잭션**에서 1건 기록한다 — 추천 행은 있는데 이벤트만 없는 상태가 생기지 않는다.
+- `payload->>'recommendation_id'` 부분 unique 인덱스로 같은 추천에 두 번 기록될 수 없다 (앱 재방문·재시도·앱과 배치 중첩은 애초에 추천 행을 두 번 만들지 못한다: `recommendation_run_claim` + `(user_id, candidate_id, for_date)` unique).
+- payload: `recommendation_id · candidate_id · strategy · basis · for_date · source`. 카드·점수·비공개 응답·얼굴 데이터·연락처·채팅 원문은 없다.
+- 과거 행은 저장된 `strategy` 를 그대로 복원했다 (`source='backfill_0027'`, `created_at` = 추천 생성 시각). `dimensions.basis` 가 없는 0015 이전 행은 `basis=null`(미측정).
+- 수락·넘김은 기존 `recommendation_accepted`(서버 RPC) / `recommendation_skipped`(앱) 이벤트가 `strategy` 를 갖고 있다. 퍼널 수치는 계속 뷰(행 존재) 기준이며 이벤트는 보조다.
+
+### 12.3 운영자용 후보 규모 통계 (관리자 `/recommendation-pool`)
+
+DB 함수 `recommendation_pool_stats(p_window_days)` · `recommendation_run_stats(p_window_days)` (service role 전용, 일반 사용자 호출 불가). 세그먼트 = **요청자**의 성별 · 지역 코드 · 연령대(5세 구간, `beta_waitlist_summary` 와 같은 계산) + 전체 행. demo 계정은 요청자에서 제외한다.
+전체 사용자 쌍을 계산하지 않는다 (O(N²) 없음) — 최근 실행이 남긴 관측치를 집계한다.
+
+**사용자별 최근 실행 기준** (`recommendation_pool_stats`, 단위: 사용자 수, 기간 = 최근 N일(오늘 포함) 안 마지막으로 끝난 실행):
+
+| 열 | 뜻 |
+|---|---|
+| `eligible_users` | 추천 대상 사용자 — active · 온보딩 · 본인/얼굴/성인 인증 (단순 가입자 수가 아니다) |
+| `slots_full_now_users` | 그중 **지금** 진행 중 대화가 3개 이상인 사용자 (현재 상태) |
+| `with_candidates_users` / `zero_candidates_users` | 최근 실행이 전체 탐색을 끝냈고 적격 후보 ≥1 / =0 |
+| `cap_reached_users` | 최근 실행이 탐색 상한에 걸림 — 전체 규모를 알 수 없다 (0명으로도 N명으로도 세지 않는다) |
+| `latest_slots_full_users` | 최근 실행이 대화 3개로 중단 |
+| `latest_failed_users` | 최근 실행이 조회·처리 오류 — 0명으로 세지 않는다 |
+| `unmeasured_users` | 기간 안 끝난 실행 없음 · 0027 이전 기록 · 훑지 않은 실행(저장된 추천 반환) |
+| `eligible_median/min/max` | with/zero 사용자의 **사용자별** 관측치. 후보는 사용자마다 겹치므로 합계는 "서로 다른 전체 후보 인원" 이 아니다 — 합계 열을 두지 않는다 |
+| `demo_eligible_accounts` | 추천 자격을 갖춘 demo 계정 수 — 엔진은 demo 를 후보에서 걸러내지 않으므로(seed 의 demo 는 production 에 두지 않는 것이 기존 정책) 0 이 아니면 실제 사용자의 후보 수에 섞일 수 있다 |
+| `window_days` · `measured_at` | 집계 기간 · 측정 시각 |
+
+각 사용자는 with / zero / cap / slots_full / failed / unmeasured 중 정확히 하나로 센다 (합이 `eligible_users`).
+
+**기간 내 전체 실행 기준** (`recommendation_run_stats`, 단위: 실행 행 = 사용자·날짜당 최종 결과 / 추천 행): `runs · runs_ok · runs_exhausted_complete · runs_exhausted_cap · runs_slots_full · runs_failed · runs_other`,
+`recommendations_created · strategy_high_confidence/exploration/fallback · basis_scored/conditions_only/unmeasured`, `window_from · window_to`. 생성·전략 건수는 저장된 추천 행에서 센다 — HTTP 요청 수가 아니다.
+
+**측정 한계**: 하루에 exhausted → (1시간 뒤) ok 처럼 결과가 바뀌면 같은 행이 덮어써져 최종 결과만 남는다(`attempts` 로 재시도 횟수는 남는다). 최근 실행이 없는 사용자는 후보 규모를 모른다(미측정). 상한 도달 사용자의 후보 수는 하한이다.
+익명화된 요청자는 프로필이 없어 세그먼트 집계에서 빠진다. 30명 미만 세그먼트로 결론을 내지 않는다.
+
+### 12.4 홈 대기 화면 (`apps/mobile/src/app/(tabs)/index.tsx`)
+
+| 서버 응답 | 화면 |
+|---|---|
+| HTTP 5xx / 네트워크 오류 | "추천을 불러오지 못했어요 — 소개할 분이 없다는 뜻은 아니에요" + 다시 시도 (후보 부족 문구로 바꾸지 않는다) |
+| `in_progress` | "오늘 소개할 분을 준비하고 있어요" + 다시 확인 |
+| `slots_full` | "진행 중인 대화가 3개예요" + 대화 목록 |
+| `exhausted` (완전 탐색) | "오늘은 소개할 분이 없어요 — 필수 조건을 동의 없이 넓히지 않는다, 다시 찾는 건 1시간에 한 번" + 다시 확인 + 선호 조건 보기(다음 소개부터 반영) |
+| `exhausted` + `cap_reached` | "아직 다 살펴보지 못했어요 — 조건에 맞는 분이 없다고 단정하지 않는다" + 같은 버튼 |
+| 오늘 추천을 이미 수락/넘김 | "오늘의 소개를 확인했어요" |
+
+"소개가 준비되면 알려드릴게요" 는 기기 알림 권한이 허용돼 있고 `notification_preferences.daily_recommendation` 이 켜진 경우에만 붙는다. 소개 생성 push 는 기존 outbox 트리거(`recommendations_notify`, dedupe `recommendation:<user>:<date>`)가 하루 1건만 만들며 이번 변경은 추천 insert 경로를 바꾸지 않았다 (push 신규 구축·APNs/EAS 는 #17).
+
+### 12.5 배포 순서 (Windows PowerShell — 한 줄씩, 프로젝트 ref·secret 은 환경변수로)
+
+```powershell
+# 0) 로컬 검증 (WSL/Git Bash 의 bash 사용)
+cd supabase\tests
+bash run_local_check.sh
+cd ..\functions\_shared\matching
+node --experimental-strip-types selftest.ts
+cd ..\..\..\..\apps\admin
+npx tsc --noEmit
+cd ..\mobile
+npx tsc --noEmit
+cd ..\..
+
+# 1) DB — 0027 (additive: 컬럼·트리거·통계 함수·finish 시그니처 확장. 기존 추천·매치·채팅 행 보존)
+$env:SUPABASE_PROJECT_REF = "<project-ref>"
+supabase link --project-ref $env:SUPABASE_PROJECT_REF
+supabase db push
+
+# 2) Edge Functions — finish 8인자·cap_reached 응답 (0027 이전 DB 에 배포해도 기본값으로 동작하지만 관측값은 기록되지 않는다)
+supabase functions deploy daily-recommendation
+supabase functions deploy daily-recommendation-batch
+
+# 3) 관리자 웹 (/recommendation-pool) → 4) 앱 (cap_reached 카드·선호 조건 링크). 새 cron 등록은 없다 (배치 스케줄은 10절 그대로)
+```
+
+배포 뒤 확인: `select result, count(*) from recommendation_runs where for_date = (now() at time zone 'Asia/Seoul')::date group by 1` 과 관리자 `/recommendation-pool` 의 전체 행이 같은 그림이면 된다.
+`select count(*) from analytics_events where event_type = 'recommendation_created'` 는 `select count(*) from recommendations` 와 같아야 한다.
+
+## 13. 검증
+
+- `supabase/functions/_shared/matching/selftest.ts` — 엔진·코어 단위 (in-memory DataSource). 실패 시 exit 1. #24: 요청자 가득 참 → slotsFull(재훑기·저장 없음), 가득 찬 후보 제외, claim skip(slots_full).
+  #23: 후보 0명 / 한쪽 필수 조건 불일치 / 필수 조건 응답 누락 / 적격 1명 / fallback 도 필수 조건 통과 후보만 / 요청자·상대 자리 / 차단·신고·과거 매치 제외 / 30일 경계 /
+  조회 실패 ≠ 0명 / 상한 도달 ≠ 완전 탐색 / claim skip·busy 는 finish 없음 / finish 에 적격 수·저장 id·실패 단계.
+- `supabase/tests/recommendation_db_test.mjs` — 실제 Postgres(마이그레이션+seed) 위에서 DB → 스냅샷 → 엔진 → 저장 → 카드 반환.
+  seed 의 과거 외모 데이터를 지워도 같은 결과, 신규 무외모 사용자 추천, 인증·차단·신고·exhausted, reasons 불변, `recommendation_created` 이벤트 저장 행 기준 1건.
+  `run_local_check.sh` 가 함께 실행한다.
+- `supabase/tests/recommendation_observability_tests.sql` — 이벤트 1회·DB unique, finish 관측값·5인자 호환, claim skip 의 cap_reached, 풀 통계 분류(demo 제외·미측정·중앙값·전체 행), 실행 통계, 일반 사용자 호출 불가.
+- 실제 Didit 인증·실기기·원격 Supabase(PostgREST) 경로는 로컬에서 실행하지 않는다 — 배포 후 확인 대상.

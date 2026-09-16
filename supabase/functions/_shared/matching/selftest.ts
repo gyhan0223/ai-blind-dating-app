@@ -724,6 +724,150 @@ await (async () => {
     check('skip(slots_full) → 후보를 다시 훑지 않고 slotsFull', c2.kind === 'ok' && c2.slotsFull === true && !c2.exhausted && !dss.touched.has('profiles') && calls.join() === 'claim:skip');
   }
 
+  // ===========================================================================
+  // #23 후보 부족 관측 — 적격 후보 수 · 상한 구분 · 전략은 필수 조건 통과 후보에만 · 조회 실패는 0명이 아니다 · 중복 집계 없음
+  // ===========================================================================
+  {
+    // 후보 0명 → 후보 부족(exhausted), 새 추천 없음, eligibleCount=0 (측정됨), capReached=false (전체 탐색 완료)
+    const f0 = baseFixture();
+    f0.users = [account(ME)];
+    f0.profiles = [profileRow(ME, 'male')];
+    const ds0 = memoryDataSource(f0);
+    const o0 = await runDailyRecommendation(ds0, RUN);
+    check('#23 후보 0명 → exhausted · 새 추천 없음 · eligibleCount=0 · capReached=false', o0.kind === 'ok' && o0.exhausted && ds0.inserted.length === 0 && o0.eligibleCount === 0 && o0.capReached === false && o0.createdIds.length === 0);
+
+    // 필수 조건을 통과한 후보 1명 → 정상 추천, eligibleCount=1, createdIds=[저장된 id]
+    const f1 = baseFixture();
+    f1.users = [account(ME), account('f1')];
+    f1.profiles = [profileRow(ME, 'male'), profileRow('f1', 'female')];
+    const ds1 = memoryDataSource(f1);
+    const o1 = await runDailyRecommendation(ds1, RUN);
+    check('#23 적격 후보 1명 → 추천 생성 · eligibleCount=1 · createdIds 는 저장된 행 id', o1.kind === 'ok' && !o1.exhausted && o1.eligibleCount === 1 && o1.createdIds.length === 1 && o1.createdIds[0] === o1.recommendations[0].id && ds1.inserted.length === 1);
+
+    // 후보는 있지만 "요청자 → 후보" 필수 조건 불일치 (요청자 비흡연 필수, 후보 흡연) → 추천 없음 (후보 → 요청자 방향은 기존 테스트)
+    const f2 = baseFixture();
+    f2.users = [account(ME), account('f1')];
+    f2.profiles = [profileRow(ME, 'male'), profileRow('f1', 'female', { smoking: 'regular' })];
+    const ds2 = memoryDataSource(f2);
+    ds2.dealbreakers = async (ids) => ids.filter((i) => i === ME).map((i) => ({ user_id: i, kind: 'smoking', value: { allow: false } }));
+    const o2 = await runDailyRecommendation(ds2, RUN);
+    check('#23 요청자 쪽 필수 조건 불일치 → 추천 없음 · eligibleCount=0 (후보 존재 ≠ 적격)', o2.kind === 'ok' && o2.exhausted && o2.eligibleCount === 0 && o2.scanned === 1 && ds2.inserted.length === 0);
+
+    // 필수 조건 판단에 필요한 응답 누락 (후보의 marriage_intent 없음) → 기존 정책대로 제외 → 추천 없음
+    const f3 = baseFixture();
+    f3.users = [account(ME), account('f1')];
+    f3.profiles = [profileRow(ME, 'male'), profileRow('f1', 'female')];
+    f3.privates = [{ user_id: ME, marriage_intent: 4 }, { user_id: 'f1', marriage_intent: null }];
+    const ds3 = memoryDataSource(f3);
+    ds3.dealbreakers = async (ids) => ids.filter((i) => i === ME).map((i) => ({ user_id: i, kind: 'marriage_intent', value: { min: 3 } }));
+    const o3 = await runDailyRecommendation(ds3, RUN);
+    check('#23 필수 조건 평가값 누락 후보는 통과시키지 않는다 → exhausted · eligibleCount=0', o3.kind === 'ok' && o3.exhausted && o3.eligibleCount === 0 && ds3.inserted.length === 0);
+
+    // fallback(conditions_only) 도 필수 조건 통과 후보에서만: 점수가 더 높아 보이는 후보라도 필수 조건 위반이면 선택되지 않는다
+    const f4 = baseFixture();
+    f4.users = [account(ME), account('f1'), account('f2')];
+    // f1: 설문·가치관·취미 모두 없어 conditions_only 가 되도록 / f2: 데이터는 풍부하지만 흡연 → 요청자 필수 조건 위반
+    f4.profiles = [
+      profileRow(ME, 'male', { hobbies: [], personality_keywords: [] }),
+      profileRow('f1', 'female', { hobbies: [], personality_keywords: [], region_code: undefined as unknown as string }),
+      profileRow('f2', 'female', { smoking: 'regular' }),
+    ];
+    f4.privates = [{ user_id: ME }, { user_id: 'f1' }, { user_id: 'f2', marriage_intent: 4 }];
+    const ds4 = memoryDataSource(f4);
+    ds4.dealbreakers = async (ids) => ids.filter((i) => i === ME).map((i) => ({ user_id: i, kind: 'smoking', value: { allow: false } }));
+    const o4 = await runDailyRecommendation(ds4, RUN);
+    check('#23 fallback 도 필수 조건 통과 후보(f1)에서만 · 위반 후보(f2)는 제외 · eligibleCount=1', o4.kind === 'ok' && o4.recommendations.length === 1 && o4.recommendations[0].candidate_id === 'f1' && o4.eligibleCount === 1);
+    // 공개 지역 비교는 항상 가능해 엔진 경로에서 basis 는 scored(총점 0.4 → fallback)가 된다. conditions_only 라벨 자체는 pickStrategy 로 확인
+    check('#23 낮은 총점 후보는 strategy=fallback 이지만 필수 조건 위반은 없다 (basis 는 scored/conditions_only 중 하나)', ds4.inserted.length === 1 && ds4.inserted[0].strategy === 'fallback' && ['scored', 'conditions_only'].includes(String(ds4.inserted[0].dimensions.basis)) && ds4.inserted[0].candidate_id === 'f1');
+    check('#23 conditions_only(total null) 는 항상 fallback 라벨', pickStrategy({ basis: 'conditions_only', total: null, aToB: null, bToA: null, dimensions: { personality: null, values: null, lifestyle: null, relationship: null } }, 0) === 'fallback');
+
+    // 요청자 대화 3개 → slotsFull 은 "자리 부족" (eligibleCount=null 미측정, exhausted 아님)
+    const f5 = baseFixture();
+    f5.matches = [{ a: ME, b: 'x1' }, { a: ME, b: 'x2' }, { a: 'x3', b: ME }];
+    const o5 = await runDailyRecommendation(memoryDataSource(f5), RUN);
+    check('#23 요청자 자리 부족 → slotsFull · exhausted 아님 · eligibleCount=null(미측정)', o5.kind === 'ok' && o5.slotsFull === true && !o5.exhausted && o5.eligibleCount === null);
+
+    // 상대 대화 3개 → 그 후보만 제외되어 적격 후보 수에서 빠진다
+    const f6 = baseFixture();
+    f6.matches = [{ a: 'f1', b: 'y1' }, { a: 'f1', b: 'y2' }, { a: 'y3', b: 'f1' }];
+    const o6 = await runDailyRecommendation(memoryDataSource(f6), RUN);
+    check('#23 상대 자리 가득 → 그 후보 제외 · eligibleCount 는 나머지(2)', o6.kind === 'ok' && o6.eligibleCount === 2 && o6.recommendations[0].candidate_id !== 'f1');
+
+    // 차단·신고 쌍·과거 매칭 상대 → 훑지도 세지도 않는다 (scanned·eligible 모두에서 제외)
+    const f7 = baseFixture();
+    f7.blocks = [{ blocker_id: 'f1', blocked_id: ME }];
+    f7.reports = [{ reporter_id: ME, reported_id: 'f2' }];
+    f7.matches = [{ a: ME, b: 'f3', status: 'closed' }];
+    const o7 = await runDailyRecommendation(memoryDataSource(f7), RUN);
+    check('#23 차단(상대가 나를)·신고 쌍·과거 매치(closed) 상대 제외 → exhausted · scanned=0 · eligibleCount=0', o7.kind === 'ok' && o7.exhausted && o7.scanned === 0 && o7.eligibleCount === 0);
+
+    // 30일 재추천 경계: 정확히 30일 전 skipped 는 아직 제외, 31일 전은 다시 후보 (문서 7절과 일치)
+    const f8 = baseFixture();
+    f8.users = [account(ME), account('f1')];
+    f8.profiles = [profileRow(ME, 'male'), profileRow('f1', 'female')];
+    f8.recs = [{ id: 'old', status: 'skipped', strategy: 'fallback', card: {}, candidate_id: 'f1', user_id: ME, for_date: addDays(RUN.today, -RECOMMENDATION_COOLDOWN_DAYS) }];
+    const o8 = await runDailyRecommendation(memoryDataSource(f8), RUN);
+    check('#23 정확히 30일 전 skipped 는 아직 제외 (경계 포함)', o8.kind === 'ok' && o8.exhausted && o8.eligibleCount === 0);
+    const f8b = { ...f8, recs: [{ ...f8.recs[0], for_date: addDays(RUN.today, -(RECOMMENDATION_COOLDOWN_DAYS + 1)) }] };
+    const o8b = await runDailyRecommendation(memoryDataSource(f8b), RUN);
+    check('#23 31일 전 skipped 는 다시 후보 · eligibleCount=1', o8b.kind === 'ok' && !o8b.exhausted && o8b.eligibleCount === 1);
+
+    // 조회 실패 → lookup_failed (후보 0명·exhausted 로 집계되지 않는다)
+    const f9 = baseFixture();
+    f9.failStages = new Set(['candidates']);
+    const o9 = await runDailyRecommendation(memoryDataSource(f9), RUN);
+    check('#23 후보 조회 실패 → lookup_failed(candidates) — exhausted 아님', o9.kind === 'lookup_failed' && o9.stage === 'candidates');
+
+    // 탐색 상한 도달 → 완전 탐색과 구분 (capReached=true, eligibleCount 는 하한)
+    const fc = baseFixture();
+    fc.users = [account(ME)];
+    fc.profiles = [profileRow(ME, 'male', { smoking: 'regular' })];
+    for (let i = 0; i < MAX_CANDIDATES_SCANNED + 50; i += 1) {
+      const id = `c${String(i).padStart(4, '0')}`;
+      fc.users.push(account(id));
+      fc.profiles.push(profileRow(id, 'female'));
+    }
+    const dsc = memoryDataSource(fc);
+    dsc.dealbreakers = async (ids) => ids.filter((i) => i !== ME).map((i) => ({ user_id: i, kind: 'smoking', value: { allow: false } }));
+    const oc = await runDailyRecommendation(dsc, RUN);
+    check('#23 상한 도달 → exhausted + capReached=true · eligibleCount=0 은 하한 (전체 후보 없음으로 단정 불가)', oc.kind === 'ok' && oc.exhausted && oc.capReached && oc.eligibleCount === 0 && oc.scanned === MAX_CANDIDATES_SCANNED);
+
+    // claim 래퍼: finish 에 관측값(적격 수·저장 id·실패 단계)이 실린다 / skip 은 finish 를 부르지 않는다 (반복·동시·배치 중첩에도 집계 1회)
+    const calls: string[] = [];
+    const mk = (script: ('claimed' | 'busy' | 'skip')[], result?: string, capReached?: boolean): ClaimClient => ({
+      async claim() { const c = script.shift() ?? 'busy'; calls.push(`claim:${c}`); return { claim: c, result, capReached }; },
+      async finish(_u, _d, r, scanned, cap, details) { calls.push(`finish:${r}:${scanned}:${cap}:${details?.eligible ?? 'null'}:${details?.recommendationId ?? 'null'}:${details?.errorStage ?? 'null'}`); },
+    });
+    const fw = baseFixture();
+    const dsw = memoryDataSource(fw);
+    const w1 = await runDailyRecommendationWithClaim(dsw, mk(['claimed']), RUN, { retries: 0 });
+    check('#23 claimed + 생성 → finish(ok, eligible=3, 저장 id)', w1.kind === 'ok' && calls.join() === `claim:claimed,finish:ok:3:false:3:${w1.recommendations[0].id}:null`);
+    calls.length = 0;
+    // 같은 사용자의 반복 요청·배치 중첩: skip(ok) → 저장된 행만 읽고 finish 없음 → 실행 기록·이벤트가 늘지 않는다
+    const w2 = await runDailyRecommendationWithClaim(dsw, mk(['skip'], 'ok'), RUN, { retries: 0 });
+    check('#23 반복 요청(skip ok) → 새 저장·finish 없음, 같은 추천 반환', w2.kind === 'ok' && w2.recommendations.length === 1 && dsw.inserted.length === 1 && calls.join() === 'claim:skip');
+    calls.length = 0;
+    const w3 = await runDailyRecommendationWithClaim(dsw, mk(['busy']), RUN, { retries: 0 });
+    check('#23 동시 요청(busy) → 저장된 행 반환, finish 없음', w3.kind === 'ok' && w3.recommendations.length === 1 && dsw.inserted.length === 1 && calls.join() === 'claim:busy');
+    calls.length = 0;
+    const w4 = await runDailyRecommendationWithClaim(memoryDataSource(f0), mk(['claimed']), RUN, { retries: 0 });
+    check('#23 claimed + 후보 없음 → finish(exhausted, eligible=0, id 없음)', w4.kind === 'ok' && w4.exhausted && calls.join() === 'claim:claimed,finish:exhausted:0:false:0:null:null');
+    calls.length = 0;
+    const w5 = await runDailyRecommendationWithClaim(memoryDataSource(f9), mk(['claimed']), RUN, { retries: 0 });
+    check('#23 claimed + 조회 실패 → finish(lookup_failed, eligible=null, 단계 기록)', w5.kind === 'lookup_failed' && calls.join() === 'claim:claimed,finish:lookup_failed:0:false:null:null:candidates');
+    calls.length = 0;
+    const w6 = await runDailyRecommendationWithClaim(memoryDataSource(f0), mk(['skip'], 'exhausted', true), RUN, { retries: 0 });
+    check('#23 skip(exhausted, cap_reached) → 다시 훑지 않고 capReached 를 그대로 전달', w6.kind === 'ok' && w6.exhausted && w6.capReached === true && calls.join() === 'claim:skip');
+    const w7 = await runDailyRecommendationWithClaim(memoryDataSource(f0), mk(['skip'], 'exhausted', false), RUN, { retries: 0 });
+    check('#23 skip(exhausted, 완전 탐색) → capReached=false', w7.kind === 'ok' && w7.exhausted && w7.capReached === false);
+    calls.length = 0;
+    const dsThrow = memoryDataSource(baseFixture());
+    dsThrow.profiles = async () => { throw new Error('boom'); };
+    // loadSnapshots 실패는 lookup_failed(requester_snapshot) 로 잡힌다 — 예외 전파 경로는 claim 자체가 throw 할 때
+    const w8 = await runDailyRecommendationWithClaim(dsThrow, mk(['claimed']), RUN, { retries: 0 });
+    check('#23 스냅샷 조회 실패 → finish(lookup_failed, requester_snapshot)', w8.kind === 'lookup_failed' && calls.join() === 'claim:claimed,finish:lookup_failed:0:false:null:null:requester_snapshot');
+  }
+
   // loadSnapshots: 얼굴 벡터·외모 이벤트 없이 스냅샷 생성
   const snaps = await loadSnapshots(memoryDataSource(baseFixture()), [ME]);
   check('loadSnapshots 결과에 외모 필드 없음', snaps.has(ME) && !('appearancePreferenceVector' in (snaps.get(ME) as object)) && !('appearance' in snaps.get(ME)!.importance));

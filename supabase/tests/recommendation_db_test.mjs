@@ -14,6 +14,8 @@
  *  4. 오늘 저장된 pending 추천 상대를 차단하면 expired 처리 후 반환하지 않고 다른 후보를 만든다
  *  5. 신고 당사자 쌍 제외 / 후보가 없으면 조건 완화 없이 exhausted
  *  6. reasons 는 공개 사실만, 비공개 응답을 바꿔도 reasons 불변
+ *  8. (#23) 적격 후보 수(eligibleCount)·저장 id(createdIds) 관측, recommendation_created 이벤트는 저장 행 기준 1건 (재요청·재실행에도 불변),
+ *     후보 없음은 eligibleCount=0 · 조회 실패는 이벤트·행 없음
  */
 import { execFileSync } from 'node:child_process';
 import { computeMatch } from '../functions/_shared/matching/MatchingEngine.ts';
@@ -217,10 +219,15 @@ check('신규 사용자에게 외모 데이터가 전혀 없다 (전제)', Numbe
     const row = qjson(`select json_agg(json_build_object('dimensions', dimensions, 'score_total', score_total, 'strategy', strategy)) from public.recommendations where user_id = ${uuid(X)}`)[0];
     check('DB 저장 행: dimensions 에 appearance 없음·strategy 는 허용값', row && !('appearance' in row.dimensions) && ['high_confidence', 'exploration', 'fallback'].includes(row.strategy));
     check('DB 저장 행: 외모 없이 scored 총점 존재', row && row.dimensions.basis === 'scored' && row.score_total != null);
+    // #23 관측: 적격 후보는 Y1·Y2 (Y3 인증 미완료·Y4 정지 제외) → eligibleCount=2, createdIds 는 저장된 행
+    check('#23 eligibleCount=2 (인증 미완료·정지 후보 제외) · capReached=false · createdIds=[저장 id]', out.eligibleCount === 2 && out.capReached === false && out.createdIds.length === 1 && out.createdIds[0] === rec.id);
+    const ev = qjson(`select coalesce(json_agg(json_build_object('user_id', user_id, 'payload', payload)), '[]') from public.analytics_events where event_type = 'recommendation_created' and payload->>'recommendation_id' = ${lit(rec.id)}`);
+    check('#23 recommendation_created 이벤트가 저장 행 기준 1건 · strategy/basis 는 저장값 · 카드 없음', ev.length === 1 && ev[0].user_id === X && ev[0].payload.strategy === rec.strategy && ev[0].payload.basis === 'scored' && !('card' in ev[0].payload) && !('score_total' in ev[0].payload));
   }
   // 재요청: 오늘 이미 있으면 그대로 반환, 새로 만들지 않는다
   const again = await run(X);
   check('재요청 시 같은 추천 반환·중복 생성 없음', again.kind === 'ok' && again.recommendations.length === 1 && Number(q(`select count(*) from public.recommendations where user_id = ${uuid(X)}`)) === 1);
+  check('#23 재요청은 훑지 않는다 → eligibleCount=null(미측정) · createdIds=[] · 이벤트 여전히 1건', again.kind === 'ok' && again.eligibleCount === null && again.createdIds.length === 0 && Number(q(`select count(*) from public.analytics_events where event_type = 'recommendation_created' and payload->>'recommendation_id' in (select id::text from public.recommendations where user_id = ${uuid(X)})`)) === 1);
 }
 
 // 비공개 응답만 바꿔도 같은 쌍(X, Y1)의 reasons 불변 — 내부 순위는 달라질 수 있다
@@ -265,6 +272,19 @@ check('신규 사용자에게 외모 데이터가 전혀 없다 (전제)', Numbe
   const out = await run(X);
   check('차단·신고 쌍을 빼면 후보 없음 → exhausted (완화 없음, 인증 미완료 Y3·정지 Y4 도 뽑지 않음)', out.kind === 'ok' && out.exhausted && out.recommendations.length === 0);
   check('exhausted 시 새 행이 생기지 않는다', Number(q(`select count(*) from public.recommendations where user_id = ${uuid(X)}`)) === 1);
+  check('#23 후보 없음은 eligibleCount=0 (측정됨) · capReached=false (전체 탐색) · 새 이벤트 없음', out.kind === 'ok' && out.eligibleCount === 0 && out.capReached === false && Number(q(`select count(*) from public.analytics_events where event_type = 'recommendation_created' and user_id = ${uuid(X)}`)) === 2);
+}
+
+// ---------------------------------------------------------------------------
+// 5a) (#23) 조회 실패 → lookup_failed: 후보 0명·exhausted 로 위장하지 않고 행·이벤트도 남기지 않는다
+// ---------------------------------------------------------------------------
+{
+  const before = Number(q(`select count(*) from public.analytics_events where event_type = 'recommendation_created' and user_id = ${uuid(X)}`));
+  const broken = { ...ds, candidateIdsPage: async () => { throw new Error('simulated candidates failure'); } };
+  q(`delete from public.recommendation_runs where user_id = ${uuid(X)}`);
+  const fail = await runDailyRecommendation(broken, { userId: X, today: TODAY, nowYear: NOW_YEAR, dailyLimit: 1 });
+  check('#23 후보 조회 실패 → lookup_failed(candidates), exhausted 아님', fail.kind === 'lookup_failed' && fail.stage === 'candidates');
+  check('#23 조회 실패는 추천 행·이벤트를 만들지 않는다', Number(q(`select count(*) from public.recommendations where user_id = ${uuid(X)}`)) === 1 && Number(q(`select count(*) from public.analytics_events where event_type = 'recommendation_created' and user_id = ${uuid(X)}`)) === before);
 }
 
 // ---------------------------------------------------------------------------

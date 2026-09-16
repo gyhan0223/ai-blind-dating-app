@@ -77,7 +77,8 @@ exit_no_reply / exit_not_a_fit / exit_moved_elsewhere / exit_after_meetup / exit
 
 - 단계·지표는 행 존재/상태 전환/메시지 행으로 세므로 화면 재방문·요청 재시도·같은 값 재저장이 수치를 늘리지 않는다
   (`send_message` 멱등, `conversation_leave` 는 매치 행 잠금으로 1회, `recommendation_mark_viewed` 는 최초 시각 유지, `recommendation_accept` 재시도는 같은 결과).
-- `analytics_events` 는 보조다 (`conversation_left`, `recommendation_accepted` 는 서버가 기록). 퍼널 수치는 뷰만 쓴다.
+- `analytics_events` 는 보조다 (`conversation_left`, `recommendation_accepted`, `recommendation_created`(0027, insert 트리거·추천 id unique) 는 서버가 기록). 퍼널 수치는 뷰만 쓴다.
+- 추천이 **안 만들어진** 이유(후보 없음/상한 도달/자리 부족/오류)와 세그먼트별 후보 규모는 퍼널이 아니라 `recommendation_runs` 기반 관리자 `/recommendation-pool` 에서 본다 (`docs/matching-policy.md` 12절).
 - 최소 세그먼트(성별·지역·연령대)는 cohort 30명 미만이면 나누지 않는다. 대화 지표의 성별 열은 "첫 발신 성별·대기한 쪽 성별" 집계뿐이며 개인을 식별하지 않는다.
 
 ## 6. 검증

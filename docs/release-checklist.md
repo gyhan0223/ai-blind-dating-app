@@ -128,6 +128,12 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#22/#23) 마이그레이션 `0017_recommendation_runs.sql` 이 적용되어 있고(`recommendation_runs`, `recommendation_run_claim/finish`, `recommendation_batch_targets`, recommendations unique 변경),
       `daily-recommendation` · `daily-recommendation-batch` 가 재배포되어 있으며 pg_cron 에 배치 스케줄이 등록되어 있다 (`select * from cron.job`)
 - [ ] (#22) 같은 계정으로 `daily-recommendation` 을 동시에 두 번 호출해도 오늘 `recommendations` 행이 1건이다. `daily-recommendation-batch` 를 사용자 JWT 로 호출하면 401 이다
+- [ ] (#23) 마이그레이션 `0027_recommendation_observability.sql` 적용 (`recommendation_runs.eligible_count/recommendation_id/strategy/basis/error_stage`, `recommendation_run_finish` 8인자,
+      `recommendations_created_event` 트리거, `recommendation_pool_stats`/`recommendation_run_stats`). 적용 뒤 `select count(*) from analytics_events where event_type='recommendation_created'` = `select count(*) from recommendations`
+- [ ] (#23) `daily-recommendation` · `daily-recommendation-batch` 재배포 뒤 오늘 실행 행에 `eligible_count` 가 채워진다: `select result, cap_reached, eligible_count from recommendation_runs where for_date = (now() at time zone 'Asia/Seoul')::date`
+      (후보 없음은 `exhausted`+`eligible_count=0`, 상한 도달은 `cap_reached=true`, 오류는 `status='failed'`+`error_stage`). 같은 계정이 앱을 여러 번 열어도 행·이벤트 수가 늘지 않는다
+- [ ] (#23) 관리자 `/recommendation-pool` 이 조회 오류 배너 없이 열리고 demo 경고가 0 이다 (production 에 demo 계정 없음). 사용자 JWT 로 `recommendation_pool_stats(7)` 를 호출하면 권한 오류다
+- [ ] (#23) **실기기**: 후보가 없는 테스트 계정의 홈이 빈 카드·무한 로딩 없이 "오늘은 소개할 분이 없어요"(또는 상한 도달 문구)를 보여 주고, "선호 조건 보기" 가 수정 화면으로 간다. 서버를 끈 상태의 오류 카드가 후보 부족 문구와 다르다 — **아직 미수행**
 - [ ] (#41) `icebreaker` Edge Function 이 최신 코드로 재배포되어 있다 (v2 캐시 · 공개 필드만 조회). 배포 후 `select count(*) from conversations where icebreaker ? 'lead'` 가 줄어든다 (과거 캐시 덮어쓰기)
 - [ ] (#41) 사용자 JWT 로 `matches` 의 `meetup_state`/`meetup_completed_at` 을 update 하면 0행이고, `meetup_intentions`/`meetup_outcomes`/`meetup_feedback` 에 insert 하면 거부된다
 - [ ] (#41) 두 테스트 계정으로 A 만 yes 일 때 B 의 `meetup_intentions` 조회가 0행이고 매치 `meetup_state` 가 `none` 이다. B 도 yes 면 `mutual_interest` 가 되고 `analytics_events.meetup_mutual_interest` 가 참가자당 1행이다

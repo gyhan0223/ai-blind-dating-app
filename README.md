@@ -20,6 +20,7 @@
 - 하루 한 명 추천 (텍스트 카드: 닉네임·나이·지역·키·직업·흡연·음주·취미·키워드·**고른 항목으로 만든 소개 문장(연애 목적·공개 질문 선택)**·인증 배지)
 - 상호 수락 → 텍스트 채팅(멱등 전송·재접속 복구·공개 답변 기반 시작 질문) → 각자 비공개 만남 의향 → 둘 다 원할 때만 상호 관심 안내 → 대화로 일정 조율 → 각자 만남 결과 응답(양측 확인 시 확인된 만남) → 비공개 피드백 (#41 — `docs/meetup-flow.md`)
 - 진행 중 대화는 사용자당 최대 3개 (가득 차면 오늘의 소개 중단), 나가기(선택 이유·상대 비공개)로 자리 반환, 한 번 매칭된 상대는 다시 소개하지 않음, 대화 행동 지표(첫 연락·응답 대기·24시간 중단/재개·종료) (#24 — `docs/conversation-policy.md` · `docs/funnel-metrics.md`)
+- 후보가 없어도 필수 조건을 완화하지 않음 — 홈은 후보 없음 / 탐색 상한 / 생성 중 / 대화 자리 없음 / 서버 오류를 구분해 안내하고, 운영자는 실행 기록 기반 후보 규모 통계(`/recommendation-pool`)를 본다 (#23 — `docs/matching-policy.md` 12절)
 - 신고·차단·정지·탈퇴, 관리자 웹
 
 **MVP 에서 제공하지 않는 것 (앱·문서에서 약속하지 않음)**
@@ -58,7 +59,7 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0026 순서대로 — 0015~0026 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절)
+# 마이그레이션 적용 (0001 → 0027 순서대로 — 0015~0027 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절, 0027 은 docs/matching-policy.md 12절)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -184,10 +185,11 @@ npm run dev                  # http://localhost:3100
 # DB 스키마 + 시드 + RLS 테스트 (Docker 없이 로컬 Postgres 로)
 cd supabase/tests && bash run_local_check.sh
 
-# MatchingEngine / 추천 코어 단위 테스트 (외모 제외·재정규화·필수 조건·안전 필터·공개 이유·tie-break)
+# MatchingEngine / 추천 코어 단위 테스트 (외모 제외·재정규화·필수 조건·안전 필터·공개 이유·tie-break·#23 후보 부족 관측)
 cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts
 # 실제 DB 연결 테스트 (마이그레이션+seed 위에서 DB → 스냅샷 → 엔진 → 카드) — run_local_check.sh 가 함께 실행
 #   PGDATABASE=blind_dating_check node --experimental-strip-types supabase/tests/recommendation_db_test.mjs
+# 추천 결과·전략 관측 · 운영 풀 통계 DB 테스트 (#23 — recommendation_observability_tests.sql, run_local_check.sh 에 포함)
 
 # identity 로직 단위 테스트 (33건 — 전화번호 정규화 · 1인1계정 분기 · HMAC)
 cd supabase/functions/_shared/identity && node --experimental-strip-types selftest.ts
