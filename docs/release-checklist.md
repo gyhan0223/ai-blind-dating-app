@@ -23,12 +23,12 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       (설정돼 있어도 release 빌드에선 무효지만, 아예 제거한다)
 - [ ] `EXPO_PUBLIC_SUPABASE_URL` / `EXPO_PUBLIC_SUPABASE_ANON_KEY` 가 **production 프로젝트** 값이다
       (localhost/staging 값 아님)
-- [ ] 클라이언트 번들에 서버 secret 이 없다 — **web + iOS + Android** export 결과에서 확인:
-      `npx expo export --platform web --platform ios --platform android --no-bytecode` 후
-      `dist/` 에서 `service_role`, `SERVICE_ROLE_KEY`, `IDENTITY_HASH_SECRET`,
-      `bonsim-dev-password`, `dev-login`, `테스트로 시작하기`, `얼굴 인증 통과`, `DIDIT_API_KEY`, `complete-face-verification` grep → 0건
-- [ ] 실제 스토어 제출용 release 빌드(EAS build)에서도 위 확인을 반복한다
-      (EAS 는 이 저장소 밖에서 수행 — 산출물의 JS 번들에 같은 grep 적용)
+- [ ] (#3) `cd apps/mobile && npm run release:check:selfcheck` 가 통과한다 (검사기가 가짜 secret/마커를 실제로 잡는지)
+- [ ] (#3) `cd apps/mobile && npm run release:check` 가 **exit 0** 이다 — web + iOS + Android `expo export` 산출물에서 개발 마커
+      (`dev-login` · `complete-face-verification` · `bonsim-dev-password` · `devMockApproveFace` · 개발용 버튼 문구 …) · 서버 secret 이름 · 환경의 secret 값 ·
+      `service_role` JWT 가 0건이고, `src/dev/*` 정적 import 가 없다. export 실패·환경 누락은 통과가 아니다 (exit 2). CI(`.github/workflows/ci.yml`)도 같은 검사를 돌린다
+- [ ] (#3) 실제 스토어 제출용 release 빌드(EAS build)의 JS 번들에도 같은 검사를 적용한다: `node scripts/check-release-bundle.mjs --scan <EAS 산출물 디렉터리>`
+      (EAS 는 이 저장소 밖에서 수행 — 위 정적 검사는 **EAS 네이티브 release·실기기 검증을 대신하지 않는다**)
 
 ## Supabase (production 프로젝트)
 
@@ -50,6 +50,13 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       (V2 destination 이면 `event_id`/`liveness_checks[]` 가 오지 않아 승인이 되지 않는 것이 정상)
 - [ ] Didit 워크플로: Liveness 단계 **하나만** · Active `3D Action & Flash` · 최대 3회 · Face Search 1:N 켜짐 · 신분증/AML/주소/NFC 없음
       (라이브니스 노드가 여러 개면 서버가 fail-closed 로 승인하지 않는다)
+- [ ] (#13/#11/#12/#27) 마이그레이션 `0028_account_purge_jobs.sql` · `0029_face_session_assets.sql` · `0030_face_consents.sql` · `0031_admin_login_guard.sql` 이 적용되어 있고
+      `account-purge` · `start-face-liveness` 가 재배포되어 있다 (0029 이전 DB 에 새 `start-face-liveness` 를 배포하면 승인 RPC 의 superseded 규칙이 없다; 0030 이전이면 `start` 가 503 `consent_unavailable`)
+- [ ] (#13) pg_cron 에 `account-purge` batch(일 1회) · `face-asset-cleanup`(`{"face_cleanup":true}`, 1시간) · prune 이 등록되어 있다 (`docs/data-retention.md` 4절)
+- [ ] (#13) 탈퇴 테스트 계정으로 `account-purge` 를 호출해 `account_purge_jobs` 의 4단계가 모두 `done` 이고 Storage `faces/<uid>/` 가 비어 있으며 Didit 세션 삭제가 2xx 였다 —
+      **실제 프로젝트에서 미수행**. 실패 시 관리자 `/deletion-requests` 하단에 실패 단계가 보이고 재시도로 이어진다
+- [ ] (#12) production secret `FACE_CONSENT_VERSION` 이 `faceConsentPolicy.ts` 의 `version` 과 같고 문서 `status` 가 `final` 이며 미확정 고지 항목이 없다 —
+      아니면 `start-face-liveness` 가 새 세션을 503 `consent_policy_not_ready` 로 거부한다 (의도된 출시 차단). `docs/face-consent.md` 4절
 - [ ] 마이그레이션 `0013_face_liveness.sql` + `0014_face_liveness_v3_hardening.sql` 이 production DB 에 적용되어 있다
       (`face_liveness_begin_session` · `face_liveness_approve` · `face_liveness_admin_review` RPC, `face_webhook_events` · `face_verification_reviews` 테이블 존재)
 - [ ] `admin-face-review` 가 배포되어 있고(JWT ON) anon key / 사용자 JWT 로 호출하면 401 이다
@@ -82,7 +89,10 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 ## Admin
 
 - [ ] `SUPABASE_SERVICE_ROLE_KEY` 가 서버 환경변수로만 존재한다 (`NEXT_PUBLIC_*` 금지, 브라우저 노출 없음)
-- [ ] `ADMIN_PASSWORD` 가 기본값(`change-me`)이 아니다 · `ADMIN_SESSION_SECRET` 이 설정되어 있다 (#27)
+- [ ] `ADMIN_PASSWORD` 가 기본값(`change-me`)이 아니다 · `ADMIN_SESSION_SECRET` 이 **32자 이상** 설정되어 있다 (#27 — production 에서는 없으면 로그인 자체가 실패한다)
+- [ ] (#27) 관리자 웹이 신뢰할 수 있는 리버스 프록시 뒤에 있으면 `ADMIN_TRUST_PROXY_HEADERS=1`, 아니면 설정하지 않는다 (`docs/security.md` 4절)
+- [ ] (#27) 두 인스턴스(또는 재시작 전후)에서 잘못된 비밀번호를 3회 + 2회 입력하면 5회째에 잠기고, `admin_login_locks` 에 원문 IP 가 없다.
+      DB 를 끊고 로그인하면 "로그인 제한을 확인할 수 없어 로그인하지 않았습니다" 가 뜬다 — **실제 배포에서 미수행**
 - [ ] 관리자 웹 **얼굴 검토** 화면이 열리고, 조건(라이브니스 Approved · liveness_passed · 참조 이미지) 없는 행은 승인이 409 로 거부된다
 - [ ] 얼굴 검토 화면에 중복 매칭된 상대 사용자 정보·얼굴 이미지가 표시되지 않는다 (세션 id 는 앞 8자만)
 
@@ -103,21 +113,28 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] Android release 빌드에서 얼굴 확인 1회 후 `adb logcat | grep -iE 'token=|vendorData=|workflowId='` 가 0줄이다 (SDK patch 적용 — `npm run sdk:verify-no-token-log` 가 OK)
 - [ ] 개인정보처리방침에 생체정보(민감정보) 처리·국외 이전이 **인증(라이브니스·중복 가입 방지) 목적으로** 반영되어 있다 (`docs/face-liveness-didit.md` 10절 TODO — 출시 차단).
       MVP 는 외모 매칭을 하지 않으므로 외모 매칭 목적 동의는 받지 않는다 — 향후 #8 채택 시 별도 동의 필요
-- [ ] 서버 selftest 통과:
+- [ ] (#12) **실기기**: 얼굴 확인 시작 → 별도 동의 화면(기본 미선택) → 체크 없이 시작 불가 → 동의 뒤 카메라 화면. 동의 행 없이 API 를 직접 호출하면 403 `consent_required` — **아직 미수행**
+- [ ] (#11) 같은 계정으로 얼굴 확인을 두 번 시작해 두 번째가 승인된 뒤 첫 세션의 웹훅이 늦게 와도 `face_verifications` 의 approved 행이 1개이고
+      Storage 에 `faces/<uid>/liveness/<row id>/reference.jpg` 가 승인 행 것만 남는다 (정리 큐 24시간 뒤) — **아직 미수행**
+- [ ] 서버 selftest 통과 (`bash scripts/server-selftests.sh` 가 아래를 한 번에 실행):
       `cd supabase/functions/_shared/env && node --experimental-strip-types selftest.ts`
       `cd supabase/functions/_shared/identity && node --experimental-strip-types selftest.ts`
       `cd supabase/functions/send-sms && node --experimental-strip-types selftest.ts`
       `cd supabase/functions/_shared/face && node --experimental-strip-types selftest.ts`
+      `cd supabase/functions/_shared/purge && node --experimental-strip-types selftest.ts` (#13/#11 — 삭제 작업 실패·재시도·동시성·페이지 제한·범위 이탈)
+      `cd supabase/functions/_shared/consent && node --experimental-strip-types selftest.ts` (#12 — 서버/앱 동의 문서 일치·준비 상태)
       `cd apps/mobile && node --experimental-strip-types scripts/face-liveness-selftest.mjs`
       `deno test --allow-env supabase/functions/send-sms/hook_test.ts`
-      `bash supabase/tests/run_local_check.sh` (sms_rate_limit_tests.sql · face_liveness_tests.sql · face_liveness_concurrency_test.sh 포함)
+      `bash supabase/tests/run_local_check.sh` (sms_rate_limit_tests.sql · face_liveness_tests.sql · face_liveness_concurrency_test.sh ·
+      account_purge_jobs_tests.sql · account_purge_concurrency_test.sh · face_session_assets_tests.sql · face_consents_tests.sql · admin_login_guard_tests.sql · admin_login_guard_concurrency_test.sh 포함)
       `cd apps/mobile && npm run sdk:verify-no-token-log`
       `cd apps/admin && npx tsc --noEmit`
       `cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.mjs`
       `cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs` (#39/#26 — 외모 데이터 없는 완료·인증 미완료 홈 차단·베타 입장 단계)
       `cd apps/mobile && node --experimental-strip-types scripts/preferences-core-selftest.mjs` (#25)
       `cd supabase/functions/_shared/security && node --experimental-strip-types selftest.ts` (#27/#26 — fail-closed 판정)
-      `cd apps/admin && node --experimental-strip-types scripts/admin-session-selftest.mjs` (#27 — 세션 토큰·로그인 잠금)
+      `cd apps/admin && node --experimental-strip-types scripts/admin-session-selftest.mjs` (#27 — 세션 토큰·DB 공유 로그인 잠금 흐름·secret 규칙·프록시 신뢰 경계)
+      `cd apps/mobile && npm run release:check:selfcheck && npm run release:check` (#3 — release 산출물 검사)
       `cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts` (#39/#40/#24 — 외모 제외·재정규화·안전 필터·공개 이유·tie-break·자리 제한, 실패 시 exit 1)
       `cd apps/mobile && node --experimental-strip-types scripts/chat-core-selftest.mjs` (#41/#24 — 채팅 병합·종료 안내 문구·자리 안내)
       `bash supabase/tests/run_local_check.sh` 에 포함된 `recommendation_db_test.mjs` (#40 — 실제 DB 위에서 외모 데이터 없이 추천 생성)

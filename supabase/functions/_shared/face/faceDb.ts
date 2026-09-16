@@ -106,8 +106,8 @@ export interface FaceDb {
   approveVerification(input: ApproveInput): Promise<ApproveResult>;
   /** 관리자 검토 (승인/거절 + audit) — RPC face_liveness_admin_review */
   adminReview(input: AdminReviewInput): Promise<AdminReviewResult>;
-  /** private bucket faces 에 reference image 저장 → 저장 경로 (같은 경로에 upsert — 재시도 안전) */
-  storeReferenceImage(userId: string, bytes: Uint8Array, contentType: string): Promise<{ ok: true; path: string } | { ok: false }>;
+  /** private bucket faces 에 reference image 저장 → 저장 경로 (세션별 경로에 upsert — 재시도 안전, 다른 세션과 겹치지 않는다) */
+  storeReferenceImage(userId: string, rowId: string, bytes: Uint8Array, contentType: string): Promise<{ ok: true; path: string } | { ok: false }>;
   isUserFaceVerified(userId: string): Promise<boolean>;
   /** V3 웹훅 event_id 멱등 처리 — 이미 처리한 이벤트면 true */
   hasProcessedWebhookEvent(eventId: string): Promise<boolean>;

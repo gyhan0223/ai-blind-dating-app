@@ -130,6 +130,14 @@ PR #35 의 첫 구현을 **Didit Sessions API v3 계약**(`liveness_checks[]`, `
 행이 approved 인데 플래그가 없거나 `reference_path` 가 없는 비정상 데이터는 sync/웹훅/관리자 "복구" 가 같은 RPC 로 해소한다
 (`select * from face_liveness_inconsistent_rows()` 로 점검).
 
+**세션별 이미지 경로 · superseded (#11)**: reference image 는 `<uid>/liveness/<face_verification_id>/reference.jpg` 에 저장된다 (예전 고정 경로의 기존 행 호환).
+`face_liveness_approve` 는 같은 사용자에게 이미 다른 approved 행이 있으면 이 행을 승인하지 않고 `expired/superseded` 로 마감한다 (`{ ok:false, reason:'superseded' }`).
+서버는 사용자가 이미 인증됐으면 이미지 다운로드도 하지 않는다. 종료된 세션의 이미지·Provider 세션은 `face_asset_cleanup` 큐가 24시간 뒤 정리한다
+(`docs/data-retention.md` 3절). "현재 인증" 은 `face_current_verification(user)` (approved 중 최신 verified_at).
+
+**별도 동의 (#12)**: `start` 는 현재 버전의 얼굴 정보 처리 동의가 `face_consents` 에 있을 때만 Provider 세션을 만든다 (`docs/face-consent.md`).
+sync · 웹훅 · 관리자 검토는 동의를 검사하지 않는다 (진행 중 검증을 망가뜨리지 않는다).
+
 Didit v3 는 같은 `vendor_data` 의 미완료 세션이 있으면 새 세션 대신 그 세션을 다시 돌려줄 수 있다. 서버는 같은 `session_id` 를 가진 본인 행을 다시 `pending` 으로 열고
 방금 만든 행을 `superseded` 로 마감한다 (UNIQUE 충돌 없음). 다른 사용자의 세션 id 가 돌아오면 붙이지 않고 503.
 
@@ -144,6 +152,7 @@ Didit v3 는 같은 `vendor_data` 의 미완료 세션이 있으면 새 세션 �
 | `DIDIT_WORKFLOW_ID` | Liveness-only 워크플로 ID | Decision/웹훅의 `workflow_id` 대조에도 사용 |
 | `DIDIT_WEBHOOK_SECRET` | 콘솔 웹훅 secret (V3 destination) | `X-Signature-V2` 검증 |
 | `DIDIT_API_BASE_URL` (선택) | 기본 `https://verification.didit.me` | https 만. 보통 설정하지 않는다 |
+| `FACE_CONSENT_VERSION` (#12) | `_shared/consent/faceConsentPolicy.ts` 의 `version` | production 필수. 불일치·미설정·문서 draft 면 `start` 가 503 `consent_policy_not_ready` (docs/face-consent.md) |
 | `ADMIN_ACTOR_LABEL` (관리자 웹, 선택) | 기본 `admin-web` | 감사 기록 `actor` 값 |
 
 ```bash
@@ -303,14 +312,16 @@ npx expo start --dev-client                # 설치한 개발 빌드가 이 Metr
 목적 분리: 얼굴 데이터는 **라이브니스·중복계정 방지(인증) 목적** 으로만 쓴다. MVP(#30/#39) 는 외모 매칭·얼굴 임베딩을 하지 않는다.
 향후 #8 이 별도로 채택되어 reference image 를 임베딩 입력으로 쓰려면 **별도 동의** 와 #11 의 보관 범위 재검토가 먼저다.
 
-회원 탈퇴 시 삭제 경로 (**#13/#11 로 구현됨** — `account-purge` Edge Function, 탈퇴 30일 뒤 배치 또는 운영자 즉시 실행. 상세 `docs/data-retention.md` 3절):
-1. storage `faces/<user_id>/liveness/*` 삭제 (service role). 2. `face_verifications` 행의 `reference_path` 제거/익명화.
-3. Didit 측 삭제: `DiditFaceLivenessProvider.deleteSession(session_id)` (`DELETE /v3/session/{id}/delete/`, 2xx 성공) 를 해당 사용자의 모든 `provider_session_id` 에 대해 호출.
-4. Face Search 인덱스 제거 여부를 Didit 정책으로 확인.
+회원 탈퇴 시 삭제 경로 (**#13/#11** — `account-purge` Edge Function, 탈퇴 30일 뒤 배치 또는 운영자 즉시 실행. 단계·재시도·감사는 `docs/data-retention.md` 7절):
+1. storage `faces/<user_id>/**` 전체 삭제 후 재조회 0건 확인 (storage 단계). 2. Didit 세션 전부 `DELETE /v3/session/{id}/delete/` 2xx 확인 (provider 단계 — 실패는 작업에 남아 재시도).
+3. `face_verifications`·`face_verification_reviews`·`face_asset_cleanup`·`face_consents` 행 삭제 (db 단계, `account_purge` RPC).
+4. Face Search 인덱스 제거 여부·Didit 콘솔 보존 설정·백업 보존은 코드로 확인할 수 없다 — **미검증**.
+재인증·실패 뒤 이전 세션 정리는 `face_asset_cleanup` 큐 (4절).
 
 **출시 차단 조건 — 개인정보처리방침 (이 작업에서 문구를 완성하지 않았다. 법무 검토 필요):**
 
-- [ ] TODO: 민감정보(생체정보) 처리 항목·목적·보유기간 고지 및 **별도 동의** 문구
+- [x] 앱 내 **별도 동의** 화면 + 서버 검증·증적 (#12 — `docs/face-consent.md`). 문구는 초안(draft)이며 법률 검토 전이다
+- [ ] TODO: 민감정보(생체정보) 처리 항목·목적·보유기간 고지 문구 법률 검토 → `faceConsentPolicy.ts` status `final`
 - [ ] TODO: Didit(Provider) 에 대한 처리위탁·**국외 이전** 고지 (서버 위치·이전받는 자·항목·목적·보유기간)
 - [ ] TODO: 처리 목적을 **인증(라이브니스·중복 가입 방지)** 으로 한정해 고지. 외모 매칭 목적은 MVP 에 없으므로 고지/동의 대상이 아니다 (#8 채택 시 추가 동의)
 - [ ] TODO: 탈퇴 시 Provider 데이터 삭제 절차·기간 고지 (절차는 `docs/data-retention.md` — 고지 문구는 #12)
@@ -330,7 +341,9 @@ npx expo start --dev-client                # 설치한 개발 빌드가 이 Metr
 자동 (외부 API 호출 없음 — fetch mock, 실제 얼굴/실사용자/실제 Didit 응답 없음):
 
 ```bash
-cd supabase/functions/_shared/face && node --experimental-strip-types selftest.ts        # 서버 로직 284건 (v3 fixture 17종 · 웹훅 · 복구 · 관리자)
+cd supabase/functions/_shared/face && node --experimental-strip-types selftest.ts        # 서버 로직 331건 (v3 fixture · 웹훅 · 복구 · 관리자 · superseded · 동의 검증)
+cd supabase/functions/_shared/purge && node --experimental-strip-types selftest.ts       # 삭제 작업·얼굴 자산 정리 118건 (adapter mock)
+cd supabase/functions/_shared/consent && node --experimental-strip-types selftest.ts     # 동의 정책 서버/앱 사본 일치·준비 상태 19건
 bash supabase/tests/run_local_check.sh                                                    # 마이그레이션 0001~0014 + RLS + face_liveness_tests.sql + 승인 RPC 동시성(2 세션)
 npx deno@2 check supabase/functions/start-face-liveness/index.ts supabase/functions/didit-webhook/index.ts supabase/functions/complete-face-verification/index.ts supabase/functions/admin-face-review/index.ts
 cd apps/mobile && node --experimental-strip-types scripts/face-liveness-selftest.mjs      # 화면 흐름 103건 (v3 상태 · 승인 복구 포함)
@@ -360,6 +373,7 @@ cd apps/admin && npx tsc --noEmit
 - Didit 콘솔 설정(Liveness-only 워크플로 · 3D Action & Flash · Face Search · **V3 웹훅 destination**) + secret 4개 등록 — 운영자
 - Supabase staging: `0014` 마이그레이션 적용, `admin-face-review` 배포, 관리자 웹 `ADMIN_ACTOR_LABEL`(선택) — 운영자
 - `eas init` 으로 EAS 프로젝트 연결 후 `eas build --profile development` 실기기 체크리스트(12절) 통과 — 실제 Didit 응답 형태 1회 확인 포함
-- 개인정보처리방침 개정 — 인증 목적 생체정보 처리·국외 이전 고지 (10절 TODO) — 출시 차단
-- `delete-account` 에 Didit 세션 삭제·storage 삭제 연결 (10절 TODO)
+- 개인정보처리방침 개정 — 인증 목적 생체정보 처리·국외 이전 고지 (10절 TODO) 와 동의 문서 확정(`docs/face-consent.md`) — 출시 차단
+- Didit 콘솔 데이터 보존 설정·백업 정책·세션 삭제 API 실제 응답(404 의미 포함) 확인 — 실 계정 필요 (미검증)
+- 실 프로젝트에서 세션별 경로 `faces/<uid>/liveness/<row id>/reference.jpg` 저장·정리 큐 삭제·탈퇴 삭제 확인 — 미수행
 - 얼굴 임베딩은 MVP 범위 밖이다 (#30 — #8 은 베타 이후 별도 채택 시 검토). 채택된다면 `status='approved' and reference_path is not null` 행만 입력으로 쓰고 별도 동의가 선행된다

@@ -406,10 +406,14 @@ export function parseWebhookEvent(body: unknown): WebhookEvent | null {
   };
 }
 
-/** reference image 저장 경로 — 반드시 <user_id>/liveness/ 아래 (DB CHECK 와 storage 정책이 강제) */
-export function referenceImagePath(userId: string, contentType: string): string {
+/**
+ * reference image 저장 경로 — 반드시 <user_id>/liveness/ 아래 (DB CHECK 와 storage 정책이 강제).
+ * #11: 세션(행)별 하위 폴더 <user_id>/liveness/<face_verification_id>/reference.<ext> — 이전 세션의 늦은 승인/정리가
+ * 현재 인증 이미지를 덮어쓰거나 지우지 못한다. 예전 고정 경로(<user_id>/liveness/reference.jpg)의 기존 행은 그대로 유효하다.
+ */
+export function referenceImagePath(userId: string, rowId: string, contentType: string): string {
   const ext = contentType === 'image/png' ? 'png' : 'jpg';
-  return `${userId}/liveness/reference.${ext}`;
+  return `${userId}/liveness/${rowId}/reference.${ext}`;
 }
 
 /** 로그용 세션 id 축약 — 전체 id/토큰/URL 은 로그에 남기지 않는다 */

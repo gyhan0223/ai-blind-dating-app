@@ -1,8 +1,16 @@
 /**
  * start-face-liveness 핵심 로직 — 순수 모듈 (의존성 주입, Node selftest 겸용).
  *
+ * POST { action: 'consent', version }                                              (#12 — 얼굴 정보 처리 별도 동의 기록)
+ *   → 200 { ok: true, version, consentedAt }        사용자 id 는 JWT, 시각은 DB 서버 시각. 같은 버전 재요청은 멱등
+ *   → 409 { error: 'consent_version_mismatch', currentVersion }   (앱이 아는 문서 버전이 서버와 다르다 — 앱 갱신/재동의)
+ *   → 503 { error: 'consent_policy_not_ready' | 'consent_unavailable' }
+ *
  * POST { action?: 'start' }
  *   → 200 { ok: true, sessionId, sessionToken, expiresAt, attemptCount }
+ *   → 403 { error: 'consent_required', currentVersion }   (현재 버전의 동의 기록이 없다 — 앱 체크박스만 믿지 않는다. Provider 호출 없음)
+ *   → 503 { error: 'consent_policy_not_ready' }       (production 인데 동의 문서가 확정되지 않았다 — 얼굴 수집 시작 금지)
+ *   → 503 { error: 'consent_unavailable' }            (동의 조회 실패 — fail-closed, Provider 호출 없음)
  *   → 409 { error: 'already_verified' }
  *   → 409 { error: 'provider_is_mock' }        (development/staging 에서 FACE_VERIFICATION_PROVIDER=mock)
  *   → 429 { error: 'rate_limited', reason, retryAfterSeconds }
@@ -33,10 +41,17 @@ import {
 import type { FaceDb, FaceLogger } from './faceDb.ts';
 import { applyDecisionToRow, repairApprovedRow } from './faceOutcome.ts';
 import type { FaceLivenessProvider } from './FaceLivenessProvider.ts';
+import type { FaceConsentDb } from '../consent/faceConsentDb.ts';
+import { type ConsentReadiness, isValidConsentVersion } from '../consent/faceConsentPolicy.ts';
+
+/** 서버가 아는 현재 동의 문서 (#12). readiness 는 env(APP_ENV · FACE_CONSENT_VERSION)로 계산한다 */
+export type ConsentPolicyDep = { kind: string; version: string; readiness: ConsentReadiness };
 
 export type StartFaceLivenessDeps = {
   provider: FaceLivenessProvider;
   db: FaceDb;
+  consents: FaceConsentDb;
+  consentPolicy: ConsentPolicyDep;
   now: () => Date;
   log: FaceLogger;
   limits?: { maxPerHour: number; maxPerDay: number };
@@ -66,18 +81,51 @@ export async function handleStartFaceLiveness(
   const action = typeof body.action === 'string' ? body.action : 'start';
 
   if (action === 'sync') return syncSession(req.userId, body, deps);
+  if (action === 'consent') return recordConsent(req.userId, body, deps);
   if (action !== 'start') return { status: 400, body: { error: 'unknown_action' } };
   return startSession(req.userId, deps);
 }
 
+/** 동의 기록 (#12) — 사용자 id 는 JWT 만, 버전은 서버 정책과 일치해야 하며 시각은 DB 가 정한다 */
+async function recordConsent(userId: string, body: Record<string, unknown>, deps: StartFaceLivenessDeps): Promise<HandlerResponse> {
+  const { consents, consentPolicy, log } = deps;
+  if (!consentPolicy.readiness.ready) {
+    log.error(`[face] consent policy not ready: ${consentPolicy.readiness.reasons.join(',')}`);
+    return { status: 503, body: { error: 'consent_policy_not_ready' } };
+  }
+  const version = body.version;
+  if (!isValidConsentVersion(version)) return { status: 400, body: { error: 'invalid_body' } };
+  if (version !== consentPolicy.version) {
+    return { status: 409, body: { error: 'consent_version_mismatch', currentVersion: consentPolicy.version } };
+  }
+  const kind = typeof body.kind === 'string' ? body.kind : consentPolicy.kind;
+  if (kind !== consentPolicy.kind) return { status: 400, body: { error: 'invalid_body' } };
+  const rec = await consents.recordConsent(userId, consentPolicy.kind, consentPolicy.version);
+  if (!rec.ok) return { status: 503, body: { error: 'consent_unavailable' } };
+  log.info('[face] consent recorded');
+  return { status: 200, body: { ok: true, kind: consentPolicy.kind, version: consentPolicy.version, consentedAt: rec.grantedAt } };
+}
+
 async function startSession(userId: string, deps: StartFaceLivenessDeps): Promise<HandlerResponse> {
-  const { db, provider, log } = deps;
+  const { db, provider, log, consents, consentPolicy } = deps;
   const limits = deps.limits ?? { maxPerHour: FACE_SESSION_MAX_PER_HOUR, maxPerDay: FACE_SESSION_MAX_PER_DAY };
 
   if (provider.kind === 'mock') {
     // Mock 은 SDK 가 받을 수 있는 실제 토큰을 만들 수 없다 → 개발 버튼(complete-face-verification) 안내
     return { status: 409, body: { error: 'provider_is_mock' } };
   }
+
+  if (await db.isUserFaceVerified(userId)) return { status: 409, body: { error: 'already_verified' } };
+
+  // #12: 신규 Provider 세션은 현재 버전의 별도 동의가 서버에 기록돼 있을 때만 만든다 (앱 체크박스만 믿지 않는다).
+  //      문서 미확정(production) · 조회 실패 · 미동의 · 구버전 동의 → Provider 를 호출하지 않는다. 진행 중 세션의 sync/웹훅은 이 검사를 거치지 않는다.
+  if (!consentPolicy.readiness.ready) {
+    log.error(`[face] consent policy not ready: ${consentPolicy.readiness.reasons.join(',')}`);
+    return { status: 503, body: { error: 'consent_policy_not_ready' } };
+  }
+  const consent = await consents.hasCurrentConsent(userId, consentPolicy.kind, consentPolicy.version);
+  if (!consent.ok) return { status: 503, body: { error: 'consent_unavailable' } };
+  if (!consent.consented) return { status: 403, body: { error: 'consent_required', currentVersion: consentPolicy.version } };
 
   let begin = await db.beginSession(userId, provider.kind, limits);
 
@@ -178,7 +226,8 @@ async function syncSession(
     return { status: 200, body: { ok: true, status: 'approved', faceVerified: repaired.faceVerified, userActionRequired: false } };
   }
   if (row.status === 'rejected' || row.status === 'expired') {
-    return { status: 200, body: { ok: true, status: row.status, faceVerified: false, userActionRequired: false } };
+    // 종료된 세션 — 사용자가 다른 세션으로 이미 인증됐을 수 있으므로(superseded, #11) 플래그는 실제 값을 돌려준다
+    return { status: 200, body: { ok: true, status: row.status, faceVerified: await db.isUserFaceVerified(userId), userActionRequired: false } };
   }
 
   const decision = await provider.getDecision(sessionId, { userId: row.userId });
@@ -190,7 +239,8 @@ async function syncSession(
 
   const applied = await applyDecisionToRow({ row, decision: decision.decision, eventAt: deps.now(), db, provider, log });
   const status = applied.status;
-  const faceVerified = status === 'approved' ? await db.isUserFaceVerified(userId) : false;
+  // faceVerified 는 항상 users.face_verified 의 실제 값 — 이 세션이 다른 세션에 대체(superseded)됐어도 사용자는 인증된 상태일 수 있다 (#11)
+  const faceVerified = await db.isUserFaceVerified(userId);
   const userActionRequired =
     status === 'pending' && (decision.decision.userActionRequired || providerStatusRequiresUserAction(row.providerStatus));
   return { status: 200, body: { ok: true, status, faceVerified, userActionRequired } };

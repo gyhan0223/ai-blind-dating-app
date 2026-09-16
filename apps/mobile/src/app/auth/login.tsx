@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import { Button, Field, InlineNotice, Screen, Text } from '@/components/ui';
 import { track } from '@/lib/analytics';
-import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
+import { DEV_TOOLS_ENABLED, loadDevModules } from '@/lib/devTools';
 import { loadOtpCooldowns, saveOtpCooldowns } from '@/lib/otpCooldown';
 import { type CooldownMap, cooldownRemainingSec, formatCooldown, markSent } from '@/lib/otpCooldownCore';
 import { autoHyphen, formatPhoneKR, normalizePhoneKR } from '@/lib/phone';
@@ -27,6 +27,9 @@ import { colors, spacing } from '@/theme/tokens';
  * 010-0000-XXXX 대역을 인증번호 123456 으로 등록해 사용한다 (README 참고).
  * 이메일 로그인은 일반 사용자 화면에서 제거 — 시드 계정(개발)과 관리자 웹에서만 사용.
  */
+/** 개발 빌드에서만 로드된다 — release 번들에는 모듈 자체가 없다 (#3, lib/devTools.ts) */
+const devModules = loadDevModules();
+
 export default function Login() {
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
@@ -128,44 +131,29 @@ export default function Login() {
   };
 
   /**
-   * 개발 전용 — SMS 설정 없이 통과. dev-login Edge Function 이 입력한 번호가 붙은
-   * 개발 계정을 만들어 주고, 그 계정으로 로그인한다. 이후 본인확인/온보딩은 실제와 동일.
-   * release 빌드(__DEV__ = false)에는 버튼 자체가 번들에서 제거되며,
+   * 개발 전용 — SMS 설정 없이 통과 (구현은 @/dev/devModules — release 번들에 포함되지 않는다).
    * 서버(dev-login)도 production 에서는 무조건 403 이라 UI 와 무관하게 우회가 불가능하다.
    */
-  const devLogin = async () => {
-    if (!e164) {
-      setError('올바른 휴대전화 번호를 입력해 주세요.');
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    const { data, error: fnErr } = await supabase.functions.invoke('dev-login', {
-      body: { phone: e164 },
-    });
-    if (fnErr || !data?.email) {
-      setLoading(false);
-      let detail = fnErr?.message ?? '';
-      try {
-        // FunctionsHttpError 면 서버가 보낸 안내 메시지를 꺼내 보여준다
-        const ctx = await (fnErr as { context?: Response })?.context?.json();
-        if (ctx?.message || ctx?.error) detail = ctx.message ?? ctx.error;
-      } catch {}
-      setError(`테스트 로그인에 실패했어요.\n[dev] ${detail || 'dev-login 함수가 배포되어 있는지 확인해 주세요.'}`);
-      return;
-    }
-    const { error: signErr } = await supabase.auth.signInWithPassword({
-      email: data.email,
-      password: data.password,
-    });
-    setLoading(false);
-    if (signErr) {
-      setError(`테스트 로그인에 실패했어요.\n[dev] ${signErr.message}`);
-      return;
-    }
-    track('signup_started');
-    router.replace('/');
-  };
+  // 리터럴 __DEV__ 삼항 — release 번들에서는 핸들러 본문(개발 모듈 호출)까지 상수 접기로 제거된다
+  const devLogin = __DEV__
+    ? async () => {
+        if (!devModules) return;
+        if (!e164) {
+          setError('올바른 휴대전화 번호를 입력해 주세요.');
+          return;
+        }
+        setLoading(true);
+        setError(null);
+        const res = await devModules.devLoginWithPhone(e164);
+        setLoading(false);
+        if (!res.ok) {
+          setError(`테스트 로그인에 실패했어요.\n[dev] ${res.message}`);
+          return;
+        }
+        track('signup_started');
+        router.replace('/');
+      }
+    : undefined;
 
   return (
     <Screen>
@@ -212,11 +200,11 @@ export default function Login() {
               이 번호로 방금 보냈어요. {formatCooldown(resendLeft)} 후 다시 받을 수 있어요
             </Text>
           )}
-          {__DEV__ && DEV_TOOLS_ENABLED && (
+          {__DEV__ && DEV_TOOLS_ENABLED && devModules && (
             <View style={{ marginTop: spacing.sm }}>
               <Button
                 kind="secondary"
-                title="테스트로 시작하기 (개발용 · SMS 없이 통과)"
+                title={devModules.DEV_BUTTON_LABELS.phoneLogin}
                 onPress={devLogin}
                 loading={loading}
                 disabled={!e164}

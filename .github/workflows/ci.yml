@@ -1,0 +1,98 @@
+# CI gate (#3 · #27 · #13 · #11 · #12)
+#   - 서버 순수 로직 selftest (Node, 외부 호출 없음)
+#   - 로컬 Postgres 에 전체 마이그레이션 + SQL/동시성 테스트 (run_local_check.sh)
+#   - 관리자 웹 typecheck + 세션/로그인 제한 selftest
+#   - 모바일 typecheck · lint · selftest · SDK 로그 검사 · **release 산출물 검사** (expo export 3플랫폼 → 개발 마커/서버 secret grep)
+# 여기서 통과해도 EAS 네이티브 release 빌드·실기기 검증을 대신하지 않는다 (docs/release-checklist.md).
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  server-selftests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: server selftests
+        run: bash scripts/server-selftests.sh
+
+  db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: migrations + SQL/concurrency tests
+        run: cd supabase/tests && DB_NAME=ci_check bash run_local_check.sh
+
+  admin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/admin/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc --noEmit
+      - run: node --experimental-strip-types scripts/admin-session-selftest.mjs
+
+  mobile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    env:
+      # 검사용 공개 값(placeholder). 서버 secret 은 CI 에 두지 않는다 — 검사기는 secret 이름·service_role 토큰·개발 마커를 잡는다
+      EXPO_PUBLIC_SUPABASE_URL: https://ci-placeholder.supabase.co
+      EXPO_PUBLIC_SUPABASE_ANON_KEY: ci-public-anon-key-placeholder
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc --noEmit
+      - run: npx expo lint
+      - name: selftests
+        run: |
+          npm run devtools:selftest
+          npm run face:selftest
+          npm run onboarding:selftest
+          npm run chat:selftest
+          npm run redact:selftest
+          npm run preferences:selftest
+          node --experimental-strip-types scripts/otp-cooldown-selftest.mjs
+          npm run sdk:verify-no-token-log
+      - name: release bundle check — 검사기 자체 검증 (가짜 secret 을 잡는지)
+        run: npm run release:check:selfcheck
+      - name: release bundle check — expo export (web · ios · android) 산출물 grep
+        run: npm run release:check

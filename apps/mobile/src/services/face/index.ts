@@ -12,14 +12,18 @@
  *   - Provider API Key/Workflow ID 는 앱에 없다. 앱이 받는 것은 1회용 session_token 뿐이며 저장하지 않는다.
  *   - 로그에 토큰/세션 id/경로를 남기지 않는다.
  *   - 클라이언트는 face_verifications 를 읽을 수만 있고(본인 행), 쓰기는 서버 전용이다.
+ *   - 개발용 Mock 승인은 이 모듈에 두지 않는다 (@/dev/devModules, #3).
  *   - 사용자가 예전에 올린 front/left/right.jpg 는 라이브니스가 검증된 이미지가 아니므로 더 이상 사용하지 않는다.
  */
+import { FACE_CONSENT } from '@/constants/faceConsent';
 import { supabase } from '@/lib/supabase';
 import {
+  type FaceConsentRowLike,
   type FaceErrorCode,
   type FaceVerificationRowLike,
   type FaceVerificationStatus,
   mapStartFailure,
+  needsFaceConsent,
 } from './faceFlowCore';
 
 export { isDiditSdkAvailable, runDiditLiveness } from './diditSdk';
@@ -103,13 +107,38 @@ export async function getLatestFaceVerification(userId: string): Promise<FaceVer
   return (data as FaceVerificationRowLike | null) ?? null;
 }
 
-/**
- * 개발 전용 — Mock provider 로 즉시 승인 (complete-face-verification).
- * 반드시 `__DEV__ && DEV_TOOLS_ENABLED` 가드 안에서만 호출한다. production 서버에서는 이 함수가
- * 배포되지 않으며(allowlist 제외) 배포돼 있어도 FACE_VERIFICATION_PROVIDER=didit 이면 기동을 거부한다.
- */
-export async function devMockApproveFace(scenario: 'approved' | 'duplicate' = 'approved'): Promise<{ verified: boolean; status: string }> {
-  const { data, error } = await supabase.functions.invoke('complete-face-verification', { body: { scenario } });
-  if (error) throw new Error('개발용 얼굴 인증 통과에 실패했어요. complete-face-verification 함수와 FACE_VERIFICATION_PROVIDER=mock 설정을 확인하세요.');
-  return { verified: data?.verified === true, status: typeof data?.status === 'string' ? data.status : 'unknown' };
+// ---------------------------------------------------------------------------
+// 얼굴 정보 처리 별도 동의 (#12)
+//   - 앱은 본인 동의 행을 읽어 화면을 정하고(RLS: 본인 행만), 동의는 서버 액션으로만 기록한다 (사용자·버전·시각은 서버가 정한다).
+//   - 서버가 현재 버전의 동의 기록이 없다고 하면(403 consent_required) 체크박스 상태와 무관하게 세션은 만들어지지 않는다.
+// ---------------------------------------------------------------------------
+
+/** 현재 버전의 동의가 필요한가. true=동의 화면, false=이미 동의, null=조회 실패(서버가 최종 판단) */
+export async function needsFaceConsentForUser(userId: string): Promise<boolean | null> {
+  const { data, error } = await supabase
+    .from('face_consents')
+    .select('doc_version, revoked_at')
+    .eq('user_id', userId)
+    .eq('kind', FACE_CONSENT.kind)
+    .eq('doc_version', FACE_CONSENT.version)
+    .limit(1);
+  if (error) return null;
+  return needsFaceConsent((data as FaceConsentRowLike[] | null) ?? [], FACE_CONSENT.version);
 }
+
+export type RecordFaceConsentResult = { ok: true } | { ok: false; code: FaceErrorCode };
+
+/** 동의 기록 — 서버가 문서 버전을 대조하고 서버 시각으로 저장한다. 같은 버전 재요청은 멱등 */
+export async function recordFaceConsent(): Promise<RecordFaceConsentResult> {
+  const res = await invokeFace({ action: 'consent', kind: FACE_CONSENT.kind, version: FACE_CONSENT.version });
+  if (res.status === 200 && res.body?.ok === true) return { ok: true };
+  const err = typeof res.body?.error === 'string' ? res.body.error : '';
+  if (err === 'consent_version_mismatch') return { ok: false, code: 'consent_version_mismatch' };
+  if (err === 'consent_policy_not_ready') return { ok: false, code: 'consent_policy_not_ready' };
+  if (err === 'beta_admission_required') return { ok: false, code: 'beta_admission_required' };
+  if (res.status === 0) return { ok: false, code: 'network' };
+  if (res.status === 503) return { ok: false, code: 'provider_unavailable' };
+  return { ok: false, code: 'unknown' };
+}
+
+// 개발용 Mock 승인(complete-face-verification 호출)은 @/dev/devModules 로 옮겼다 (#3) — 이 모듈은 release 번들에 남으므로 개발 경로를 두지 않는다.

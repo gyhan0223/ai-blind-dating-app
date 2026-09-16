@@ -1,13 +1,14 @@
 import { router } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Linking, Platform, View } from 'react-native';
+import { ActivityIndicator, Linking, Platform, Pressable, View } from 'react-native';
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, Card, InlineNotice, Screen, Text } from '@/components/ui';
-import { DEV_TOOLS_ENABLED } from '@/lib/devTools';
+import { FACE_CONSENT, FACE_CONSENT_ROWS } from '@/constants/faceConsent';
+import { DEV_TOOLS_ENABLED, loadDevModules } from '@/lib/devTools';
 import { advanceOnboarding } from '@/lib/onboarding';
+import { openPolicy, POLICY_LINKS_ENABLED } from '@/lib/policyLinks';
 import { useSession } from '@/lib/session';
 import {
-  devMockApproveFace,
   FACE_ERROR_MESSAGES,
   type FaceScreenState,
   getLatestFaceVerification,
@@ -17,15 +18,17 @@ import {
   mapSdkResult,
   providerStatusRequiresUserAction,
   mapServerStatus,
+  needsFaceConsentForUser,
   nextStateAfterSdk,
   POLL_INTERVAL_MS,
+  recordFaceConsent,
   restoreScreenState,
   runDiditLiveness,
   shouldSyncAt,
   startFaceLiveness,
   syncFaceLiveness,
 } from '@/services/face';
-import { colors, spacing } from '@/theme/tokens';
+import { colors, radius, spacing } from '@/theme/tokens';
 
 /**
  * 얼굴 확인 — Didit 능동형 라이브니스(3D Action & Flash).
@@ -36,17 +39,26 @@ import { colors, spacing } from '@/theme/tokens';
  * 4. "확인 결과를 처리하고 있어요" — 서버가 웹훅/재조회로 최종 판정
  * 5. DB 의 users.face_verified=true 를 확인한 뒤에만 다음 단계로 이동
  *
+ * 얼굴 정보 처리 별도 동의 (#12): "얼굴 확인 시작" 을 누르면 서버에 현재 버전의 동의 기록이 없을 때 동의 화면을 먼저 보여준다.
+ * 체크박스는 기본 미선택이며 다른 약관과 분리된 별도 동의다. 기록은 서버 액션(consent)이 하고, 세션 생성은 서버가 기록을 다시 확인한다.
+ *
  * SDK 가 화면에서 Approved 를 돌려줘도 그것만으로는 절대 진행하지 않는다.
  * 라이브니스는 "실제 사람" 만 확인하며 실명·나이는 본인확인(identity) 단계가 담당한다.
  * 얼굴 이미지는 앱에 저장되지 않고 상대에게도 절대 공개되지 않는다.
  * 인증 목적으로만 쓰이며 외모 평가·이상형 추천에는 사용하지 않는다 (#39 — 얼굴 임베딩은 MVP 이후 별도 검토).
  */
+/** 개발 빌드에서만 로드 — Mock 승인(complete-face-verification) 호출 코드는 release 번들에 없다 (#3) */
+const devModules = loadDevModules();
+
 export default function FaceStep() {
   const { session, refreshAppUser } = useSession();
   const userId = session?.user.id;
 
   const [state, setState] = useState<FaceScreenState>(initialFaceScreenState);
   const [busy, setBusy] = useState(false);
+  const [consentChecked, setConsentChecked] = useState(false);
+  const [consentDeclined, setConsentDeclined] = useState(false);
+  const [consentError, setConsentError] = useState<string | null>(null);
   const syncsDone = useRef(0);
   const lastSessionId = useRef<string | null>(null);
   const advancing = useRef(false);
@@ -165,8 +177,8 @@ export default function FaceStep() {
     });
   }, [state, proceed]);
 
-  /** 얼굴 확인 시작 — 세션 생성 → 네이티브 SDK → 결과 대기 */
-  const start = async () => {
+  /** 얼굴 확인 시작 — (동의 확인) → 세션 생성 → 네이티브 SDK → 결과 대기 */
+  const start = async (opts: { skipConsentCheck?: boolean } = {}) => {
     if (busy) return;
     setBusy(true);
     syncsDone.current = 0;
@@ -175,10 +187,27 @@ export default function FaceStep() {
         setState({ kind: 'error', code: 'sdk_unavailable' });
         return;
       }
+      // #12: 서버에 현재 버전의 동의 기록이 없으면 먼저 동의 화면 (조회 실패면 서버 응답으로 판단)
+      if (!opts.skipConsentCheck && userId) {
+        const needs = await needsFaceConsentForUser(userId);
+        if (needs === true) {
+          setConsentChecked(false);
+          setConsentError(null);
+          setState({ kind: 'consent' });
+          return;
+        }
+      }
       setState({ kind: 'starting' });
       const started = await startFaceLiveness();
       if (!started.ok && started.code === 'beta_admission_required') {
         router.replace('/auth/beta'); // 폐쇄 베타 입장 전 (#26) — 서버가 거부했으니 입장 화면으로
+        return;
+      }
+      if (!started.ok && started.code === 'consent_required') {
+        // 서버 기록 기준 — 앱 상태와 무관하게 동의 화면으로
+        setConsentChecked(false);
+        setConsentError(null);
+        setState({ kind: 'consent' });
         return;
       }
       if (!started.ok) {
@@ -202,6 +231,37 @@ export default function FaceStep() {
     } finally {
       setBusy(false);
     }
+  };
+
+  /** 동의 화면: 체크 후 "동의하고 시작" → 서버 기록 → 세션 시작 */
+  const consentAndStart = async () => {
+    if (busy || !consentChecked) return;
+    setBusy(true);
+    setConsentError(null);
+    try {
+      const res = await recordFaceConsent();
+      if (!res.ok) {
+        if (res.code === 'beta_admission_required') {
+          router.replace('/auth/beta');
+          return;
+        }
+        setConsentError(FACE_ERROR_MESSAGES[res.code].body);
+        return;
+      }
+    } catch {
+      setConsentError(FACE_ERROR_MESSAGES.unknown.body);
+      return;
+    } finally {
+      setBusy(false);
+    }
+    setConsentDeclined(false);
+    await start({ skipConsentCheck: true });
+  };
+
+  const declineConsent = () => {
+    setConsentChecked(false);
+    setConsentDeclined(true);
+    setState({ kind: 'intro' });
   };
 
   /** 처리 지연 후 "다시 확인" — 같은 세션의 결과를 이어서 기다린다 */
@@ -249,27 +309,30 @@ export default function FaceStep() {
     if (Platform.OS !== 'web') await Linking.openSettings();
   };
 
-  /** 개발 전용 — 카메라 없는 시뮬레이터에서 Mock 승인 (release 번들에서는 리터럴 __DEV__ 가드로 제거된다) */
-  const devSkip = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const res = await devMockApproveFace();
-      if (res.verified) {
-        setState({ kind: 'approved' });
-      } else {
-        setState(res.status === 'in_review' ? { kind: 'in_review', sessionId: null } : { kind: 'error', code: 'liveness_failed' });
+  /** 개발 전용 — 카메라 없는 시뮬레이터에서 Mock 승인 (구현은 @/dev/devModules — release 번들에 포함되지 않는다) */
+  // 리터럴 __DEV__ 삼항 — release 번들에서는 핸들러 본문까지 제거된다
+  const devSkip = __DEV__
+    ? async () => {
+        if (busy || !devModules) return;
+        setBusy(true);
+        try {
+          const res = await devModules.devMockApproveFace();
+          if (res.verified) {
+            setState({ kind: 'approved' });
+          } else {
+            setState(res.status === 'in_review' ? { kind: 'in_review', sessionId: null } : { kind: 'error', code: 'liveness_failed' });
+          }
+        } catch {
+          setState({ kind: 'error', code: 'provider_unavailable' });
+        } finally {
+          setBusy(false);
+        }
       }
-    } catch {
-      setState({ kind: 'error', code: 'provider_unavailable' });
-    } finally {
-      setBusy(false);
-    }
-  };
+    : undefined;
 
   const devButton =
-    __DEV__ && DEV_TOOLS_ENABLED ? (
-      <Button kind="ghost" title="개발 모드: 얼굴 인증 통과 (Mock)" onPress={devSkip} disabled={busy} />
+    __DEV__ && DEV_TOOLS_ENABLED && devModules ? (
+      <Button kind="ghost" title={devModules.DEV_BUTTON_LABELS.faceMock} onPress={devSkip} disabled={busy} />
     ) : null;
 
   // ── 렌더 ────────────────────────────────────────────────────────────────
@@ -307,9 +370,79 @@ export default function FaceStep() {
           확인이 끝난 얼굴 이미지는 앱 서버만 접근할 수 있는 비공개 저장소에 보관돼요. 외모를 평가하거나
           이상형을 찾는 데 쓰이지 않아요. 이 확인은 실명이나 나이를 증명하지 않아요.
         </Text>
+        {consentDeclined && (
+          <View style={{ marginBottom: spacing.md }}>
+            <InlineNotice text="얼굴 정보 처리에 동의하지 않으면 얼굴 확인을 진행할 수 없어 가입을 완료할 수 없어요. 이미 입력한 정보는 그대로 남아 있어요." />
+          </View>
+        )}
         <View style={{ gap: spacing.sm }}>
-          <Button title="얼굴 확인 시작" onPress={start} loading={busy} />
+          <Button title="얼굴 확인 시작" onPress={() => start()} loading={busy} />
           {devButton}
+        </View>
+      </Screen>
+    );
+  }
+
+  if (state.kind === 'consent') {
+    // #12 얼굴(생체) 정보 처리 별도 동의 — 다른 약관과 분리된 명시적 선택. 기본 미선택. 확정되지 않은 항목은 전문 링크로 안내
+    return (
+      <Screen>
+        <OnboardingHeader
+          step="face"
+          title="얼굴 정보 처리 동의"
+          subtitle={'얼굴 확인을 시작하기 전에 얼굴 정보가 어떻게 처리되는지 확인하고 동의해 주세요.\n이 동의는 이용약관·개인정보 처리방침 동의와 별개예요.'}
+        />
+        <Card style={{ marginBottom: spacing.md }}>
+          {FACE_CONSENT_ROWS.map(({ key, label }) => {
+            const value = FACE_CONSENT.disclosures[key];
+            return (
+              <View key={key} style={{ marginBottom: spacing.sm }}>
+                <Text variant="label">{label}</Text>
+                <Text variant="caption" color={colors.sub}>
+                  {value ?? '개인정보 처리방침 전문에서 확인할 수 있어요.'}
+                </Text>
+              </View>
+            );
+          })}
+          {POLICY_LINKS_ENABLED && (
+            <Pressable onPress={() => openPolicy('privacy')} hitSlop={8} accessibilityRole="link" style={{ marginTop: spacing.xs }}>
+              <Text variant="caption" color={colors.accent}>개인정보 처리방침 전문 보기</Text>
+            </Pressable>
+          )}
+        </Card>
+        <Pressable
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: consentChecked }}
+          onPress={() => setConsentChecked((v) => !v)}
+          style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, marginBottom: spacing.md }}
+        >
+          <View
+            style={{
+              width: 24,
+              height: 24,
+              borderRadius: radius.sm,
+              borderWidth: 2,
+              borderColor: consentChecked ? colors.accent : colors.line,
+              backgroundColor: consentChecked ? colors.accent : colors.surface,
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginTop: 2,
+            }}
+          >
+            {consentChecked && <Text variant="label" color={colors.onAccent}>✓</Text>}
+          </View>
+          <Text variant="body" style={{ flex: 1 }}>
+            얼굴 정보를 위 내용대로 실제 사람 확인·중복 가입 검토 목적으로 처리하는 데 동의합니다. (필수 · 별도 동의)
+          </Text>
+        </Pressable>
+        {consentError && (
+          <View style={{ marginBottom: spacing.md }}>
+            <InlineNotice tone="danger" text={consentError} />
+          </View>
+        )}
+        <View style={{ gap: spacing.sm }}>
+          <Button title="동의하고 얼굴 확인 시작" onPress={consentAndStart} loading={busy} disabled={!consentChecked} />
+          <Button kind="ghost" title="동의하지 않을래요" onPress={declineConsent} disabled={busy} />
         </View>
       </Screen>
     );
@@ -392,8 +525,8 @@ export default function FaceStep() {
         {message.action !== 'continue' && (
           <Button
             kind={message.action === 'retry' ? 'primary' : 'secondary'}
-            title="얼굴 확인 다시 시도"
-            onPress={start}
+            title={state.code === 'consent_required' ? '동의 내용 확인하기' : '얼굴 확인 다시 시도'}
+            onPress={() => start()}
             loading={busy}
           />
         )}

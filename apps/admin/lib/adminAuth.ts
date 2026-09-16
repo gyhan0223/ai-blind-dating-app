@@ -1,39 +1,77 @@
-import { createHash } from 'crypto';
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import {
+  type GuardEvent,
+  type GuardHit,
   issueSessionToken,
   LOGIN_LOCK_SECONDS,
-  LoginAttemptLimiter,
+  LOGIN_MAX_FAILURES,
+  type LoginGuardStore,
+  loginGuardKey,
   passwordMatches,
+  resolveAdminSessionSecret,
+  resolveClientIp,
+  runLoginGuard,
   sanitizeActor,
   SESSION_TTL_SECONDS,
   verifySessionToken,
 } from './adminSessionCore';
+import { adminClient } from './supabaseAdmin';
 
 /**
  * 관리자 로그인/세션 (#27).
  *  * 쿠키 = 서명된 세션 토큰(만료 포함, adminSessionCore). httpOnly · sameSite=lax · production 에서 secure.
- *  * ADMIN_SESSION_SECRET 이 있으면 그것으로 서명, 없으면 ADMIN_PASSWORD 에서 파생 (비밀번호 변경 = 전 세션 무효).
- *  * 로그인 실패 5회 → 15분 잠금 (인스턴스 메모리). 로그인 성공/실패/잠금은 admin_audit_log 에 남긴다 (IP 는 해시만).
- *  * 로그인 때 입력한 처리자 이름이 세션에 실려 모든 감사 기록의 actor 가 된다.
+ *  * 서명 키: ADMIN_SESSION_SECRET — production(NODE_ENV=production) 에서는 필수(32자+). development 에서만 ADMIN_PASSWORD 파생 fallback.
+ *  * 로그인 실패 5회 → 15분 잠금 — DB(admin_login_guard RPC, 0031) 에 기록되어 여러 인스턴스·재시작에 걸쳐 동일하게 적용된다.
+ *    키 = HMAC(session secret, IP). 제한 조회/기록이 실패하면 로그인하지 않는다 (fail-closed).
+ *  * 프록시 헤더는 ADMIN_TRUST_PROXY_HEADERS=1 일 때만 신뢰한다 (docs/security.md 4절).
+ *  * 로그인 성공/실패/잠금/제한 불가는 admin_audit_log 에 남긴다 (IP 는 HMAC 키만).
+ *  * 로그인 때 입력한 처리자 이름이 세션에 실려 모든 감사 기록의 actor 가 된다 (제한 키에는 쓰지 않는다).
  */
 const COOKIE_NAME = 'bonsim_admin';
 
 function sessionSecret(): string {
-  const explicit = process.env.ADMIN_SESSION_SECRET;
-  if (explicit && explicit.length >= 16) return explicit;
-  const password = process.env.ADMIN_PASSWORD;
-  if (!password) throw new Error('ADMIN_PASSWORD 환경변수가 필요합니다.');
-  return createHash('sha256').update(`bonsim-admin-session:${password}`).digest('hex');
+  const res = resolveAdminSessionSecret({
+    nodeEnv: process.env.NODE_ENV,
+    sessionSecret: process.env.ADMIN_SESSION_SECRET,
+    password: process.env.ADMIN_PASSWORD,
+  });
+  if (!res.ok) {
+    // 값은 절대 메시지에 넣지 않는다
+    throw new Error(`ADMIN_SESSION_SECRET 설정 오류 (${res.reason}) — production 에서는 32자 이상의 고유 값이 필수입니다 (docs/environments.md)`);
+  }
+  return res.secret;
 }
 
-const limiter = new LoginAttemptLimiter();
+/** DB 공유 로그인 제한 저장소 — RPC 오류는 null (호출자가 fail-closed) */
+const dbGuardStore: LoginGuardStore = {
+  async hit(key: string, event: GuardEvent): Promise<GuardHit | null> {
+    try {
+      const db = adminClient();
+      const { data, error } = await db.rpc('admin_login_guard', {
+        p_key: key,
+        p_event: event,
+        p_max_failures: LOGIN_MAX_FAILURES,
+        p_lock_seconds: LOGIN_LOCK_SECONDS,
+      });
+      if (error || typeof data !== 'object' || data === null) return null;
+      const r = data as { locked?: unknown; locked_seconds?: unknown; failures?: unknown };
+      if (typeof r.locked !== 'boolean') return null;
+      return { locked: r.locked, lockedSeconds: Number(r.locked_seconds ?? 0), failures: Number(r.failures ?? 0) };
+    } catch {
+      return null;
+    }
+  },
+};
 
 async function clientKey(): Promise<string> {
   const h = await headers();
-  const ip = (h.get('x-forwarded-for') ?? h.get('x-real-ip') ?? 'local').split(',')[0].trim();
-  return createHash('sha256').update(`ip:${ip}`).digest('hex').slice(0, 16);
+  const ip = resolveClientIp({
+    trustProxyHeaders: process.env.ADMIN_TRUST_PROXY_HEADERS === '1',
+    xForwardedFor: h.get('x-forwarded-for'),
+    xRealIp: h.get('x-real-ip'),
+  });
+  return loginGuardKey(sessionSecret(), ip);
 }
 
 export type AdminSession = { actor: string; expiresAt: number };
@@ -61,23 +99,26 @@ export async function currentActor(): Promise<string> {
   return s?.actor ?? sanitizeActor(process.env.ADMIN_ACTOR_LABEL ?? 'admin-web');
 }
 
-export type LoginResult = { ok: true } | { ok: false; reason: 'bad_password' | 'locked'; lockedSeconds?: number };
+export type LoginResult = { ok: true } | { ok: false; reason: 'bad_password' | 'locked' | 'unavailable'; lockedSeconds?: number };
 
 export async function loginWithPassword(password: string, actorName: string): Promise<LoginResult> {
   const key = await clientKey();
-  const locked = limiter.lockedFor(key);
-  const { recordAdminAudit } = await import('./audit');
-  if (locked > 0) {
-    await recordAdminAudit(sanitizeActor(actorName), 'admin_login_locked', 'client', key, { locked_seconds: locked });
-    return { ok: false, reason: 'locked', lockedSeconds: locked };
-  }
-  if (!passwordMatches(password, process.env.ADMIN_PASSWORD ?? '')) {
-    const lockNow = limiter.recordFailure(key);
-    await recordAdminAudit(sanitizeActor(actorName), 'admin_login_failed', 'client', key, { locked_seconds: lockNow || undefined });
-    return lockNow > 0 ? { ok: false, reason: 'locked', lockedSeconds: LOGIN_LOCK_SECONDS } : { ok: false, reason: 'bad_password' };
-  }
-  limiter.recordSuccess(key);
   const actor = sanitizeActor(actorName);
+  const { recordAdminAudit } = await import('./audit');
+  const result = await runLoginGuard(dbGuardStore, key, () => passwordMatches(password, process.env.ADMIN_PASSWORD ?? ''));
+  switch (result.outcome) {
+    case 'unavailable':
+      await recordAdminAudit(actor, 'admin_login_unavailable', 'client', key, {});
+      return { ok: false, reason: 'unavailable' };
+    case 'locked':
+      await recordAdminAudit(actor, 'admin_login_locked', 'client', key, { locked_seconds: result.lockedSeconds });
+      return { ok: false, reason: 'locked', lockedSeconds: result.lockedSeconds };
+    case 'bad_password':
+      await recordAdminAudit(actor, 'admin_login_failed', 'client', key, {});
+      return { ok: false, reason: 'bad_password' };
+    case 'ok':
+      break;
+  }
   const store = await cookies();
   store.set(COOKIE_NAME, issueSessionToken(sessionSecret(), actor), {
     httpOnly: true,

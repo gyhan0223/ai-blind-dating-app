@@ -34,6 +34,9 @@ export type FaceErrorCode =
   | 'provider_unavailable'
   | 'already_verified'
   | 'beta_admission_required'
+  | 'consent_required'
+  | 'consent_version_mismatch'
+  | 'consent_policy_not_ready'
   | 'unknown';
 
 export type FaceErrorAction = 'retry' | 'settings' | 'wait' | 'continue';
@@ -127,6 +130,21 @@ export const FACE_ERROR_MESSAGES: Record<FaceErrorCode, FaceErrorMessage> = {
     body: '지금은 초대받은 분만 시작할 수 있어요. 초대코드를 입력하거나 대기 등록을 해 주세요.',
     action: 'continue',
   },
+  consent_required: {
+    title: '얼굴 정보 처리 동의가 필요해요',
+    body: '얼굴 확인을 시작하려면 얼굴 정보 처리에 대한 별도 동의가 필요해요. 내용을 확인하고 동의한 뒤 시작할 수 있어요.',
+    action: 'retry',
+  },
+  consent_version_mismatch: {
+    title: '동의 안내가 새로 바뀌었어요',
+    body: '앱을 최신 버전으로 업데이트한 뒤 바뀐 안내를 확인하고 다시 동의해 주세요.',
+    action: 'retry',
+  },
+  consent_policy_not_ready: {
+    title: '지금은 얼굴 확인을 시작할 수 없어요',
+    body: '얼굴 확인 준비가 아직 끝나지 않았어요. 잠시 후 다시 시도해 주세요.',
+    action: 'retry',
+  },
   unknown: {
     title: '얼굴 확인 중 문제가 생겼어요',
     body: '잠시 후 다시 시도해 주세요.',
@@ -141,6 +159,8 @@ export const FACE_ERROR_MESSAGES: Record<FaceErrorCode, FaceErrorMessage> = {
 export type FaceScreenState =
   | { kind: 'loading' }
   | { kind: 'intro' }
+  /** 얼굴 정보 처리 별도 동의 화면 (#12) — 서버에 현재 버전의 동의 기록이 없을 때 */
+  | { kind: 'consent' }
   | { kind: 'starting' }
   | { kind: 'sdk' }
   | { kind: 'processing'; sessionId: string; startedAt: number }
@@ -162,6 +182,9 @@ export function mapStartFailure(res: StartResponseLike): { code: FaceErrorCode; 
   if (res.status === 401) return { code: 'unknown' };
   if (err === 'already_verified') return { code: 'already_verified' };
   if (err === 'beta_admission_required') return { code: 'beta_admission_required' }; // #26 — 앱은 입장 화면으로 보낸다
+  if (err === 'consent_required') return { code: 'consent_required' }; // #12 — 서버 기록 기준. 앱은 동의 화면으로 보낸다
+  if (err === 'consent_version_mismatch') return { code: 'consent_version_mismatch' };
+  if (err === 'consent_policy_not_ready') return { code: 'consent_policy_not_ready' };
   if (err === 'rate_limited') {
     const retry = typeof res.body?.retryAfterSeconds === 'number' ? res.body.retryAfterSeconds : undefined;
     return { code: 'too_many_attempts', retryAfterSeconds: retry };
@@ -187,6 +210,8 @@ export function mapServerStatus(input: {
   if (input.status === 'pending' && input.userActionRequired) {
     return { kind: 'error', code: 'user_action_required' };
   }
+  // #11: 이 세션이 다른 세션에 대체(expired/superseded)됐더라도 서버가 users.face_verified=true 를 알리면 인증은 끝난 것이다
+  if (input.status === 'expired' && input.faceVerified) return { kind: 'approved' };
   switch (input.status) {
     case 'approved':
       if (input.faceVerified) return { kind: 'approved' };
@@ -352,6 +377,18 @@ export function restoreScreenState(
   }
   // rejected / expired → 다시 시작 가능
   return { kind: 'intro' };
+}
+
+// ---------------------------------------------------------------------------
+// 얼굴 정보 처리 별도 동의 (#12) — 앱 쪽 판단은 화면 표시용이고, 최종 검사는 서버(start-face-liveness)가 한다
+// ---------------------------------------------------------------------------
+
+export type FaceConsentRowLike = { doc_version: string; revoked_at: string | null };
+
+/** 현재 버전의 유효한 동의 행이 없으면 동의 화면이 필요하다. 조회 실패(null)는 "모름" — 서버가 최종 판단하므로 시작 시도는 허용한다 */
+export function needsFaceConsent(rows: FaceConsentRowLike[] | null, currentVersion: string): boolean | null {
+  if (rows === null) return null;
+  return !rows.some((r) => r.doc_version === currentVersion && r.revoked_at === null);
 }
 
 /** Expo Go(storeClient) 에서는 네이티브 SDK 모듈이 없다 */

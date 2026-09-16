@@ -27,7 +27,7 @@ export type ApplyDecisionResult =
   | { applied: true; status: FaceVerificationStatus; faceVerified: boolean; reason: FaceReasonCode | null }
   | {
       applied: false;
-      reason: 'duplicate' | 'stale' | 'terminal' | 'db_rejected' | 'already_verified' | 'precondition_failed';
+      reason: 'duplicate' | 'stale' | 'terminal' | 'db_rejected' | 'already_verified' | 'precondition_failed' | 'superseded';
       status: FaceVerificationStatus;
       faceVerified: boolean;
     };
@@ -65,7 +65,7 @@ export async function ensureReferenceImage(input: {
     log.warn(`[face] session ${shortId(row.providerSessionId)} reference image fetch failed (${img.reason})`);
     return { ok: false, reason: img.reason };
   }
-  const stored = await db.storeReferenceImage(row.userId, img.bytes, img.contentType);
+  const stored = await db.storeReferenceImage(row.userId, row.id, img.bytes, img.contentType);
   if (!stored.ok) {
     log.warn(`[face] session ${shortId(row.providerSessionId)} reference image store failed`);
     return { ok: false, reason: 'store_failed' };
@@ -122,6 +122,11 @@ async function finalizeApproval(ctx: Ctx, reason: FaceReasonCode): Promise<Apply
     reason,
   });
   if (!approved.ok) {
+    if (approved.reason === 'superseded') {
+      // #11: 다른 세션이 먼저 승인됐다 — RPC 가 이 행을 expired/superseded 로 마감했고(정리 큐 등록), 방금 저장한 이미지는 세션별 경로라 현재 인증을 건드리지 않는다
+      log.info(`[face] session ${shortId(row.providerSessionId)} superseded by a newer approved session`);
+      return { applied: false, reason: 'superseded', status: 'expired', faceVerified: await db.isUserFaceVerified(row.userId) };
+    }
     // 행/사용자 갱신은 RPC 안에서 함께 롤백된다 — 다음 sync/웹훅이 같은 경로로 재시도한다
     log.error(`[face] session ${shortId(row.providerSessionId)} approve rpc rejected (${approved.reason})`);
     return { applied: false, reason: 'db_rejected', status: row.status, faceVerified: false };
@@ -139,6 +144,19 @@ export async function applyDecisionToRow(input: Ctx): Promise<ApplyDecisionResul
       return { applied: false, reason: 'already_verified', status: 'approved', faceVerified: true };
     }
     return finalizeApproval(input, 'liveness_approved');
+  }
+
+  // #11: 이 사용자가 이미 다른 세션으로 인증됐다면 이 세션은 대체된 것이다 — 이미지를 내려받지 않고 종료 처리한다 (정리 큐는 DB 트리거)
+  if (row.status !== 'rejected' && (await db.isUserFaceVerified(row.userId))) {
+    const closed = await db.updateRow(row.id, {
+      status: 'expired',
+      providerStatus: decision.providerStatus,
+      providerEventAt: input.eventAt ?? new Date(),
+      providerReason: 'superseded',
+    });
+    if (!closed.ok) log.warn(`[face] session ${shortId(row.providerSessionId)} superseded close rejected: ${closed.error}`);
+    log.info(`[face] session ${shortId(row.providerSessionId)} ignored (superseded — user already verified)`);
+    return { applied: false, reason: 'superseded', status: closed.ok ? 'expired' : row.status, faceVerified: true };
   }
 
   const outcome = resolveOutcome(decision);

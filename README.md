@@ -59,7 +59,8 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0027 순서대로 — 0015~0027 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절, 0027 은 docs/matching-policy.md 12절)
+# 마이그레이션 적용 (0001 → 0031 순서대로 — 0015~0031 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절, 0027 은 docs/matching-policy.md 12절,
+#   0028 삭제 작업 상태(#13) · 0029 얼굴 세션별 자산/정리 큐(#11) · 0030 얼굴 정보 처리 동의(#12) · 0031 관리자 로그인 제한(#27) — docs/data-retention.md · docs/face-consent.md · docs/security.md)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -75,10 +76,11 @@ supabase secrets set ALLOW_DEV_LOGIN=1    # dev-login opt-in (production 에선 
 # Edge Functions 배포 (개발/스테이징)
 supabase functions deploy verify-identity
 supabase functions deploy delete-account
-supabase functions deploy account-purge           # 탈퇴 30일 뒤 익명화 배치·운영자 완전 삭제 (service role 전용) — docs/data-retention.md
+supabase functions deploy account-purge           # 탈퇴 30일 뒤 익명화 배치·운영자 완전 삭제·실패 단계 재시도·얼굴 세션 자산 정리 (service role 전용) — docs/data-retention.md 7절
 supabase functions deploy dev-login       # 개발/스테이징 전용 — production 에는 배포 금지!
 supabase functions deploy complete-face-verification   # 개발 전용 Mock 승인 — FACE_VERIFICATION_PROVIDER=mock 일 때만 기동
-supabase functions deploy start-face-liveness           # 실제 얼굴 라이브니스 (Didit API v3) — docs/face-liveness-didit.md
+supabase functions deploy start-face-liveness           # 실제 얼굴 라이브니스 (Didit API v3) + 얼굴 정보 처리 동의 기록/검증(#12) — docs/face-liveness-didit.md · docs/face-consent.md
+# production 은 FACE_CONSENT_VERSION secret(동의 문서 버전 승인) 없이는 새 얼굴 세션을 만들지 않는다 (docs/face-consent.md 4절)
 supabase functions deploy didit-webhook --no-verify-jwt # Didit V3 결과 웹훅 (서명 검증) — 반드시 --no-verify-jwt
 supabase functions deploy admin-face-review             # 관리자 얼굴 인증 검토 (service role 전용 — 관리자 웹이 호출)
 supabase functions deploy daily-recommendation
@@ -184,6 +186,14 @@ npm run dev                  # http://localhost:3100
 ```bash
 # DB 스키마 + 시드 + RLS 테스트 (Docker 없이 로컬 Postgres 로)
 cd supabase/tests && bash run_local_check.sh
+# 서버 순수 로직 selftest 전부 (env·identity·security·observability·notifications·matching·face·purge·consent·send-sms)
+bash scripts/server-selftests.sh
+# 삭제 작업(#13)·얼굴 자산 정리(#11) — Storage/Didit/auth 를 adapter mock 으로 실패·재시도·동시성·페이지 제한 재현 (실제 Provider 검증 아님)
+cd supabase/functions/_shared/purge && node --experimental-strip-types selftest.ts
+# 얼굴 정보 처리 동의 문서 — 서버 정책과 앱 사본 일치·production 준비 상태 (#12)
+cd supabase/functions/_shared/consent && node --experimental-strip-types selftest.ts
+# release 산출물 검사 (#3) — 검사기 자체 검증 후 expo export(web·ios·android) 산출물에서 개발 마커/서버 secret grep (EXPO_PUBLIC_SUPABASE_URL/ANON_KEY 필요)
+cd apps/mobile && npm run release:check:selfcheck && npm run release:check
 
 # MatchingEngine / 추천 코어 단위 테스트 (외모 제외·재정규화·필수 조건·안전 필터·공개 이유·tie-break·#23 후보 부족 관측)
 cd supabase/functions/_shared/matching && node --experimental-strip-types selftest.ts
@@ -319,7 +329,7 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
   (secret 은 서버 환경변수, 클라이언트 번들 미포함).
 - **전화번호 변경**: 새 번호 OTP + 본인확인 후 사용자가 확인하면
   `action: 'recover'` 가 기존 계정에 새 번호를 연결 (자동 overwrite 없음).
-- **계정 삭제** (`delete-account` → 30일 유예 → `account-purge`): 탈퇴 즉시 추천·대화 중단, 유예 안에는 같은 번호로 복구,
+- **계정 삭제** (`delete-account` → 30일 유예 → `account-purge`, 단계별 상태·재시도 `account_purge_jobs` — #13): 탈퇴 즉시 추천·대화 중단, 유예 안에는 같은 번호로 복구,
   유예 뒤 프로필·응답·추천·만남 응답·알림·얼굴 자산(storage·Didit 세션) 삭제와 메시지 본문 자리표시 처리 (`docs/data-retention.md`).
   identity 는 해시·banned 만 남아 재가입 차단이 유지된다. 앱 밖 삭제 요청 페이지(관리자 웹 `/delete-account`, #14)는 운영자 확인 뒤 완전 삭제.
 - **얼굴 인증 = 보조 신호**: DI/identityKey 가 primary duplicate-account control,

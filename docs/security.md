@@ -48,7 +48,7 @@ anon(미로그인) 은 어떤 테이블에서도 행을 읽지 못한다 (테스
 | delete-account | 사용자 JWT | 5회/시간 |
 | send-sms | Auth Hook 서명 | 번호별 60초 쿨다운 · 시간당 상한 (0012) |
 | didit-webhook | Didit 서명(V3) | event_id 중복 무시 |
-| daily-recommendation-batch · send-push · account-purge · admin-face-review | **service role key 일치** (`requireServiceRole`) | 사용자 JWT 는 401 |
+| daily-recommendation-batch · send-push · account-purge(batch · 단일 · face_cleanup) · admin-face-review | **service role key 일치** (`requireServiceRole`) | 사용자 JWT 는 401 |
 | dev-login · complete-face-verification | 개발 전용 | production 미배포 + APP_ENV 가드 |
 
 rate limit 원시 기능: `rate_limit_hit(scope, key, limit, window)` (0023, 고정 창 카운터, service role 전용). Edge 는 `_shared/rateLimit.ts` 의 `enforceRateLimit` 로 호출하고, RPC 실패 시 503 `rate_limit_unavailable`.
@@ -56,9 +56,16 @@ rate limit 원시 기능: `rate_limit_hit(scope, key, limit, window)` (0023, 고
 
 ## 4. 관리자 웹
 
-- **세션**: 쿠키 = 서명된 토큰(HMAC-SHA256, 만료 12시간, nonce). 서명 키는 `ADMIN_SESSION_SECRET`(권장) 또는 비밀번호에서 파생 → 비밀번호 변경 = 전 세션 무효. `httpOnly` · `sameSite=lax` · production `secure`.
+- **세션**: 쿠키 = 서명된 토큰(HMAC-SHA256, 만료 12시간, nonce). 서명 키는 `ADMIN_SESSION_SECRET` — **production(NODE_ENV=production) 에서는 32자+ 필수**, 없으면 로그인/세션 검증이 실패한다 (fail-closed).
+  development 에서만 `ADMIN_PASSWORD` 파생 fallback (비밀번호 변경 = 전 세션 무효). `httpOnly` · `sameSite=lax` · production `secure`.
   (이전: 쿠키가 `sha256(비밀번호)` 고정값이라 한 번 새면 영구 유효했다)
-- **로그인 제한**: IP(해시) 당 5회 실패 → 15분 잠금 (인스턴스 메모리). 성공·실패·잠금이 `admin_audit_log` 에 남는다.
+- **로그인 제한 (DB 공유, 0031)**: 키당 5회 실패 → 15분 잠금. 상태는 `admin_login_locks` 에 있고 `admin_login_guard(key, check|failure|success)` RPC 가 행 잠금 아래에서
+  원자적으로 판정한다 → 여러 인스턴스·재시작에 걸쳐 같은 상태. 키 = `HMAC(session secret, 클라이언트 IP)` (원문 IP 미저장, 처리자 이름은 키에 쓰지 않음 → 이름을 바꿔도 우회 불가).
+  잠금 중에는 비밀번호를 검사하지 않는다. RPC 조회/기록이 실패하면 **로그인하지 않는다** (`admin_login_unavailable` 감사 기록).
+  테이블·RPC 는 service role 전용 — 클라이언트는 제한을 조회·초기화할 수 없다.
+- **프록시 헤더 신뢰 경계**: `x-forwarded-for` / `x-real-ip` 는 클라이언트가 위조할 수 있다. `ADMIN_TRUST_PROXY_HEADERS=1` 일 때만 신뢰하며(관리자 웹이 헤더를 덮어쓰는
+  신뢰할 수 있는 리버스 프록시/플랫폼 뒤에 있을 때), 아니면 모든 클라이언트가 하나의 키(`untrusted-client`)를 공유한다 — 위조로 제한을 피할 수는 없지만 한 공격자가 모든 운영자를
+  15분 잠글 수 있으므로 배포 환경에 맞게 설정한다.
 - **처리자 이름**: 로그인 때 입력 → 세션에 서명되어 실려 모든 조치의 `actor` 가 된다. 비우면 `ADMIN_ACTOR_LABEL`.
 - **감사 로그** `admin_audit_log` (0023): 정지/해제·신고 처리·얼굴 검토·삭제 요청 처리·즉시 익명화·베타 게이트/cohort/초대코드/입장·로그인. `/audit` 화면. detail 에는 id·결과만 (연락처·원문 없음).
   도메인별 기록(`moderation_actions`, `face_verification_reviews`, `account_deletion_requests`)은 그대로 두고 그 위에 "누가 무엇을 눌렀나" 를 모은다.
@@ -66,7 +73,7 @@ rate limit 원시 기능: `rate_limit_hit(scope, key, limit, window)` (0023, 고
 
 ## 5. 회귀 테스트가 잡는 것
 
-`security_tests.sql`
+`security_tests.sql` (서버 전용 테이블 목록에 `account_purge_jobs` · `account_purge_job_events` · `face_asset_cleanup` · `admin_login_locks` 포함)
 1. RLS 꺼진 public 테이블 → 실패
 2. allowlist 밖의 DEFINER 함수를 authenticated/anon 이 실행 가능 → 실패
 3. 클라이언트가 읽을 수 있는 뷰 → 실패
@@ -81,6 +88,6 @@ rate limit 원시 기능: `rate_limit_hit(scope, key, limit, window)` (0023, 고
 ## 6. 남은 것 (이 저장소 밖 · 후속)
 
 - Supabase Auth 자체 rate limit(OTP 발송·토큰 갱신)은 Dashboard 설정 — release checklist.
-- 로그인 잠금은 인스턴스 메모리라 다중 인스턴스에서는 인스턴스별로 적용된다. 필요하면 `rate_limit_hit` 로 옮긴다.
+- 로그인 제한의 전역(키 무관) 상한·관리자 계정별 잠금은 없다 (관리자 계정 시스템이 단일 비밀번호이므로). 계정 시스템·역할 관리·2단계 인증과 함께 다룬다.
 - Storage 객체 정책은 `0007/0013` 그대로 (faces 버킷 본인 경로만, `liveness/` 는 서버 전용). 이번 변경 없음.
 - 관리자 2단계 인증·역할 분리(읽기 전용 운영자)는 미구현 — 운영자가 한 명 이상이 되면 다룬다.

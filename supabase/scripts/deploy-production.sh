@@ -52,6 +52,7 @@ REQUIRED_SECRETS=(
   DIDIT_API_KEY
   DIDIT_WORKFLOW_ID
   DIDIT_WEBHOOK_SECRET
+  FACE_CONSENT_VERSION
   SOLAPI_API_KEY
   SOLAPI_API_SECRET
   SOLAPI_SENDER_NUMBER
@@ -95,6 +96,8 @@ for required in "${REQUIRED_SECRETS[@]}"; do
     echo "   SOLAPI_* / SEND_SMS_HOOK_SECRETS: SMS OTP 실발송(send-sms) 필수 — 없으면 OTP 가 발송되지 않습니다." >&2
     echo "   DIDIT_API_KEY / DIDIT_WORKFLOW_ID / DIDIT_WEBHOOK_SECRET: 얼굴 라이브니스(start-face-liveness, didit-webhook)" >&2
     echo "   필수 — 없으면 두 함수가 기동을 거부합니다 (FACE_VERIFICATION_PROVIDER=didit)." >&2
+    echo "   FACE_CONSENT_VERSION: 얼굴 정보 처리 동의 문서 버전(#12) — 코드의 faceConsentPolicy.ts version 과 같아야 하며" >&2
+    echo "   문서가 final 이 아니면 start-face-liveness 가 새 세션을 거부합니다 (docs/face-consent.md)." >&2
     echo "   docs/environments.md)" >&2
     exit 1
   fi

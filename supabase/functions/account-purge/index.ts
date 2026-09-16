@@ -1,90 +1,46 @@
 /**
  * 계정 익명화·완전 삭제 (#13/#11/#14) — service role 전용 (사용자 JWT 는 401).
  *
- * POST { user_id, hard?: boolean }        → 한 계정 처리 (status 가 deleted/banned 여야 한다)
- * POST { batch: true, grace_days?: 30 }   → 유예가 지난 탈퇴 계정을 최대 100명 익명화 (cron 일 1회)
+ * POST { user_id, hard?: boolean, requested_by?: string }  → 한 계정 처리 (status 가 deleted/banned 여야 한다)
+ * POST { batch: true, grace_days?: 30, limit?: 100 }        → 유예가 지난 탈퇴 계정 + 실패한 작업 재시도 (cron 일 1회)
+ * POST { face_cleanup: true, limit?: 50 }                    → 종료된 얼굴 세션의 자산 정리 큐 처리 (#11, cron)
  *
- * 순서 (사용자당)
- *  1. account_face_assets 로 얼굴 자산 목록 → storage faces/<uid>/ 아래 객체 삭제 → Didit 세션 삭제(best effort, provider=didit 만)
- *  2. account_purge RPC — 프로필·응답·설정·추천·좋아요·만남 응답·알림 삭제, 메시지 본문 자리표시, identity 익명화, 계정 스켈레톤 초기화 (한 트랜잭션)
- *  3. hard=true 면 auth.admin.deleteUser → auth.users cascade 로 users 행·메시지·매치·신고까지 삭제 (앱 밖 삭제 요청 등 명시 요청에만)
- * 얼굴 삭제가 실패하면 그 사용자는 건너뛰고(재시도 대상으로 남긴다) 다음 사용자로 간다.
+ * 작업 상태 (0028 account_purge_jobs — 단계별 done/failed/skipped · lease · 시도 횟수 · Provider 세션 스냅샷)
+ *   storage → provider → db → (hard) auth. 실패한 단계는 다음 호출에서 이어서 처리하고, 완료한 단계는 건너뛴다.
+ *   외부 삭제(Storage·Provider)가 실패하면 전체 완료로 보고하지 않는다 (status: failed, retryable: true, stages.<단계>.error 코드).
+ *   Provider 설정이 없는 환경에서는 provider 단계가 provider_not_configured 로 남는다 (건너뛰지 않는다).
+ *
+ * 응답·로그·감사 기록에는 고정 코드·수치만 담는다 (경로·세션 id·오류 원문·개인정보 없음).
+ * 핵심 로직: _shared/purge/accountPurgeCore.ts (selftest 로 실패·재시도·동시성·페이지 제한 시나리오 검증)
  */
 import { requireFaceProviderKind } from '../_shared/env/env.ts';
 import { getFaceLivenessProvider } from '../_shared/face/FaceLivenessProvider.ts';
 import { corsHeaders, json, requireServiceRole, serviceClient } from '../_shared/http.ts';
-import { reportServerError } from '../_shared/observability/report.ts';
+import { runAccountPurge, runAccountPurgeBatch } from '../_shared/purge/accountPurgeCore.ts';
+import { runFaceAssetCleanup } from '../_shared/purge/faceAssetCleanupCore.ts';
+import { SupabaseFaceCleanupQueue } from '../_shared/purge/supabaseFaceCleanupQueue.ts';
+import {
+  purgeFailureReporter,
+  purgeProviderFrom,
+  SupabasePurgeAuth,
+  SupabasePurgeJobs,
+  SupabasePurgeStorage,
+} from '../_shared/purge/supabasePurgeDeps.ts';
 
-const FACES_BUCKET = 'faces';
+const log = {
+  info: (m: string) => console.log(m),
+  warn: (m: string) => console.warn(m),
+  error: (m: string) => console.error(m),
+};
 
-type Db = ReturnType<typeof serviceClient>;
-type FaceAsset = { provider: string; provider_session_id: string | null; reference_path: string | null; front_path: string | null; left_path: string | null; right_path: string | null };
-
+/** Provider 설정이 없으면 null — provider 단계는 실패로 기록되어 재시도 대상으로 남는다 (건너뛰지 않는다) */
 function providerOrNull() {
   try {
     return getFaceLivenessProvider(requireFaceProviderKind(), (name) => Deno.env.get(name), (input, init) => fetch(input, init));
-  } catch {
-    return null; // provider 설정이 없는 환경(로컬 등) — Didit 삭제는 건너뛰고 나머지는 진행
-  }
-}
-
-async function deleteFaceAssets(db: Db, userId: string): Promise<{ ok: boolean; storage: number; sessions: number; error?: string }> {
-  const { data: assets, error } = await db.rpc('account_face_assets', { p_user_id: userId });
-  if (error) return { ok: false, storage: 0, sessions: 0, error: `assets: ${error.message}` };
-  const rows = (assets ?? []) as FaceAsset[];
-
-  // storage: faces/<uid>/ 아래 전부 (liveness/reference.jpg 포함) + 과거 경로 컬럼
-  let removed = 0;
-  const paths = new Set<string>();
-  for (const a of rows) for (const p of [a.reference_path, a.front_path, a.left_path, a.right_path]) if (p) paths.add(p);
-  try {
-    for (const dir of [userId, `${userId}/liveness`]) {
-      const { data: objects, error: listErr } = await db.storage.from(FACES_BUCKET).list(dir, { limit: 1000 });
-      if (listErr) throw new Error(listErr.message);
-      for (const o of objects ?? []) if (o.name && o.id) paths.add(`${dir}/${o.name}`);
-    }
-    if (paths.size > 0) {
-      const { data: gone, error: rmErr } = await db.storage.from(FACES_BUCKET).remove([...paths]);
-      if (rmErr) throw new Error(rmErr.message);
-      removed = gone?.length ?? 0;
-    }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'storage_failed';
-    // 로컬 검증 환경에는 storage 가 없다 — 버킷 없음은 "지울 것 없음" 으로 본다
-    if (!/bucket|not found|storage/i.test(msg)) return { ok: false, storage: removed, sessions: 0, error: `storage: ${msg}` };
+    log.error(`[account-purge] face provider not configured: ${e instanceof Error ? e.message.slice(0, 120) : 'error'}`);
+    return null;
   }
-
-  // Didit 세션 삭제 (best effort)
-  let sessions = 0;
-  const provider = providerOrNull();
-  if (provider) {
-    for (const a of rows) {
-      if (a.provider !== 'didit' || !a.provider_session_id) continue;
-      const res = await provider.deleteSession(a.provider_session_id).catch(() => ({ ok: false }));
-      if (res.ok) sessions += 1;
-    }
-  }
-  return { ok: true, storage: removed, sessions };
-}
-
-async function purgeOne(db: Db, userId: string, hard: boolean) {
-  const face = await deleteFaceAssets(db, userId);
-  if (!face.ok) {
-    await reportServerError(db, 'account-purge', new Error(face.error ?? 'face_assets_failed'), { stage: 'face_assets', user_id: userId });
-    return { user_id: userId, ok: false, error: face.error };
-  }
-  const { data: summary, error } = await db.rpc('account_purge', { p_user_id: userId });
-  if (error) {
-    await reportServerError(db, 'account-purge', new Error(error.message), { stage: 'purge', user_id: userId });
-    return { user_id: userId, ok: false, error: `purge: ${error.message}` };
-  }
-  let hardDeleted = false;
-  if (hard) {
-    const { error: authErr } = await db.auth.admin.deleteUser(userId);
-    if (authErr) return { user_id: userId, ok: false, error: `auth_delete: ${authErr.message}`, summary };
-    hardDeleted = true;
-  }
-  return { user_id: userId, ok: true, face_storage_removed: face.storage, didit_sessions_deleted: face.sessions, hard_deleted: hardDeleted, summary };
 }
 
 Deno.serve(async (req) => {
@@ -92,21 +48,48 @@ Deno.serve(async (req) => {
   const gate = requireServiceRole(req);
   if (gate instanceof Response) return gate;
 
-  const body = (await req.json().catch(() => ({}))) as { user_id?: string; hard?: boolean; batch?: boolean; grace_days?: number };
+  const body = (await req.json().catch(() => ({}))) as {
+    user_id?: string;
+    hard?: boolean;
+    requested_by?: string;
+    batch?: boolean;
+    grace_days?: number;
+    limit?: number;
+    face_cleanup?: boolean;
+  };
   const db = serviceClient();
+  const provider = purgeProviderFrom(providerOrNull());
+  const deps = {
+    storage: new SupabasePurgeStorage(db),
+    provider,
+    jobs: new SupabasePurgeJobs(db),
+    auth: new SupabasePurgeAuth(db),
+    log,
+    reportFailure: purgeFailureReporter(db, 'account-purge'),
+  };
 
-  if (body.batch) {
-    const grace = Math.max(0, Math.min(365, Number(body.grace_days) || 30));
-    const { data: cands, error } = await db.rpc('account_purge_candidates', { p_grace: `${grace} days`, p_limit: 100 });
-    if (error) return json({ error: 'lookup_failed' }, 500);
-    const results = [];
-    for (const c of (cands ?? []) as { user_id: string }[]) {
-      results.push(await purgeOne(db, c.user_id, false));
+  try {
+    if (body.face_cleanup) {
+      const limit = Math.max(1, Math.min(200, Number(body.limit) || 50));
+      const res = await runFaceAssetCleanup({ limit }, { storage: deps.storage, provider, queue: new SupabaseFaceCleanupQueue(db), log });
+      return json(res, res.ok ? 200 : 503);
     }
-    return json({ processed: results.length, succeeded: results.filter((r) => r.ok).length, results });
-  }
 
-  if (!body.user_id || typeof body.user_id !== 'string') return json({ error: 'invalid_body' }, 400);
-  const result = await purgeOne(db, body.user_id, body.hard === true);
-  return json(result, result.ok ? 200 : 409);
+    if (body.batch) {
+      const graceDays = Math.max(0, Math.min(365, Number(body.grace_days) || 30));
+      const limit = Math.max(1, Math.min(500, Number(body.limit) || 100));
+      const res = await runAccountPurgeBatch({ graceDays, limit }, deps);
+      return json(res, res.ok ? 200 : 500);
+    }
+
+    if (!body.user_id || typeof body.user_id !== 'string') return json({ error: 'invalid_body' }, 400);
+    const requestedBy = typeof body.requested_by === 'string' ? body.requested_by.slice(0, 64) : 'admin';
+    const result = await runAccountPurge({ userId: body.user_id, mode: body.hard === true ? 'hard' : 'anonymize', requestedBy }, deps);
+    const status =
+      result.status === 'done' ? 200 : result.status === 'not_found' ? 404 : result.status === 'error' ? 500 : 409;
+    return json(result, status);
+  } catch (err) {
+    console.error(`[account-purge] ${err instanceof Error ? err.message.slice(0, 200) : 'error'}`);
+    return json({ error: 'server_error' }, 500);
+  }
 });

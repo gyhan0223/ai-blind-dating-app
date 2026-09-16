@@ -399,6 +399,8 @@ declare
   ref text := '55555555-5555-5555-5555-555555555555/liveness/reference.jpg';
 begin
   update public.users set face_verified = false where id in (fa, fb);
+  -- 0029: 다른 approved 행이 있으면 새 세션은 superseded 로 마감된다 (face_session_assets_tests.sql) — 이 절은 단일 세션 승인을 검증하므로 이전 절의 행을 지운다
+  delete from public.face_verifications where user_id in (fa, fb);
 
   insert into public.face_verifications (user_id, status, provider, provider_session_id, expires_at, provider_event_at)
   values (fa, 'pending', 'didit', 'didit-sess-a-approve', now() + interval '30 minutes', now() - interval '10 minutes')

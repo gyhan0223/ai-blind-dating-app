@@ -218,10 +218,11 @@ export class SupabaseFaceDb implements FaceDb {
 
   async storeReferenceImage(
     userId: string,
+    rowId: string,
     bytes: Uint8Array,
     contentType: string,
   ): Promise<{ ok: true; path: string } | { ok: false }> {
-    const path = referenceImagePath(userId, contentType);
+    const path = referenceImagePath(userId, rowId, contentType);
     const { error } = await this.db.storage.from(FACES_BUCKET).upload(path, bytes, {
       contentType,
       upsert: true,
