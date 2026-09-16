@@ -48,6 +48,8 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
   report_action: '신고 조치',
   face_review: '얼굴 검토',
   deletion_request_handle: '삭제 요청 처리',
+  purge_retry: '삭제 작업 재시도',
+  purge_stage_skip: '삭제 단계 건너뛰기',
   beta_gate_set: '베타 게이트 변경',
   beta_cohort_create: 'cohort 생성',
   beta_cohort_update: 'cohort 변경',

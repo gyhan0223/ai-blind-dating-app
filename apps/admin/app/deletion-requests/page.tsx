@@ -2,7 +2,15 @@ import { revalidatePath } from 'next/cache';
 import React from 'react';
 import { requireAdmin } from '@/lib/adminAuth';
 import { recordAdminAudit } from '@/lib/audit';
-import { callAccountPurge, type DeletionRequestRow, findUserByContact } from '@/lib/accountDeletion';
+import {
+  callAccountPurge,
+  type DeletionRequestRow,
+  describePurgeFailure,
+  findUserByContact,
+  loadFailedPurgeJobs,
+  PURGE_STAGE_LABEL,
+  skipPurgeStage,
+} from '@/lib/accountDeletion';
 import { adminClient } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
@@ -41,16 +49,57 @@ async function handleRequest(formData: FormData) {
   if (user && user.status === 'active') {
     await db.from('users').update({ status: 'deleted' }).eq('id', userId);
   }
-  const result = await callAccountPurge(userId, true);
+  const result = await callAccountPurge(userId, true, session.actor);
+  // 외부 삭제(Storage·Didit)나 auth 삭제가 실패하면 "완료" 로 기록하지 않는다 — 실패 단계를 메모에 남기고 요청은 pending 으로 둔다 (아래 "미완료 삭제 작업" 에서 재시도)
   await db
     .from('account_deletion_requests')
     .update(
       result.ok
-        ? { status: 'done', handled_at: new Date().toISOString(), user_id: null, admin_note: '완전 삭제 완료' }
-        : { admin_note: `삭제 실패: ${result.error}` },
+        ? { status: 'done', handled_at: new Date().toISOString(), user_id: null, admin_note: '완전 삭제 완료 (저장소·Didit·DB·계정)' }
+        : { user_id: userId, admin_note: `삭제 미완료 (${result.status}): ${result.failedStages.join(', ') || result.error} — 재시도 필요` },
     )
     .eq('id', id);
-  await recordAdminAudit(session.actor, 'deletion_request_handle', 'deletion_request', id, { action: 'purge', ok: result.ok, hard: true, error: result.ok ? undefined : result.error });
+  await recordAdminAudit(session.actor, 'deletion_request_handle', 'deletion_request', id, {
+    action: 'purge',
+    ok: result.ok,
+    hard: true,
+    status: result.status,
+    error: result.ok ? undefined : result.error,
+    failed_stages: result.ok ? undefined : result.failedStages,
+  });
+  revalidatePath('/deletion-requests');
+  revalidatePath('/users');
+}
+
+/** 미완료 삭제 작업 재시도 (완료한 단계는 건너뛴다) / 운영자 확인 후 단계 건너뛰기 (감사 기록) */
+async function retryJob(formData: FormData) {
+  'use server';
+  const { requireAdmin: guard } = await import('@/lib/adminAuth');
+  const session = await guard();
+  const userId = String(formData.get('userId') ?? '');
+  const mode = String(formData.get('mode') ?? 'anonymize');
+  const action = String(formData.get('action') ?? 'retry');
+  if (!/^[0-9a-f-]{36}$/i.test(userId)) return;
+  const db = adminClient();
+  if (action === 'skip') {
+    const stage = String(formData.get('stage') ?? '');
+    const note = String(formData.get('note') ?? '').trim().slice(0, 200);
+    if (stage !== 'storage' && stage !== 'provider' && stage !== 'auth') return;
+    if (!note) return; // 건너뛰기에는 사유가 필요하다
+    const res = await skipPurgeStage(db, userId, stage, session.actor, note);
+    await recordAdminAudit(session.actor, 'purge_stage_skip', 'user', userId, { stage, ok: res.ok, result: res.ok ? res.status : res.reason });
+  } else {
+    const res = await callAccountPurge(userId, mode === 'hard', session.actor);
+    await recordAdminAudit(session.actor, 'purge_retry', 'user', userId, { ok: res.ok, status: res.status, error: res.ok ? undefined : res.error, failed_stages: res.ok ? undefined : res.failedStages });
+    // 이 사용자의 완전 삭제 요청이 pending 이고 작업이 끝났으면 요청도 완료로
+    if (res.ok && mode === 'hard') {
+      await db
+        .from('account_deletion_requests')
+        .update({ status: 'done', handled_at: new Date().toISOString(), user_id: null, admin_note: '완전 삭제 완료 (재시도)' })
+        .eq('user_id', userId)
+        .eq('status', 'pending');
+    }
+  }
   revalidatePath('/deletion-requests');
   revalidatePath('/users');
 }
@@ -58,6 +107,7 @@ async function handleRequest(formData: FormData) {
 export default async function DeletionRequestsPage() {
   await requireAdmin();
   const db = adminClient();
+  const failedJobs = await loadFailedPurgeJobs(db);
   const { data } = await db
     .from('account_deletion_requests')
     .select('id, contact, note, status, admin_note, user_id, created_at, handled_at')
@@ -105,6 +155,60 @@ export default async function DeletionRequestsPage() {
           ))}
         </tbody>
       </table>
+
+      <h2 style={{ marginTop: 32 }}>미완료 삭제 작업 ({failedJobs.length})</h2>
+      <p className="muted">
+        저장소 이미지 · Didit 세션 · DB 익명화 · 로그인 계정 중 하나라도 실패하면 삭제는 완료가 아닙니다. 재시도는 완료한 단계를 건너뛰고 실패한 단계부터 이어갑니다
+        (매일 배치도 자동 재시도). Didit 404 처럼 "이미 삭제됨" 이 확인된 경우에만 사유를 적고 건너뛰기를 누르세요 — 감사 기록에 남습니다. DB 익명화 단계는 건너뛸 수 없습니다.
+      </p>
+      {failedJobs.length === 0 && <p className="muted">미완료 작업이 없습니다.</p>}
+      {failedJobs.length > 0 && (
+        <table>
+          <thead>
+            <tr><th>사용자</th><th>모드</th><th>시도</th><th>단계</th><th>실패 사유</th><th></th></tr>
+          </thead>
+          <tbody>
+            {failedJobs.map((j) => {
+              const failedStage = (['storage', 'provider', 'auth'] as const).find((st) => j[`stage_${st}`] === 'failed');
+              return (
+                <tr key={j.user_id}>
+                  <td><code>{j.user_id.slice(0, 8)}…</code></td>
+                  <td>{j.mode === 'hard' ? '완전 삭제' : '익명화'}</td>
+                  <td>{j.attempt_count}</td>
+                  <td style={{ fontSize: 12 }}>
+                    {(['storage', 'provider', 'db', 'auth'] as const).map((st) => (
+                      <div key={st}>{PURGE_STAGE_LABEL[st]}: {j[`stage_${st}`]}</div>
+                    ))}
+                  </td>
+                  <td style={{ maxWidth: 320, fontSize: 12 }}>{j.running ? '진행 중' : describePurgeFailure(j).join(' / ') || '—'}</td>
+                  <td>
+                    {!j.running && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <form action={retryJob}>
+                          <input type="hidden" name="userId" value={j.user_id} />
+                          <input type="hidden" name="mode" value={j.mode} />
+                          <input type="hidden" name="action" value="retry" />
+                          <button className="danger" type="submit">재시도</button>
+                        </form>
+                        {failedStage && (
+                          <form action={retryJob} style={{ display: 'flex', gap: 4 }}>
+                            <input type="hidden" name="userId" value={j.user_id} />
+                            <input type="hidden" name="mode" value={j.mode} />
+                            <input type="hidden" name="action" value="skip" />
+                            <input type="hidden" name="stage" value={failedStage} />
+                            <input name="note" placeholder="건너뛰기 사유 (필수)" maxLength={200} style={{ width: 160 }} required />
+                            <button type="submit">{PURGE_STAGE_LABEL[failedStage]} 건너뛰기</button>
+                          </form>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
