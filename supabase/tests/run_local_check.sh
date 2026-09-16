@@ -92,6 +92,11 @@ if [[ "${WITH_RECOMMENDATION_RUNS_TESTS:-1}" == "1" && -f recommendation_runs_te
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash recommendation_claim_concurrency_test.sh
 fi
 
+if [[ "${WITH_RECOMMENDATION_OBSERVABILITY_TESTS:-1}" == "1" && -f recommendation_observability_tests.sql ]]; then
+  echo "running recommendation observability tests (#23 — 전략 이벤트 저장 행 기준 1회 · 적격 후보 수/상한/실패 단계 기록 · 운영 풀 통계 demo 제외·미측정·중앙값 · 클라이언트 호출 불가)"
+  $PSQL -d "$DB_NAME" -f recommendation_observability_tests.sql
+fi
+
 if [[ "${WITH_SECURITY_TESTS:-1}" == "1" && -f security_tests.sql ]]; then
   echo "running security tests (#27 — RLS 전수 · SECURITY DEFINER allowlist · 뷰 비공개 · anon 0행 · 추천 변경 범위 · 신고 상한 · 서버 전용 RPC)"
   $PSQL -d "$DB_NAME" -f security_tests.sql

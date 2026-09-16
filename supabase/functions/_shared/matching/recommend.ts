@@ -25,6 +25,9 @@
  *  * 동시 대화 3개 제한 (#24): 요청자의 진행 중 매치가 CONVERSATION_SLOT_LIMIT 이상이면 오늘의 새 소개를 만들지 않고
  *    slotsFull=true 로 끝낸다 (후보 부족 exhausted 와 다른 결과 — 실행 기록 result='slots_full', 그날은 다시 훑지 않는다).
  *    진행 중 매치가 가득 찬 후보도 제외한다. 오늘 이미 저장된 추천은 그대로 돌려준다 (수락은 서버 RPC 가 자리를 다시 확인한다).
+ *  * 관측 (#23): 후보를 훑은 실행은 eligibleCount(모든 필터를 통과한 후보 수 — 선택된 상대 포함)와 createdIds(이번 실행이 저장한 추천 id)를
+ *    돌려주고 호출자(runWithClaim)가 recommendation_runs 에 기록한다. 훑지 않고 끝난 실행(저장된 추천 반환·slotsFull)은 eligibleCount=null(미측정).
+ *    capReached 면 eligibleCount 는 훑은 범위 안의 하한이다. strategy 는 ranked(=필수 조건 통과) 후보에만 붙는다 — fallback 도 예외가 아니다.
  */
 import type { DataSource, NewRecommendationRow, PastRecommendation, Row, StoredRecommendation, UserAccountRow } from './dataSource.ts';
 import { computeMatch, pickStrategy, rankCandidates } from './MatchingEngine.ts';
@@ -63,6 +66,13 @@ export type RunOutcome =
       capReached: boolean;
       /** 요청자의 진행 중 매치가 가득 차 새 소개를 만들지 않았다 (#24). exhausted 와 다르다 */
       slotsFull?: boolean;
+      /**
+       * 이번 실행에서 모든 필터(양방향 필수 조건·계정/안전·이력·상대 자리)를 통과한 후보 수 (#23, 관측용).
+       * 후보를 훑지 않은 실행(저장된 추천 반환·slotsFull)은 null = 미측정. capReached 면 하한이다.
+       */
+      eligibleCount: number | null;
+      /** 이번 실행이 새로 저장한 추천 id (#23 — 전략 기록은 이 id 의 저장 행 기준). 없으면 [] */
+      createdIds: string[];
     };
 
 /** YYYY-MM-DD 문자열에 일 수를 더한다 (UTC 기준 날짜 산술 — 시간대 무관) */
@@ -221,14 +231,14 @@ export async function runDailyRecommendation(ds: DataSource, input: RunInput): P
   }
 
   if (countedToday >= dailyLimit) {
-    return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: false, scanned: 0, capReached: false };
+    return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: false, scanned: 0, capReached: false, eligibleCount: null, createdIds: [] };
   }
 
   // 3.5) 대화 자리 (#24): 진행 중 매치가 가득 찼으면 오늘의 새 소개를 만들지 않는다 (후보 부족과 구분)
   try {
     const mine = (await ds.activeMatchCounts([userId]))[userId] ?? 0;
     if (mine >= CONVERSATION_SLOT_LIMIT) {
-      return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: false, scanned: 0, capReached: false, slotsFull: true };
+      return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: false, scanned: 0, capReached: false, slotsFull: true, eligibleCount: null, createdIds: [] };
     }
   } catch {
     return { kind: 'lookup_failed', stage: 'slots' };
@@ -290,9 +300,11 @@ export async function runDailyRecommendation(ds: DataSource, input: RunInput): P
     return { kind: 'lookup_failed', stage: 'candidates' };
   }
 
+  // ranked 에는 eligible(양방향 필수 조건 통과) 후보만 남는다 — 이 수가 "적격 후보 수" 다. strategy(fallback 포함)는 여기서만 붙는다.
   const ranked = rankCandidates(evaluated, userId, today);
+  const eligibleCount = ranked.length;
   if (ranked.length === 0) {
-    return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: true, scanned, capReached };
+    return { kind: 'ok', recommendations: kept, dailyLimit, exhausted: true, scanned, capReached, eligibleCount, createdIds: [] };
   }
 
   // 7) 부족한 개수만큼 생성
@@ -326,12 +338,13 @@ export async function runDailyRecommendation(ds: DataSource, input: RunInput): P
       // 다른 실행이 먼저 저장한 경우(unique 충돌 등) — 빈 응답이 아니라 오늘 저장된 행을 다시 읽어 돌려준다 (#22)
       try {
         const stored = (await ds.recommendationsForDate(userId, today)).filter((r) => r.status !== 'expired');
-        return { kind: 'ok', recommendations: stored, dailyLimit, exhausted: false, scanned, capReached };
+        // createdIds 는 이번 실행이 실제로 저장한 행만 (충돌한 행은 먼저 저장한 실행의 몫 — 그쪽 실행 기록·이벤트가 센다)
+        return { kind: 'ok', recommendations: stored, dailyLimit, exhausted: false, scanned, capReached, eligibleCount, createdIds: created.map((r) => r.id) };
       } catch {
         return { kind: 'lookup_failed', stage: 'reread_today' };
       }
     }
   }
 
-  return { kind: 'ok', recommendations: [...kept, ...created], dailyLimit, exhausted: false, scanned, capReached };
+  return { kind: 'ok', recommendations: [...kept, ...created], dailyLimit, exhausted: false, scanned, capReached, eligibleCount, createdIds: created.map((r) => r.id) };
 }

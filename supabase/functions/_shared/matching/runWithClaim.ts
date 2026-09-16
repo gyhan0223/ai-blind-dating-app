@@ -7,18 +7,45 @@
  *  - skip    → 최근에 끝난 실행이 있다: ok 면 저장된 추천을 읽고, exhausted 면 다시 훑지 않고 exhausted 로 응답 (#23 재시도 주기),
  *              slots_full 이면 그날은 다시 훑지 않고 slotsFull 로 응답 (#24 — 자리가 생겨도 다음 날 소개부터 재개)
  * 코어가 throw 하면 finish('error') 로 lease 를 닫아 다음 요청이 바로 다시 맡을 수 있게 한다.
+ *
+ * 관측 (#23): finish 에 eligibleCount(적격 후보 수, 훑지 않았으면 null) · 이번 실행이 저장한 추천 id · 실패 단계를 함께 넘긴다.
+ *  - 전략 라벨은 DB 가 저장된 추천 행에서 읽어 기록한다 (호출자 주장이 아니라 저장 행 기준). 분석 이벤트는 insert 트리거가 1회 기록한다.
+ *  - skip/busy 는 finish 를 부르지 않는다 — 같은 대기 결과를 다시 조회해도 실행 기록·집계가 늘지 않는다.
+ *  - skip(exhausted) 응답의 cap_reached 를 그대로 돌려줘 앱이 "탐색 상한" 과 "적격 후보 없음" 을 구분한다.
  */
 import type { DataSource, StoredRecommendation } from './dataSource.ts';
 import { runDailyRecommendation, type RunInput, type RunOutcome } from './recommend.ts';
 
+/** finish 에 함께 기록하는 관측값 (#23) */
+export interface RunFinishDetails {
+  /** 적격 후보 수 — 훑지 않은 실행은 null(미측정) */
+  eligible: number | null;
+  /** 이번 실행이 새로 저장한 추천 id (첫 번째) — 없으면 null */
+  recommendationId: string | null;
+  /** lookup_failed / error 의 실패 단계 — 그 외 null */
+  errorStage: string | null;
+}
+
 export interface ClaimClient {
-  claim(userId: string, forDate: string): Promise<{ claim: 'claimed' | 'busy' | 'skip'; result?: string }>;
-  finish(userId: string, forDate: string, result: string, scanned: number, capReached: boolean): Promise<void>;
+  claim(userId: string, forDate: string): Promise<{ claim: 'claimed' | 'busy' | 'skip'; result?: string; capReached?: boolean }>;
+  finish(userId: string, forDate: string, result: string, scanned: number, capReached: boolean, details?: RunFinishDetails): Promise<void>;
 }
 
 export type ClaimedOutcome =
   | RunOutcome
-  | { kind: 'ok'; recommendations: StoredRecommendation[]; dailyLimit: number; exhausted: boolean; scanned: number; capReached: boolean; slotsFull?: boolean; inProgress?: boolean; skipped?: boolean };
+  | {
+      kind: 'ok';
+      recommendations: StoredRecommendation[];
+      dailyLimit: number;
+      exhausted: boolean;
+      scanned: number;
+      capReached: boolean;
+      eligibleCount: number | null;
+      createdIds: string[];
+      slotsFull?: boolean;
+      inProgress?: boolean;
+      skipped?: boolean;
+    };
 
 export const BUSY_RETRIES = 4;
 export const BUSY_WAIT_MS = 400;
@@ -47,12 +74,19 @@ export async function runDailyRecommendationWithClaim(
       try {
         outcome = await runDailyRecommendation(ds, input);
       } catch (e) {
-        await claims.finish(input.userId, input.today, 'error', 0, false).catch(() => {});
+        await claims
+          .finish(input.userId, input.today, 'error', 0, false, { eligible: null, recommendationId: null, errorStage: 'exception' })
+          .catch(() => {});
         throw e;
       }
       const ok = outcome.kind === 'ok';
+      const details: RunFinishDetails = {
+        eligible: ok ? outcome.eligibleCount : null,
+        recommendationId: ok ? (outcome.createdIds[0] ?? null) : null,
+        errorStage: outcome.kind === 'lookup_failed' ? outcome.stage : null,
+      };
       await claims
-        .finish(input.userId, input.today, resultOf(outcome), ok ? outcome.scanned : 0, ok ? outcome.capReached : false)
+        .finish(input.userId, input.today, resultOf(outcome), ok ? outcome.scanned : 0, ok ? outcome.capReached : false, details)
         .catch(() => {});
       return outcome;
     }
@@ -65,7 +99,10 @@ export async function runDailyRecommendationWithClaim(
         dailyLimit: input.dailyLimit,
         exhausted: c.result === 'exhausted' && stored.length === 0,
         scanned: 0,
-        capReached: false,
+        // 저장된 실행 기록의 상한 도달 여부 — 이번 요청은 훑지 않았다
+        capReached: c.result === 'exhausted' && stored.length === 0 && c.capReached === true,
+        eligibleCount: null,
+        createdIds: [],
         slotsFull: c.result === 'slots_full' && stored.length === 0,
         skipped: true,
       };
@@ -83,6 +120,8 @@ export async function runDailyRecommendationWithClaim(
     exhausted: false,
     scanned: 0,
     capReached: false,
+    eligibleCount: null,
+    createdIds: [],
     inProgress: stored.length === 0,
   };
 }
@@ -95,19 +134,22 @@ export function supabaseClaimClient(db: {
     async claim(userId, forDate) {
       const { data, error } = await db.rpc('recommendation_run_claim', { p_user_id: userId, p_for_date: forDate });
       if (error) throw new Error(`recommendation_run_claim: ${error.message}`);
-      const obj = (data ?? {}) as { claim?: string; result?: string };
+      const obj = (data ?? {}) as { claim?: string; result?: string; cap_reached?: boolean };
       if (obj.claim !== 'claimed' && obj.claim !== 'busy' && obj.claim !== 'skip') {
         throw new Error('recommendation_run_claim: unexpected response');
       }
-      return { claim: obj.claim, result: obj.result };
+      return { claim: obj.claim, result: obj.result, capReached: obj.cap_reached === true };
     },
-    async finish(userId, forDate, result, scanned, capReached) {
+    async finish(userId, forDate, result, scanned, capReached, details) {
       const { error } = await db.rpc('recommendation_run_finish', {
         p_user_id: userId,
         p_for_date: forDate,
         p_result: result,
         p_scanned: scanned,
         p_cap_reached: capReached,
+        p_eligible: details?.eligible ?? null,
+        p_recommendation_id: details?.recommendationId ?? null,
+        p_error_stage: details?.errorStage ?? null,
       });
       if (error) throw new Error(`recommendation_run_finish: ${error.message}`);
     },

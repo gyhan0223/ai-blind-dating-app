@@ -6,6 +6,7 @@ import { RecommendationCard } from '@/components/RecommendationCard';
 import { Button, Card, ChipGroup, InlineNotice, Screen, Text } from '@/components/ui';
 import { track } from '@/lib/analytics';
 import { acceptResultNotice, CONVERSATION_SLOT_LIMIT } from '@/lib/chatCore';
+import { fetchNotificationPreferences, pushPermissionStatus } from '@/lib/push';
 import {
   decideRecommendation,
   fetchTodayRecommendations,
@@ -16,13 +17,28 @@ import {
 } from '@/lib/recommendations';
 import { colors, spacing } from '@/theme/tokens';
 
-/** 홈 — 오늘의 소개. 하루 한 명, 무한 스와이프 없음. */
+/**
+ * 홈 — 오늘의 소개. 하루 한 명, 무한 스와이프 없음.
+ *
+ * 서로 다른 상태를 섞지 않는다 (#23):
+ *  * 서버 오류(isError)       → "불러오지 못했어요" + 다시 시도. 후보 부족 문구로 바꾸지 않는다
+ *  * 생성 중(inProgress)      → "준비하고 있어요" + 다시 확인
+ *  * 자리 부족(slotsFull)     → "진행 중인 대화가 3개예요"
+ *  * 후보 없음(exhausted)     → 전체 탐색 완료면 "조건에 맞는 분이 없어요", 탐색 상한(capReached)이면 "아직 다 살펴보지 못했어요"
+ *  * 오늘 소개를 이미 확인·처리 → "오늘의 소개를 확인했어요"
+ * "다시 확인" 은 같은 요청을 다시 보낼 뿐이다 — 후보 부족 뒤 1시간 안에는 서버가 다시 훑지 않는다 (재시도 제한 우회 없음).
+ * 알림 안내는 기기 알림 권한이 허용돼 있고 '오늘의 소개' 알림 설정이 켜진 경우에만 보여 준다 (푸시 신규 구축은 #17).
+ */
 export default function TodayScreen() {
   const queryClient = useQueryClient();
-  const { data, isLoading, isError, refetch } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ['today-recommendations'],
     queryFn: fetchTodayRecommendations,
   });
+  // 내 정보 화면과 같은 query key — 실제 설정·권한이 맞을 때만 "알려드릴게요" 를 쓴다 (실패해도 화면을 막지 않는다)
+  const { data: notifPrefs } = useQuery({ queryKey: ['notification-preferences'], queryFn: fetchNotificationPreferences, retry: false });
+  const { data: pushPermission } = useQuery({ queryKey: ['push-permission'], queryFn: pushPermissionStatus, retry: false });
+  const recommendationPushOn = pushPermission === 'granted' && notifPrefs?.daily_recommendation === true;
   const [busy, setBusy] = useState(false);
   const [matchedNickname, setMatchedNickname] = useState<string | null>(null);
   const [askingSkipReason, setAskingSkipReason] = useState(false);
@@ -98,8 +114,8 @@ export default function TodayScreen() {
 
       {isError && (
         <View style={{ gap: spacing.md }}>
-          <InlineNotice tone="danger" text="추천을 불러오지 못했어요." />
-          <Button kind="secondary" title="다시 시도" onPress={() => refetch()} />
+          <InlineNotice tone="danger" text="추천을 불러오지 못했어요. 서버와 연결하는 데 문제가 있어요 — 소개할 분이 없다는 뜻은 아니에요." />
+          <Button kind="secondary" title="다시 시도" onPress={() => refetch()} loading={isFetching} />
         </View>
       )}
 
@@ -223,21 +239,37 @@ export default function TodayScreen() {
         </Card>
       )}
 
-      {!isLoading && !isError && !pending && !matchedNickname && !data?.inProgress && !data?.slotsFull && (
+      {!isLoading && !isError && !pending && !matchedNickname && !data?.inProgress && !data?.slotsFull && data?.exhausted && (
         <Card>
           <Text variant="heading" style={{ marginBottom: spacing.sm }}>
-            {acceptedToday.length > 0
-              ? '오늘의 소개를 확인했어요'
-              : data?.exhausted
-                ? '오늘은 소개할 분이 없어요'
-                : '오늘의 소개를 확인했어요'}
+            {data.capReached ? '아직 다 살펴보지 못했어요' : '오늘은 소개할 분이 없어요'}
           </Text>
+          <Text variant="body" color={colors.sub} style={{ marginBottom: spacing.sm }}>
+            {data.capReached
+              ? '오늘은 한 번에 살펴볼 수 있는 인원까지만 확인했어요. 조건에 맞는 분이 없다고 단정하지는 않아요.\n잠시 후 다시 확인해 주세요.'
+              : '지금은 필수 조건에 맞는 분이 없어요. 새로운 분이 가입하면 다시 찾아볼게요.'}
+          </Text>
+          <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.md }}>
+            하루 한 분만 소개하는 서비스라 필수 조건(나이·지역 등)을 동의 없이 넓히지 않아요. 다시 찾는 건 1시간에 한 번이에요.
+            {recommendationPushOn ? '\n알림이 켜져 있어요. 소개가 준비되면 알려드릴게요.' : ''}
+          </Text>
+          <View style={{ gap: spacing.sm }}>
+            <Button kind="secondary" title="다시 확인" onPress={() => refetch()} loading={isFetching} />
+            <Button kind="ghost" title="선호 조건 보기" onPress={() => router.push('/settings/preferences')} />
+          </View>
+          <Text variant="caption" color={colors.sub} style={{ marginTop: spacing.sm }}>
+            조건을 바꾸면 다음 소개부터 반영돼요. 이미 만들어진 소개는 바뀌지 않아요.
+          </Text>
+        </Card>
+      )}
+
+      {!isLoading && !isError && !pending && !matchedNickname && !data?.inProgress && !data?.slotsFull && !data?.exhausted && (
+        <Card>
+          <Text variant="heading" style={{ marginBottom: spacing.sm }}>오늘의 소개를 확인했어요</Text>
           <Text variant="body" color={colors.sub}>
             {acceptedToday.length > 0
               ? '상대도 알아가고 싶다고 하면 대화가 열려요.\n내일 새로운 한 분을 소개해 드릴게요.'
-              : data?.exhausted
-                ? '지금은 조건에 맞는 분이 없어요. 새로운 분이 가입하거나 시간이 지나면 다시 찾아볼게요.\n하루 한 분만 소개하는 서비스라 조건을 임의로 넓히지는 않아요.'
-                : '내일 새로운 한 분을 소개해 드릴게요.'}
+              : '내일 새로운 한 분을 소개해 드릴게요.'}
           </Text>
         </Card>
       )}

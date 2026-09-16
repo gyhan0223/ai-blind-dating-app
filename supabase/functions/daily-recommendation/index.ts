@@ -1,7 +1,7 @@
 /**
  * 오늘의 소개 생성 Edge Function — 얇은 HTTP 어댑터.
  *
- * POST {} → { recommendations: [{ id, status, strategy, card, candidate_id }], daily_limit, exhausted?, slots_full?, in_progress? }
+ * POST {} → { recommendations: [{ id, status, strategy, card, candidate_id }], daily_limit, exhausted?, cap_reached?, slots_full?, in_progress? }
  *
  * 실제 정책·계산은 _shared/matching/recommend.ts(runDailyRecommendation) 에 있다 (#40):
  *  * 하루 1명 — 무한 스와이프 없음. Plus 추천 개수 차등은 PLUS_EXTRA_RECOMMENDATION_ENABLED=false 로 비활성 (#29/#39)
@@ -12,7 +12,9 @@
  *
  * 멱등성 (#22): recommendation_run_claim 으로 (사용자, KST 날짜) 당 한 실행만 생성한다. 동시 요청은 기다렸다가
  * 저장된 추천을 읽는다. 끝내 다른 실행이 진행 중이면 in_progress=true (앱이 잠시 후 다시 요청).
- * 후보 부족 (#23): exhausted 로 끝난 뒤 1시간 안의 재요청은 후보를 다시 훑지 않는다.
+ * 후보 부족 (#23): exhausted 로 끝난 뒤 1시간 안의 재요청은 후보를 다시 훑지 않는다. exhausted 와 함께 cap_reached=true 면
+ * 탐색 상한(500명)에 걸려 전체 후보를 다 보지 못한 것이다 — 앱은 "조건에 맞는 분이 전혀 없다" 고 단정하지 않는다.
+ * 관측(적격 후보 수·전략·실패 단계)은 recommendation_runs 에 서버만 기록하며 응답에는 내려주지 않는다.
  */
 import { corsHeaders, json, requireUser, serviceClient } from '../_shared/http.ts';
 import { runDailyRecommendationWithClaim, supabaseClaimClient } from '../_shared/matching/runWithClaim.ts';
@@ -85,6 +87,7 @@ Deno.serve(async (req) => {
         recommendations: outcome.recommendations,
         daily_limit: outcome.dailyLimit,
         ...(outcome.exhausted ? { exhausted: true } : {}),
+        ...(outcome.exhausted && outcome.capReached ? { cap_reached: true } : {}),
         ...(outcome.slotsFull ? { slots_full: true } : {}),
         ...('inProgress' in outcome && outcome.inProgress ? { in_progress: true } : {}),
       });
