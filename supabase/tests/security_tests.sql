@@ -151,7 +151,8 @@ begin
   foreach t in array array['rate_limit_counters', 'admin_audit_log', 'app_settings', 'beta_cohorts', 'beta_invite_codes',
                            'user_identities', 'device_events', 'analytics_events', 'notification_events', 'moderation_actions',
                            'moderation_signals', 'server_errors', 'account_deletion_requests', 'recommendation_runs',
-                           'face_webhook_events', 'face_verification_reviews', 'sms_otp_send_log'] loop
+                           'face_webhook_events', 'face_verification_reviews', 'sms_otp_send_log',
+                           'account_purge_jobs', 'account_purge_job_events', 'face_asset_cleanup', 'admin_login_locks'] loop
     begin
       execute format('select count(*) from public.%I', t) into n;
       if n > 0 then raise exception 'FAIL server-only table % readable (% rows)', t, n; end if;

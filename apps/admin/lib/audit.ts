@@ -42,6 +42,7 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
   admin_logout: '로그아웃',
   admin_login_failed: '로그인 실패',
   admin_login_locked: '로그인 잠금',
+  admin_login_unavailable: '로그인 제한 확인 불가 (거부)',
   user_status_set: '사용자 상태 변경',
   user_purge_now: '즉시 익명화',
   report_reviewing: '신고 확인 중',

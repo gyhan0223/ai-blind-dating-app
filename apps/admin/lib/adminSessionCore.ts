@@ -1,20 +1,28 @@
 /**
- * 관리자 세션 토큰 순수 로직 (#27) — Next 에 의존하지 않는다 (Node selftest: scripts/admin-session-selftest.mjs).
+ * 관리자 세션 토큰·로그인 제한 순수 로직 (#27) — Next 에 의존하지 않는다 (Node selftest: scripts/admin-session-selftest.mjs).
  *
  * 예전 방식(쿠키 = sha256(비밀번호) 고정값)은 한 번 새면 비밀번호를 바꾸기 전까지 영원히 유효했다.
  * 새 토큰: base64url(payload) + '.' + HMAC-SHA256(secret, payload)
  *   payload = { v: 1, actor, iat, exp, nonce }
  *   * 만료(exp)가 토큰 안에 있어 12시간 뒤 자동 무효
- *   * secret 은 ADMIN_SESSION_SECRET(없으면 비밀번호에서 파생) — 비밀번호를 바꾸면 모든 세션이 끊긴다
+ *   * secret 은 ADMIN_SESSION_SECRET — production 에서는 필수(32자+). development 에서만 비밀번호에서 파생하는 fallback 을 허용한다
  *   * actor 는 로그인 때 입력한 처리자 이름 — 감사 기록(admin_audit_log.actor)에 남는다
  *
- * 로그인 시도 제한: 메모리 카운터 (프로세스 단위). 5회 실패 → 15분 잠금. 다중 인스턴스에서는 인스턴스별로 적용된다.
+ * 로그인 시도 제한 (DB 공유 — 0031 admin_login_guard):
+ *   * 키 = HMAC(session secret, 클라이언트 IP) — 원문 IP 는 DB 에 저장하지 않는다. 처리자 이름(사용자 입력)은 키에 쓰지 않는다.
+ *   * 5회 실패 → 15분 잠금. 여러 인스턴스·재시작에 걸쳐 같은 상태를 본다.
+ *   * 제한 조회/기록이 실패하면 로그인하지 않는다 (fail-closed).
+ *   * 프록시 헤더(x-forwarded-for / x-real-ip)는 ADMIN_TRUST_PROXY_HEADERS=1 일 때만 믿는다. 아니면 모든 클라이언트가 한 키를 공유한다
+ *     (헤더 위조로 제한을 피할 수 없다. 대신 한 공격자가 모든 운영자를 잠글 수 있으므로 신뢰할 수 있는 프록시 뒤에서는 1 로 설정한다).
  */
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 
 export const SESSION_TTL_SECONDS = 12 * 60 * 60;
 export const LOGIN_MAX_FAILURES = 5;
 export const LOGIN_LOCK_SECONDS = 15 * 60;
+/** production 에서 요구하는 ADMIN_SESSION_SECRET 최소 길이 */
+export const SESSION_SECRET_MIN_LENGTH_PROD = 32;
+export const SESSION_SECRET_MIN_LENGTH_DEV = 16;
 
 export type SessionPayload = { v: 1; actor: string; iat: number; exp: number; nonce: string };
 
@@ -83,36 +91,107 @@ export function passwordMatches(input: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-/** 로그인 시도 제한 — key(예: IP 해시)별 실패 횟수. 잠금 중이면 남은 초를 돌려준다 */
-export class LoginAttemptLimiter {
-  private failures = new Map<string, { count: number; lockedUntil: number }>();
-  private maxFailures: number;
-  private lockSeconds: number;
-  constructor(maxFailures: number = LOGIN_MAX_FAILURES, lockSeconds: number = LOGIN_LOCK_SECONDS) {
-    this.maxFailures = maxFailures;
-    this.lockSeconds = lockSeconds;
-  }
+// ---------------------------------------------------------------------------
+// 세션 secret — production 은 명시적 ADMIN_SESSION_SECRET 만, development 는 비밀번호 파생 fallback 허용
+// ---------------------------------------------------------------------------
 
-  lockedFor(key: string, now: number = Date.now()): number {
-    const f = this.failures.get(key);
-    if (!f) return 0;
-    if (f.lockedUntil > now) return Math.ceil((f.lockedUntil - now) / 1000);
-    return 0;
-  }
+export type SessionSecretResult =
+  | { ok: true; secret: string; source: 'explicit' | 'derived_dev' }
+  | { ok: false; reason: 'missing_in_production' | 'too_short' | 'password_missing' };
 
-  recordFailure(key: string, now: number = Date.now()): number {
-    const f = this.failures.get(key) ?? { count: 0, lockedUntil: 0 };
-    if (f.lockedUntil > now) return Math.ceil((f.lockedUntil - now) / 1000);
-    f.count += 1;
-    if (f.count >= this.maxFailures) {
-      f.lockedUntil = now + this.lockSeconds * 1000;
-      f.count = 0;
-    }
-    this.failures.set(key, f);
-    return f.lockedUntil > now ? this.lockSeconds : 0;
+export function resolveAdminSessionSecret(env: {
+  nodeEnv: string | undefined;
+  sessionSecret: string | undefined;
+  password: string | undefined;
+}): SessionSecretResult {
+  const isProd = env.nodeEnv === 'production';
+  const explicit = (env.sessionSecret ?? '').trim();
+  if (explicit) {
+    const min = isProd ? SESSION_SECRET_MIN_LENGTH_PROD : SESSION_SECRET_MIN_LENGTH_DEV;
+    if (explicit.length < min) return { ok: false, reason: 'too_short' };
+    return { ok: true, secret: explicit, source: 'explicit' };
   }
+  if (isProd) return { ok: false, reason: 'missing_in_production' };
+  if (!env.password) return { ok: false, reason: 'password_missing' };
+  return { ok: true, secret: createHash('sha256').update(`bonsim-admin-session:${env.password}`).digest('hex'), source: 'derived_dev' };
+}
 
-  recordSuccess(key: string): void {
-    this.failures.delete(key);
+// ---------------------------------------------------------------------------
+// 클라이언트 키 — 프록시 헤더 신뢰 경계 + HMAC
+// ---------------------------------------------------------------------------
+
+export function resolveClientIp(input: { trustProxyHeaders: boolean; xForwardedFor: string | null; xRealIp: string | null }): string {
+  if (!input.trustProxyHeaders) return 'untrusted-client';
+  // x-forwarded-for 는 "client, proxy1, proxy2" — 신뢰할 수 있는 프록시가 덮어쓴다는 전제에서 첫 항목
+  const xff = (input.xForwardedFor ?? '').split(',')[0].trim();
+  const ip = xff || (input.xRealIp ?? '').trim();
+  return ip || 'untrusted-client';
+}
+
+/** DB 에 저장되는 키 — 원문 IP 대신 서버 secret 기반 HMAC (길이 8 이상 보장) */
+export function loginGuardKey(secret: string, ip: string): string {
+  return `ip:${createHmac('sha256', secret).update(`admin-login:${ip}`).digest('hex').slice(0, 40)}`;
+}
+
+// ---------------------------------------------------------------------------
+// 로그인 제한 — 저장소 인터페이스 (DB RPC admin_login_guard) + 판정 흐름
+// ---------------------------------------------------------------------------
+
+export type GuardEvent = 'check' | 'failure' | 'success';
+export type GuardHit = { locked: boolean; lockedSeconds: number; failures: number };
+
+export interface LoginGuardStore {
+  /** 실패(null)는 "제한을 판정할 수 없음" — 호출자는 로그인을 허용하지 않는다 */
+  hit(key: string, event: GuardEvent): Promise<GuardHit | null>;
+}
+
+export type LoginOutcome =
+  | { outcome: 'ok' }
+  | { outcome: 'bad_password' }
+  | { outcome: 'locked'; lockedSeconds: number }
+  | { outcome: 'unavailable' };
+
+/**
+ * 로그인 판정 흐름 — 잠금 확인 → 비밀번호 검증 → 실패/성공 기록. 어느 단계든 저장소가 응답하지 않으면 unavailable (세션 미발급).
+ * 잠금 중에는 비밀번호가 맞아도 로그인하지 않는다 (비밀번호 검증 결과가 잠금 판단에 새지 않도록 잠금을 먼저 본다).
+ */
+export async function runLoginGuard(store: LoginGuardStore, key: string, passwordOk: () => boolean): Promise<LoginOutcome> {
+  const before = await store.hit(key, 'check');
+  if (!before) return { outcome: 'unavailable' };
+  if (before.locked) return { outcome: 'locked', lockedSeconds: before.lockedSeconds };
+  if (!passwordOk()) {
+    const after = await store.hit(key, 'failure');
+    if (!after) return { outcome: 'unavailable' };
+    return after.locked ? { outcome: 'locked', lockedSeconds: after.lockedSeconds } : { outcome: 'bad_password' };
   }
+  const reset = await store.hit(key, 'success');
+  if (!reset) return { outcome: 'unavailable' };
+  return { outcome: 'ok' };
+}
+
+/**
+ * admin_login_guard RPC 와 같은 규칙의 순수 구현 (selftest 용 인메모리 저장소 + 문서화된 규칙).
+ * 실제 저장소는 DB 이며 동시성은 행 잠금이 보장한다.
+ */
+export type GuardState = { failures: number; lockedUntil: number };
+
+export function applyGuardEvent(
+  state: GuardState | undefined,
+  event: GuardEvent,
+  now: number,
+  maxFailures: number = LOGIN_MAX_FAILURES,
+  lockSeconds: number = LOGIN_LOCK_SECONDS,
+): { next: GuardState | undefined; hit: GuardHit } {
+  const cur = state ?? { failures: 0, lockedUntil: 0 };
+  const lockedRemaining = cur.lockedUntil > now ? Math.max(1, Math.ceil((cur.lockedUntil - now) / 1000)) : 0;
+  if (event === 'success') return { next: undefined, hit: { locked: false, lockedSeconds: 0, failures: 0 } };
+  if (event === 'check') {
+    return { next: state, hit: { locked: lockedRemaining > 0, lockedSeconds: lockedRemaining, failures: cur.failures } };
+  }
+  if (lockedRemaining > 0) return { next: cur, hit: { locked: true, lockedSeconds: lockedRemaining, failures: cur.failures } };
+  const failures = (cur.lockedUntil > 0 && cur.lockedUntil <= now ? 0 : cur.failures) + 1;
+  if (failures >= maxFailures) {
+    return { next: { failures: 0, lockedUntil: now + lockSeconds * 1000 }, hit: { locked: true, lockedSeconds: lockSeconds, failures: 0 } };
+  }
+  return { next: { failures, lockedUntil: 0 }, hit: { locked: false, lockedSeconds: 0, failures } };
 }

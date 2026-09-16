@@ -98,6 +98,13 @@ if [[ "${WITH_FACE_CONSENTS_TESTS:-1}" == "1" && -f face_consents_tests.sql ]]; 
   $PSQL -d "$DB_NAME" -f face_consents_tests.sql
 fi
 
+if [[ "${WITH_ADMIN_LOGIN_GUARD_TESTS:-1}" == "1" && -f admin_login_guard_tests.sql ]]; then
+  echo "running admin login guard tests (#27 — DB 공유 잠금 · 5회/15분 · 만료·초기화 · 클라이언트 접근 불가)"
+  $PSQL -d "$DB_NAME" -f admin_login_guard_tests.sql
+  echo "running admin login guard concurrency tests (#27 — 동시 실패 합산 · 잠금 일관)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash admin_login_guard_concurrency_test.sh
+fi
+
 if [[ "${WITH_PUSH_TESTS:-1}" == "1" && -f push_tests.sql ]]; then
   echo "running push tests (#17 — 토큰/설정 RLS · outbox 트리거 · dequeue/mark 서버 전용)"
   $PSQL -d "$DB_NAME" -f push_tests.sql
