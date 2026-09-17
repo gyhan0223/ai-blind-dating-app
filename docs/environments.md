@@ -78,10 +78,15 @@ Issue #3 기준 환경 모델. 핵심 원칙은 두 가지다.
 |---|---|---|
 | `SUPABASE_URL` | 아니오 | 환경별 프로젝트 URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | **예** | 서버 컴포넌트에서만 사용. `NEXT_PUBLIC_*` 로 절대 노출 금지 |
-| `ADMIN_PASSWORD` | **예** | 관리자 로그인. 로그인 5회 실패 시 IP 당 15분 잠금 (#27) |
-| `ADMIN_SESSION_SECRET` | **예** | 세션 쿠키 서명 키(#27). **production(NODE_ENV=production) 필수, 32자+** — 없으면 로그인·세션 검증이 실패한다. development 는 16자+ 또는 미설정 시 `ADMIN_PASSWORD` 파생 |
+| `SUPABASE_ANON_KEY` | 아니오 (public key) | 관리자 로그인(비밀번호·MFA)의 사용자 범위 GoTrue 호출용 (#27). 없으면 로그인이 `unavailable` 로 거부된다 |
+| `ADMIN_SESSION_SECRET` | **예** | 세션 쿠키 서명 키(#27). **production(NODE_ENV=production) 필수, 32자+** — 없으면 로그인·세션 검증이 실패한다. development 는 16자+ 또는 미설정 시 service role key 파생 |
 | `ADMIN_TRUST_PROXY_HEADERS` | 아니오 | `1` 이면 로그인 제한 키에 `x-forwarded-for`/`x-real-ip` 를 사용 (신뢰할 수 있는 프록시 뒤에서만). 기본은 헤더를 믿지 않고 모든 클라이언트가 한 키를 공유 (`docs/security.md` 4절) |
-| `ADMIN_ACTOR_LABEL` | 아니오 | 선택. 로그인 화면에서 처리자 이름을 비웠을 때 감사 기록(`admin_audit_log.actor` · `face_verification_reviews.actor`)에 남는 기본 이름. 기본 `admin-web` |
+| `ADMIN_LEGACY_PASSWORD_LOGIN` | 아니오 | **전환 기간 한정.** `1` 이고 `ADMIN_PASSWORD` 가 있고 MFA 로 로그인을 완료한 관리자가 아직 없을 때만 구 공유 비밀번호 로그인이 열린다. 첫 owner 가 MFA 로 로그인하면 자동으로 닫힌다 — 그 뒤 두 변수를 지운다 (`docs/admin-auth.md`) |
+| `ADMIN_PASSWORD` | **예** | 전환 기간 한정 — 위 참고. 상시 대체 경로가 아니다 |
+| `ADMIN_BOOTSTRAP_PASSWORD` | **예** | 선택. `scripts/admin-bootstrap.mjs create-owner` 가 프롬프트 대신 읽는 초기 비밀번호 (CI 비밀 환경에서만). 서버에 남기지 않는다 |
+
+관리자 계정·MFA 는 Supabase Auth 의 개인 계정 + `admin_members` membership(0033) 이다. Dashboard 에서 **Auth → Providers → Email** 이 켜져 있어야 하고, 앱 사용자가 이메일로 가입하지 못하게 **"Allow new users to sign up"** 은 끄는 것을 권장한다 (관리자는 서버 스크립트/owner 가 만든다). MFA(TOTP)는 Supabase Auth 기본 기능이라 별도 설정이 없다 — `docs/admin-auth.md`.
+`ADMIN_ACTOR_LABEL` 은 더 이상 쓰지 않는다 (처리자는 인증된 관리자 id).
 
 ## dev-login 정책 (fail-closed allowlist)
 
@@ -98,8 +103,8 @@ APP_ENV ∈ { development, staging }   AND   ALLOW_DEV_LOGIN=1
 
 ## Mock provider 정책 (fail-closed)
 
-본인확인(`verify-identity`)은 현재 Mock provider 로 동작한다. Mock 은 **verificationId 를 검증하지 않고
-아무 6자리 코드나 통과시키므로** production 에서 절대 실행되면 안 된다.
+본인확인(`verify-identity`)은 현재 Mock provider 로 동작한다. Mock 은 **아무 6자리 코드나 통과시키므로** production 에서 절대 실행되면 안 된다.
+(세션 소유·만료·1회 사용은 Provider 와 무관하게 서버 세션(0032, `docs/identity-verification.md`)이 강제한다. 실제 업체는 미선정이다.)
 
 얼굴 인증은 실제 provider **Didit** 이 연동되어 있다 (`docs/face-liveness-didit.md`):
 

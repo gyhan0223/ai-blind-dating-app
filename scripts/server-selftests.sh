@@ -19,6 +19,7 @@ run() {
 
 run supabase/functions/_shared/env selftest.ts
 run supabase/functions/_shared/identity selftest.ts
+run supabase/functions/_shared/identity verifyIdentitySelftest.ts
 run supabase/functions/_shared/security selftest.ts
 run supabase/functions/_shared/observability selftest.ts
 run supabase/functions/_shared/notifications selftest.ts

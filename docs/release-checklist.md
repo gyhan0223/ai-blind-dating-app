@@ -50,6 +50,7 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       (V2 destination 이면 `event_id`/`liveness_checks[]` 가 오지 않아 승인이 되지 않는 것이 정상)
 - [ ] Didit 워크플로: Liveness 단계 **하나만** · Active `3D Action & Flash` · 최대 3회 · Face Search 1:N 켜짐 · 신분증/AML/주소/NFC 없음
       (라이브니스 노드가 여러 개면 서버가 fail-closed 로 승인하지 않는다)
+- [ ] (#6) 마이그레이션 `0032_identity_verification_sessions.sql` 이 적용되어 있고 `verify-identity` 가 재배포되어 있다 (0032 이전 DB 에 새 함수를 배포하면 request 가 500 `session_create_failed`). 앱도 같은 릴리스 창에서 (recover 가 requestId 만 보낸다)
 - [ ] (#13/#11/#12/#27) 마이그레이션 `0028_account_purge_jobs.sql` · `0029_face_session_assets.sql` · `0030_face_consents.sql` · `0031_admin_login_guard.sql` 이 적용되어 있고
       `account-purge` · `start-face-liveness` 가 재배포되어 있다 (0029 이전 DB 에 새 `start-face-liveness` 를 배포하면 승인 RPC 의 superseded 규칙이 없다; 0030 이전이면 `start` 가 503 `consent_unavailable`)
 - [ ] (#13) pg_cron 에 `account-purge` batch(일 1회) · `face-asset-cleanup`(`{"face_cleanup":true}`, 1시간) · prune 이 등록되어 있다 (`docs/data-retention.md` 4절)
@@ -89,7 +90,10 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 ## Admin
 
 - [ ] `SUPABASE_SERVICE_ROLE_KEY` 가 서버 환경변수로만 존재한다 (`NEXT_PUBLIC_*` 금지, 브라우저 노출 없음)
-- [ ] `ADMIN_PASSWORD` 가 기본값(`change-me`)이 아니다 · `ADMIN_SESSION_SECRET` 이 **32자 이상** 설정되어 있다 (#27 — production 에서는 없으면 로그인 자체가 실패한다)
+- [ ] (#27) 마이그레이션 `0033_admin_accounts.sql` 적용 · `SUPABASE_ANON_KEY` · `ADMIN_SESSION_SECRET`(**32자 이상**) 설정 · `node scripts/admin-bootstrap.mjs create-owner` 로 첫 owner 생성 · 그 owner 가 로그인해 인증 앱(TOTP) 등록 · `/admins` 에 owner 가 보인다 (`docs/admin-auth.md` 순서)
+- [ ] (#27) 전환이 끝났으면 `ADMIN_LEGACY_PASSWORD_LOGIN` · `ADMIN_PASSWORD` 를 지웠다. 로그인 화면에 "구 공유 비밀번호 로그인" 이 보이지 않고, 예전 쿠키로는 어떤 관리자 페이지도 열리지 않는다
+- [ ] (#27) viewer 계정으로 `/users` 의 정지 버튼·`/beta` 의 초대코드 발급·`/admins` 가 보이지 않고, 서버 액션을 직접 호출해도 대시보드로 돌아온다(`?denied=1`). 이메일·연락처·초대코드가 마스킹된다 — **실제 배포에서 미수행**
+- [ ] (#27) owner 가 자기 자신을 viewer 로 바꾸거나 비활성화하려 하면 "마지막 활성 owner" 로 거부된다. 다른 관리자를 비활성화하면 그 관리자의 열린 탭이 즉시 /login 으로 간다 — **실제 배포에서 미수행**
 - [ ] (#27) 관리자 웹이 신뢰할 수 있는 리버스 프록시 뒤에 있으면 `ADMIN_TRUST_PROXY_HEADERS=1`, 아니면 설정하지 않는다 (`docs/security.md` 4절)
 - [ ] (#27) 두 인스턴스(또는 재시작 전후)에서 잘못된 비밀번호를 3회 + 2회 입력하면 5회째에 잠기고, `admin_login_locks` 에 원문 IP 가 없다.
       DB 를 끊고 로그인하면 "로그인 제한을 확인할 수 없어 로그인하지 않았습니다" 가 뜬다 — **실제 배포에서 미수행**
@@ -183,8 +187,8 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#27) 마이그레이션 `0023_security_hardening.sql` 적용 (`rate_limit_hit`·`admin_audit_log`·추천 변경 가드·신고 상한). `verify-identity`·`icebreaker`·`delete-account`·`daily-recommendation`·`start-face-liveness` 재배포 — **0023/0025 보다 먼저 배포하면 안 된다** (rate limit·베타 RPC 가 없으면 fail-closed 로 503)
 - [ ] (#27) `bash supabase/tests/run_local_check.sh` 의 `security_tests.sql` 이 통과했다 (RLS 전수 · DEFINER allowlist · 뷰 비공개 · anon 0행). production DB 에서도 `select relname from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r' and not c.relrowsecurity` → 0행
 - [ ] (#27) 사용자 JWT 로 `recommendations` 의 `score_total`/`card` 를 update 하면 거부되고, 같은 사용자가 하루 11번째 신고를 넣으면 거부된다. `rate_limit_hit`·`admin_audit_record` 를 사용자 JWT 로 호출하면 거부된다
-- [ ] (#27) 관리자 웹: `ADMIN_SESSION_SECRET` 이 설정되어 있다 (16자+). 잘못된 비밀번호 5회 → 잠금 안내가 뜨고 `admin_audit_log` 에 `admin_login_failed/locked` 가 남는다. 정지·신고 처리·얼굴 검토·삭제 요청·베타 조치가 `/audit` 에 처리자 이름과 함께 보인다
-- [ ] (#27) 관리자 로그인 쿠키(`bonsim_admin`)가 `p.sig` 형식이고 12시간 뒤 만료된다. 예전 형식(sha256 고정값)으로는 로그인되지 않는다
+- [ ] (#27) 관리자 웹: 잘못된 비밀번호 5회 → 잠금 안내가 뜨고 `admin_audit_log` 에 `admin_login_failed/locked` 가 남는다. 틀린 인증 앱 코드 5회 → `admin_mfa_locked`. 정지·신고 처리·얼굴 검토·삭제 요청·베타 조치가 `/audit` 에 관리자 이름·id 와 함께 보인다 (actor 는 계정 id)
+- [ ] (#27) 관리자 로그인 쿠키(`bonsim_admin`)가 `p.sig` 형식이고 12시간 뒤 만료된다. 예전 형식(sha256 고정값·v1 토큰)으로는 어떤 페이지도 열리지 않는다. 비밀번호만 통과한 상태(`bonsim_admin_pending`)로 `/users` 를 열면 /login 으로 간다
 - [ ] (#25) 마이그레이션 `0024_profile_edit.sql` 적용. 온보딩 완료 계정으로 프로필 `birth_year`/`gender` update 가 거부되고, `preferences_save` 에 `appearance_importance` 를 넣으면 거부된다. 내 정보 → 소개/기본 정보/선호 조건/가치관 수정 화면이 열리고 저장 뒤 `analytics_events.profile_updated/preferences_updated` 에 컬럼 이름만 남는다 (값 없음) — **실기기 미검증**
 - [ ] (#26) 마이그레이션 `0025_beta_cohorts.sql` 적용. 관리자 `/beta` 에서 cohort 생성 → 게이트 켜기 → 새 계정으로 로그인하면 입장 화면(초대코드/대기)이 뜨고, 코드 없이 `verify-identity` 를 직접 호출하면 403 `beta_admission_required`, `profiles` insert 가 거부된다. 초대코드 입장 뒤 온보딩이 진행된다 — **실기기 미검증**
 - [ ] (#26) 대기 등록 계정에 `profiles`/`face_verifications`/`user_identities` 행이 없다. 운영자 "대기자 입장" 뒤 `notification_events.beta_admitted` 1건이 쌓이고 (cron `send-push`) 알림이 온다. 게이트를 끄면 누구나 가입되고 cohort 통계는 유지된다

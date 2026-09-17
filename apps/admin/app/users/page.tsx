@@ -2,6 +2,7 @@ import { revalidatePath } from 'next/cache';
 import React from 'react';
 import { callAccountPurge, describePurgeFailure, loadPurgeJobSummaries } from '@/lib/accountDeletion';
 import { requireAdmin } from '@/lib/adminAuth';
+import { maskEmail } from '@/lib/adminAuthCore';
 import { recordAdminAudit } from '@/lib/audit';
 import { moderateUser } from '@/lib/moderation';
 import { adminClient } from '@/lib/supabaseAdmin';
@@ -10,7 +11,7 @@ export const dynamic = 'force-dynamic';
 
 async function setUserStatus(formData: FormData) {
   'use server';
-  const { requireAdmin: guard } = await import('@/lib/adminAuth');
+  const { requireOwner: guard } = await import('@/lib/adminAuth');
   const session = await guard();
   const userId = String(formData.get('userId'));
   const status = String(formData.get('status'));
@@ -18,7 +19,7 @@ async function setUserStatus(formData: FormData) {
   const db = adminClient();
   // 상태 변경은 RPC 로만 (moderation_actions 감사 기록 — #15). 처리자 = 로그인한 운영자 이름 (#27)
   const res = await moderateUser(db, { userId, action: status === 'suspended' ? 'suspend' : 'unsuspend', reason: '사용자 목록에서 수동 조치', reportId: null, actor: session.actor, days: null });
-  await recordAdminAudit(session.actor, 'user_status_set', 'user', userId, { status, ok: res.ok });
+  await recordAdminAudit(session, 'user_status_set', 'user', userId, { status, ok: res.ok });
   revalidatePath('/users');
 }
 
@@ -28,11 +29,11 @@ async function setUserStatus(formData: FormData) {
  */
 async function purgeNow(formData: FormData) {
   'use server';
-  const { requireAdmin: guard } = await import('@/lib/adminAuth');
+  const { requireOwner: guard } = await import('@/lib/adminAuth');
   const session = await guard();
   const userId = String(formData.get('userId'));
   const res = await callAccountPurge(userId, false, session.actor);
-  await recordAdminAudit(session.actor, 'user_purge_now', 'user', userId, {
+  await recordAdminAudit(session, 'user_purge_now', 'user', userId, {
     ok: res.ok,
     status: res.status,
     error: res.ok ? undefined : res.error,
@@ -42,7 +43,8 @@ async function purgeNow(formData: FormData) {
 }
 
 export default async function UsersPage() {
-  await requireAdmin();
+  const session = await requireAdmin();
+  const canAct = session.role === 'owner'; // 서버 액션도 requireOwner 로 다시 검사한다 — 여기는 표시만
   const db = adminClient();
   const { data: users } = await db
     .from('users')
@@ -72,7 +74,7 @@ export default async function UsersPage() {
                 {nickname.get(u.id) ?? '—'}
                 {u.is_demo && <span className="badge muted" style={{ marginLeft: 6 }}>demo</span>}
               </td>
-              <td>{u.email ?? '—'}</td>
+              <td>{canAct ? (u.email ?? '—') : maskEmail(u.email)}</td>
               <td>
                 <span className={`badge ${u.status === 'suspended' ? 'danger' : ''}`}>{u.status}</span>
                 {u.purged_at && <span className="badge muted" style={{ marginLeft: 6 }}>DB 익명화됨</span>}
@@ -95,7 +97,7 @@ export default async function UsersPage() {
               </td>
               <td>{new Date(u.created_at).toLocaleDateString('ko-KR')}</td>
               <td>
-                <div style={{ display: 'flex', gap: 6 }}>
+                {canAct && <div style={{ display: 'flex', gap: 6 }}>
                   {u.status !== 'deleted' && (
                     <form action={setUserStatus}>
                       <input type="hidden" name="userId" value={u.id} />
@@ -116,7 +118,7 @@ export default async function UsersPage() {
                       </form>
                     );
                   })()}
-                </div>
+                </div>}
               </td>
             </tr>
           ))}

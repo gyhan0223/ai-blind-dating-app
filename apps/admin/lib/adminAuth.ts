@@ -1,40 +1,41 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import {
-  type GuardEvent,
-  type GuardHit,
-  issueSessionToken,
-  LOGIN_LOCK_SECONDS,
-  LOGIN_MAX_FAILURES,
-  type LoginGuardStore,
-  loginGuardKey,
-  passwordMatches,
-  resolveAdminSessionSecret,
-  resolveClientIp,
-  runLoginGuard,
-  sanitizeActor,
-  SESSION_TTL_SECONDS,
-  verifySessionToken,
-} from './adminSessionCore';
-import { adminClient } from './supabaseAdmin';
+  type AdminAuthDeps,
+  type AdminRole,
+  type AdminSession,
+  hasRole,
+  legacyLoginAllowed,
+  resolveSession,
+  runChangePassword,
+  runLegacyLogin,
+  runMfaEnrollStart,
+  runMfaVerify,
+  runPasswordLogin,
+  runSelfMfaReset,
+  ADMIN_SESSION_TTL_SECONDS,
+  ADMIN_PENDING_TTL_SECONDS,
+} from './adminAuthCore';
+import { resolveAdminSessionSecret, resolveClientIp } from './adminSessionCore';
+import { supabaseAdminAuthProvider, supabaseAdminDirectory } from './supabaseAdminAuth';
 
 /**
- * 관리자 로그인/세션 (#27).
- *  * 쿠키 = 서명된 세션 토큰(만료 포함, adminSessionCore). httpOnly · sameSite=lax · production 에서 secure.
- *  * 서명 키: ADMIN_SESSION_SECRET — production(NODE_ENV=production) 에서는 필수(32자+). development 에서만 ADMIN_PASSWORD 파생 fallback.
- *  * 로그인 실패 5회 → 15분 잠금 — DB(admin_login_guard RPC, 0031) 에 기록되어 여러 인스턴스·재시작에 걸쳐 동일하게 적용된다.
- *    키 = HMAC(session secret, IP). 제한 조회/기록이 실패하면 로그인하지 않는다 (fail-closed).
- *  * 프록시 헤더는 ADMIN_TRUST_PROXY_HEADERS=1 일 때만 신뢰한다 (docs/security.md 4절).
- *  * 로그인 성공/실패/잠금/제한 불가는 admin_audit_log 에 남긴다 (IP 는 HMAC 키만).
- *  * 로그인 때 입력한 처리자 이름이 세션에 실려 모든 감사 기록의 actor 가 된다 (제한 키에는 쓰지 않는다).
+ * 관리자 인증 — Next 연결부 (#27). 판단은 adminAuthCore, GoTrue/DB 는 supabaseAdminAuth.
+ *  * 쿠키 `bonsim_admin`  = 서명된 서버 세션 id (역할·활성·취소는 매 요청 DB 에서 — admin_session_check)
+ *  * 쿠키 `bonsim_admin_pending` = 비밀번호만 통과한 상태 (10분). 등록/검증 화면에서만 읽는다
+ *  * 서명 키 ADMIN_SESSION_SECRET — production 필수(32자+). development 는 미설정 시 service role key 파생
+ *  * 구 공유 비밀번호 로그인: ADMIN_LEGACY_PASSWORD_LOGIN=1 + ADMIN_PASSWORD 가 있고, MFA 로 로그인을 완료한 관리자가 없을 때만
  */
-const COOKIE_NAME = 'bonsim_admin';
+const SESSION_COOKIE = 'bonsim_admin';
+const PENDING_COOKIE = 'bonsim_admin_pending';
+
+export type { AdminRole, AdminSession };
 
 function sessionSecret(): string {
   const res = resolveAdminSessionSecret({
     nodeEnv: process.env.NODE_ENV,
     sessionSecret: process.env.ADMIN_SESSION_SECRET,
-    password: process.env.ADMIN_PASSWORD,
+    devSeed: process.env.SUPABASE_SERVICE_ROLE_KEY,
   });
   if (!res.ok) {
     // 값은 절대 메시지에 넣지 않는다
@@ -43,100 +44,147 @@ function sessionSecret(): string {
   return res.secret;
 }
 
-/** DB 공유 로그인 제한 저장소 — RPC 오류는 null (호출자가 fail-closed) */
-const dbGuardStore: LoginGuardStore = {
-  async hit(key: string, event: GuardEvent): Promise<GuardHit | null> {
-    try {
-      const db = adminClient();
-      const { data, error } = await db.rpc('admin_login_guard', {
-        p_key: key,
-        p_event: event,
-        p_max_failures: LOGIN_MAX_FAILURES,
-        p_lock_seconds: LOGIN_LOCK_SECONDS,
-      });
-      if (error || typeof data !== 'object' || data === null) return null;
-      const r = data as { locked?: unknown; locked_seconds?: unknown; failures?: unknown };
-      if (typeof r.locked !== 'boolean') return null;
-      return { locked: r.locked, lockedSeconds: Number(r.locked_seconds ?? 0), failures: Number(r.failures ?? 0) };
-    } catch {
-      return null;
-    }
-  },
-};
+function deps(): AdminAuthDeps {
+  return {
+    provider: supabaseAdminAuthProvider(),
+    directory: supabaseAdminDirectory(),
+    secret: sessionSecret(),
+    now: () => Date.now(),
+    legacy: { enabled: process.env.ADMIN_LEGACY_PASSWORD_LOGIN === '1', password: process.env.ADMIN_PASSWORD },
+  };
+}
 
-async function clientKey(): Promise<string> {
+async function clientIp(): Promise<string> {
   const h = await headers();
-  const ip = resolveClientIp({
+  return resolveClientIp({
     trustProxyHeaders: process.env.ADMIN_TRUST_PROXY_HEADERS === '1',
     xForwardedFor: h.get('x-forwarded-for'),
     xRealIp: h.get('x-real-ip'),
   });
-  return loginGuardKey(sessionSecret(), ip);
 }
 
-export type AdminSession = { actor: string; expiresAt: number };
+const cookieBase = () => ({ httpOnly: true, sameSite: 'lax' as const, secure: process.env.NODE_ENV === 'production', path: '/' });
+
+async function setSessionCookie(token: string) {
+  (await cookies()).set(SESSION_COOKIE, token, { ...cookieBase(), maxAge: ADMIN_SESSION_TTL_SECONDS });
+}
+async function setPendingCookie(token: string) {
+  (await cookies()).set(PENDING_COOKIE, token, { ...cookieBase(), maxAge: ADMIN_PENDING_TTL_SECONDS });
+}
+async function clearPendingCookie() {
+  (await cookies()).delete(PENDING_COOKIE);
+}
 
 export async function currentSession(): Promise<AdminSession | null> {
   const store = await cookies();
-  const payload = verifySessionToken(sessionSecret(), store.get(COOKIE_NAME)?.value);
-  return payload ? { actor: payload.actor, expiresAt: payload.exp * 1000 } : null;
+  return resolveSession(deps(), store.get(SESSION_COOKIE)?.value);
 }
 
 export async function isAuthed(): Promise<boolean> {
   return (await currentSession()) !== null;
 }
 
-/** 미인증이면 /login 으로 보낸다. 각 관리자 페이지·서버 액션 상단에서 호출. 세션(처리자 이름)을 돌려준다 */
-export async function requireAdmin(): Promise<AdminSession> {
+/** 미인증이면 /login. 역할이 모자라면 대시보드로 (서버 검사 — 메뉴 숨김은 UX 일 뿐이다). 각 페이지·서버 액션·Route Handler 상단에서 호출 */
+export async function requireAdmin(minRole: AdminRole = 'viewer'): Promise<AdminSession> {
   const s = await currentSession();
   if (!s) redirect('/login');
+  if (!hasRole(s, minRole)) redirect('/?denied=1');
   return s;
 }
 
-/** 감사 기록용 처리자 이름 — 세션의 이름, 없으면 ADMIN_ACTOR_LABEL, 그것도 없으면 admin-web */
-export async function currentActor(): Promise<string> {
-  const s = await currentSession();
-  return s?.actor ?? sanitizeActor(process.env.ADMIN_ACTOR_LABEL ?? 'admin-web');
+/** 변경 조치 전용 — owner 만 */
+export async function requireOwner(): Promise<AdminSession> {
+  return requireAdmin('owner');
 }
 
-export type LoginResult = { ok: true } | { ok: false; reason: 'bad_password' | 'locked' | 'unavailable'; lockedSeconds?: number };
+/** 감사 기록용 표시 이름 (actor 는 항상 session.actor — 불변 id) */
+export function actorName(s: AdminSession): string {
+  return s.displayName;
+}
 
-export async function loginWithPassword(password: string, actorName: string): Promise<LoginResult> {
-  const key = await clientKey();
-  const actor = sanitizeActor(actorName);
-  const { recordAdminAudit } = await import('./audit');
-  const result = await runLoginGuard(dbGuardStore, key, () => passwordMatches(password, process.env.ADMIN_PASSWORD ?? ''));
-  switch (result.outcome) {
-    case 'unavailable':
-      await recordAdminAudit(actor, 'admin_login_unavailable', 'client', key, {});
-      return { ok: false, reason: 'unavailable' };
-    case 'locked':
-      await recordAdminAudit(actor, 'admin_login_locked', 'client', key, { locked_seconds: result.lockedSeconds });
-      return { ok: false, reason: 'locked', lockedSeconds: result.lockedSeconds };
-    case 'bad_password':
-      await recordAdminAudit(actor, 'admin_login_failed', 'client', key, {});
-      return { ok: false, reason: 'bad_password' };
-    case 'ok':
-      break;
-  }
+// ── 로그인 흐름 ──────────────────────────────────────────────────────────────
+
+export type LoginResult = { ok: true; next: 'verify' | 'enroll' } | { ok: false; reason: 'bad_credentials' | 'locked' | 'unavailable' | 'disabled'; lockedSeconds?: number };
+
+export async function loginWithEmailPassword(email: string, password: string): Promise<LoginResult> {
+  const r = await runPasswordLogin(deps(), { email, password, clientIp: await clientIp() });
+  if (!r.ok) return r;
+  await setPendingCookie(r.pending);
+  return { ok: true, next: r.next };
+}
+
+export type EnrollView = { ok: true; qrCodeSvg: string; secret: string; uri: string } | { ok: false; reason: 'no_pending' | 'unavailable' | 'already_enrolled' };
+
+/** 등록 화면 — QR·secret 은 이 응답(HTML)에만 실린다. URL·로그·감사에 넣지 않는다 */
+export async function startMfaEnrollment(): Promise<EnrollView> {
   const store = await cookies();
-  store.set(COOKIE_NAME, issueSessionToken(sessionSecret(), actor), {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: SESSION_TTL_SECONDS,
-    path: '/',
-  });
-  await recordAdminAudit(actor, 'admin_login', 'client', key, {});
+  const r = await runMfaEnrollStart(deps(), store.get(PENDING_COOKIE)?.value, '본심 Admin');
+  if (!r.ok) return r;
+  await setPendingCookie(r.pending);
+  return { ok: true, qrCodeSvg: r.qrCodeSvg, secret: r.secret, uri: r.uri };
+}
+
+export type MfaResult = { ok: true } | { ok: false; reason: 'no_pending' | 'bad_code' | 'locked' | 'unavailable' | 'not_aal2' | 'not_active'; lockedSeconds?: number };
+
+export async function verifyMfaCode(code: string): Promise<MfaResult> {
+  const store = await cookies();
+  const r = await runMfaVerify(deps(), store.get(PENDING_COOKIE)?.value, code);
+  if (!r.ok) {
+    if (r.reason === 'no_pending' || r.reason === 'not_active') await clearPendingCookie();
+    return r;
+  }
+  await clearPendingCookie();
+  await setSessionCookie(r.session);
   return { ok: true };
+}
+
+/** MFA 화면용 pending 상태 — 토큰 내용은 돌려주지 않는다 */
+export async function pendingState(): Promise<{ hasFactor: boolean; purpose: 'login' | 'reenroll' } | null> {
+  const store = await cookies();
+  const { verifyToken } = await import('./adminAuthCore');
+  const t = verifyToken(sessionSecret(), store.get(PENDING_COOKIE)?.value, Date.now(), 'p');
+  if (!t || t.k !== 'p') return null;
+  return { hasFactor: !!t.fid, purpose: t.purpose };
 }
 
 export async function logout(): Promise<void> {
   const s = await currentSession();
   const store = await cookies();
-  store.delete(COOKIE_NAME);
-  if (s) {
-    const { recordAdminAudit } = await import('./audit');
-    await recordAdminAudit(s.actor, 'admin_logout', null, null, {});
-  }
+  const d = deps();
+  const sid = s?.sessionId;
+  store.delete(SESSION_COOKIE);
+  store.delete(PENDING_COOKIE);
+  if (sid) await d.directory.sessionRevoke(sid);
+  if (s) await d.directory.audit(s.actor, 'admin_logout', null, null, { actor_name: s.displayName });
+}
+
+export async function changeOwnPassword(input: { password: string; code: string; newPassword: string }) {
+  const s = await requireAdmin();
+  return runChangePassword(deps(), s, { ...input, clientIp: await clientIp() });
+}
+
+/** 본인 MFA 재등록 — 재인증 뒤 pending 을 만들고 등록 화면으로 보낸다 */
+export async function resetOwnMfa(input: { password: string; code: string }): Promise<{ ok: true } | { ok: false; reason: string; lockedSeconds?: number }> {
+  const s = await requireAdmin();
+  const r = await runSelfMfaReset(deps(), s, { ...input, clientIp: await clientIp() });
+  if (!r.ok) return r;
+  const store = await cookies();
+  store.delete(SESSION_COOKIE);
+  await setPendingCookie(r.pending);
+  return { ok: true };
+}
+
+// ── 구 로그인 (전환 기간) ────────────────────────────────────────────────────
+
+export async function legacyLoginOpen(): Promise<boolean> {
+  return legacyLoginAllowed(deps());
+}
+
+export type LegacyLoginResult = { ok: true } | { ok: false; reason: 'closed' | 'bad_password' | 'locked' | 'unavailable'; lockedSeconds?: number };
+
+export async function loginWithLegacyPassword(password: string, actorName: string): Promise<LegacyLoginResult> {
+  const r = await runLegacyLogin(deps(), { password, actorName, clientIp: await clientIp() });
+  if (!r.ok) return r;
+  await setSessionCookie(r.token);
+  return { ok: true };
 }

@@ -5,14 +5,16 @@ import { adminClient } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
 
-export default async function Dashboard() {
-  await requireAdmin();
+export default async function Dashboard({ searchParams }: { searchParams: Promise<{ denied?: string }> }) {
+  const session = await requireAdmin();
+  const params = await searchParams;
   const db = adminClient();
   const stats = await loadDashboardStats(db);
 
   return (
     <div>
       <h1>대시보드</h1>
+      {params.denied && <p className="error">이 조치는 owner 권한이 필요합니다 (현재 역할: {session.role}).</p>}
 
       <div className="cards">
         <div className="card"><div className="label">전체 사용자</div><div className="value">{stats.totalUsers}</div></div>

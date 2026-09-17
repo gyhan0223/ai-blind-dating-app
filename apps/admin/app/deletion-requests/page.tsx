@@ -1,6 +1,7 @@
 import { revalidatePath } from 'next/cache';
 import React from 'react';
 import { requireAdmin } from '@/lib/adminAuth';
+import { maskContact } from '@/lib/adminAuthCore';
 import { recordAdminAudit } from '@/lib/audit';
 import {
   callAccountPurge,
@@ -22,7 +23,7 @@ export const dynamic = 'force-dynamic';
  */
 async function handleRequest(formData: FormData) {
   'use server';
-  const { requireAdmin: guard } = await import('@/lib/adminAuth');
+  const { requireOwner: guard } = await import('@/lib/adminAuth');
   const session = await guard();
   const id = String(formData.get('id'));
   const action = String(formData.get('action'));
@@ -32,7 +33,7 @@ async function handleRequest(formData: FormData) {
 
   if (action === 'reject') {
     await db.from('account_deletion_requests').update({ status: 'rejected', handled_at: new Date().toISOString(), admin_note: '본인 확인 불가 또는 계정 없음' }).eq('id', id);
-    await recordAdminAudit(session.actor, 'deletion_request_handle', 'deletion_request', id, { action: 'reject' });
+    await recordAdminAudit(session, 'deletion_request_handle', 'deletion_request', id, { action: 'reject' });
     revalidatePath('/deletion-requests');
     return;
   }
@@ -41,7 +42,7 @@ async function handleRequest(formData: FormData) {
   const userId = await findUserByContact(db, req.contact as string);
   if (!userId) {
     await db.from('account_deletion_requests').update({ admin_note: '연락처와 일치하는 계정을 찾지 못함 (또는 여러 개)' }).eq('id', id);
-    await recordAdminAudit(session.actor, 'deletion_request_handle', 'deletion_request', id, { action: 'purge', result: 'user_not_found' });
+    await recordAdminAudit(session, 'deletion_request_handle', 'deletion_request', id, { action: 'purge', result: 'user_not_found' });
     revalidatePath('/deletion-requests');
     return;
   }
@@ -59,7 +60,7 @@ async function handleRequest(formData: FormData) {
         : { user_id: userId, admin_note: `삭제 미완료 (${result.status}): ${result.failedStages.join(', ') || result.error} — 재시도 필요` },
     )
     .eq('id', id);
-  await recordAdminAudit(session.actor, 'deletion_request_handle', 'deletion_request', id, {
+  await recordAdminAudit(session, 'deletion_request_handle', 'deletion_request', id, {
     action: 'purge',
     ok: result.ok,
     hard: true,
@@ -74,7 +75,7 @@ async function handleRequest(formData: FormData) {
 /** 미완료 삭제 작업 재시도 (완료한 단계는 건너뛴다) / 운영자 확인 후 단계 건너뛰기 (감사 기록) */
 async function retryJob(formData: FormData) {
   'use server';
-  const { requireAdmin: guard } = await import('@/lib/adminAuth');
+  const { requireOwner: guard } = await import('@/lib/adminAuth');
   const session = await guard();
   const userId = String(formData.get('userId') ?? '');
   const mode = String(formData.get('mode') ?? 'anonymize');
@@ -87,10 +88,10 @@ async function retryJob(formData: FormData) {
     if (stage !== 'storage' && stage !== 'provider' && stage !== 'auth') return;
     if (!note) return; // 건너뛰기에는 사유가 필요하다
     const res = await skipPurgeStage(db, userId, stage, session.actor, note);
-    await recordAdminAudit(session.actor, 'purge_stage_skip', 'user', userId, { stage, ok: res.ok, result: res.ok ? res.status : res.reason });
+    await recordAdminAudit(session, 'purge_stage_skip', 'user', userId, { stage, ok: res.ok, result: res.ok ? res.status : res.reason });
   } else {
     const res = await callAccountPurge(userId, mode === 'hard', session.actor);
-    await recordAdminAudit(session.actor, 'purge_retry', 'user', userId, { ok: res.ok, status: res.status, error: res.ok ? undefined : res.error, failed_stages: res.ok ? undefined : res.failedStages });
+    await recordAdminAudit(session, 'purge_retry', 'user', userId, { ok: res.ok, status: res.status, error: res.ok ? undefined : res.error, failed_stages: res.ok ? undefined : res.failedStages });
     // 이 사용자의 완전 삭제 요청이 pending 이고 작업이 끝났으면 요청도 완료로
     if (res.ok && mode === 'hard') {
       await db
@@ -105,7 +106,8 @@ async function retryJob(formData: FormData) {
 }
 
 export default async function DeletionRequestsPage() {
-  await requireAdmin();
+  const session = await requireAdmin();
+  const canAct = session.role === 'owner';
   const db = adminClient();
   const failedJobs = await loadFailedPurgeJobs(db);
   const { data } = await db
@@ -131,12 +133,12 @@ export default async function DeletionRequestsPage() {
           {rows.map((r) => (
             <tr key={r.id}>
               <td>{new Date(r.created_at).toLocaleString('ko-KR')}</td>
-              <td>{r.contact}</td>
+              <td>{canAct ? r.contact : maskContact(r.contact)}</td>
               <td style={{ maxWidth: 240 }}>{r.note ?? '—'}</td>
               <td><span className={`badge ${r.status === 'pending' ? 'danger' : r.status === 'done' ? '' : 'muted'}`}>{r.status}</span></td>
               <td style={{ maxWidth: 240 }}>{r.admin_note ?? '—'}</td>
               <td>
-                {r.status === 'pending' && (
+                {r.status === 'pending' && canAct && (
                   <div style={{ display: 'flex', gap: 6 }}>
                     <form action={handleRequest}>
                       <input type="hidden" name="id" value={r.id} />
@@ -182,7 +184,7 @@ export default async function DeletionRequestsPage() {
                   </td>
                   <td style={{ maxWidth: 320, fontSize: 12 }}>{j.running ? '진행 중' : describePurgeFailure(j).join(' / ') || '—'}</td>
                   <td>
-                    {!j.running && (
+                    {!j.running && canAct && (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         <form action={retryJob}>
                           <input type="hidden" name="userId" value={j.user_id} />

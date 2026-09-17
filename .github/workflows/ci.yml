@@ -1,7 +1,7 @@
 # CI gate (#3 · #27 · #13 · #11 · #12)
 #   - 서버 순수 로직 selftest (Node, 외부 호출 없음)
 #   - 로컬 Postgres 에 전체 마이그레이션 + SQL/동시성 테스트 (run_local_check.sh)
-#   - 관리자 웹 typecheck + 세션/로그인 제한 selftest
+#   - 관리자 웹 typecheck + 세션/로그인 제한·계정/MFA/역할 selftest + next build 브라우저 번들 secret 검사 (#27)
 #   - 모바일 typecheck · lint · selftest · SDK 로그 검사 · **release 산출물 검사** (expo export 3플랫폼 → 개발 마커/서버 secret grep)
 # 여기서 통과해도 EAS 네이티브 release 빌드·실기기 검증을 대신하지 않는다 (docs/release-checklist.md).
 name: ci
@@ -60,7 +60,19 @@ jobs:
           cache-dependency-path: apps/admin/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npx tsc --noEmit
-      - run: node --experimental-strip-types scripts/admin-session-selftest.mjs
+      - name: selftests (세션 토큰·로그인 제한 · 계정/MFA/역할/세션 흐름)
+        run: npm run selftest
+      - name: browser bundle check — 검사기 자체 검증 후 next build 산출물(.next/static) 에 서버 secret·RPC 흔적 없음 (#27)
+        env:
+          # 검사용 placeholder — 실제 값이 아니다. 검사기는 이 값과 secret 이름·service_role·JWT 형태·관리자 RPC 이름을 잡는다
+          SUPABASE_URL: https://ci-placeholder.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-placeholder-service-role-key-value
+          SUPABASE_ANON_KEY: ci-placeholder-anon-key
+          ADMIN_SESSION_SECRET: ci-placeholder-session-secret-0123456789
+        run: |
+          npm run bundle:check:selfcheck
+          npm run build
+          npm run bundle:check
 
   mobile:
     runs-on: ubuntu-latest

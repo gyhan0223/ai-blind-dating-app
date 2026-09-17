@@ -2,6 +2,7 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import React from 'react';
 import { requireAdmin } from '@/lib/adminAuth';
+import { actorLabel, loadAdminNames } from '@/lib/audit';
 import {
   ADMIN_ERROR_LABEL,
   type AdminFaceAction,
@@ -26,7 +27,7 @@ export const dynamic = 'force-dynamic';
 
 async function runAction(formData: FormData) {
   'use server';
-  const { requireAdmin: guard } = await import('@/lib/adminAuth');
+  const { requireOwner: guard } = await import('@/lib/adminAuth');
   const { recordAdminAudit } = await import('@/lib/audit');
   const session = await guard();
   const action = String(formData.get('action') ?? '');
@@ -34,7 +35,7 @@ async function runAction(formData: FormData) {
   const note = String(formData.get('note') ?? '').trim().slice(0, 500);
   if (!['approve', 'reject', 'repair'].includes(action) || !rowId) redirect('/face-reviews?error=invalid');
   const res = await callAdminFaceReview({ action: action as AdminFaceAction, rowId, actor: session.actor, note: note || null });
-  await recordAdminAudit(session.actor, 'face_review', 'face_verification', rowId, { action, ok: res.ok, result: res.ok ? res.status : res.error });
+  await recordAdminAudit(session, 'face_review', 'face_verification', rowId, { action, ok: res.ok, result: res.ok ? res.status : res.error });
   revalidatePath('/face-reviews');
   redirect(res.ok ? `/face-reviews?done=${encodeURIComponent(res.status)}` : `/face-reviews?error=${encodeURIComponent(res.error)}`);
 }
@@ -44,10 +45,11 @@ export default async function FaceReviewsPage({
 }: {
   searchParams: Promise<{ error?: string; done?: string }>;
 }) {
-  await requireAdmin();
+  const session = await requireAdmin();
+  const canAct = session.role === 'owner';
   const params = await searchParams;
   const db = adminClient();
-  const { pending, inconsistent, audits, nickname } = await loadFaceReviewQueue(db);
+  const [{ pending, inconsistent, audits, nickname }, adminNames] = await Promise.all([loadFaceReviewQueue(db), loadAdminNames()]);
 
   return (
     <div>
@@ -85,7 +87,7 @@ export default async function FaceReviewsPage({
                 <td>{r.liveness_passed ? '통과' : '미통과'}</td>
                 <td>{r.reference_path ? '있음' : '없음'}</td>
                 <td>
-                  <form action={runAction} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  {canAct && <form action={runAction} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                     <input type="hidden" name="rowId" value={r.id} />
                     <input name="note" placeholder="비고 (선택)" maxLength={500} style={{ width: 140 }} />
                     <button className="primary" type="submit" name="action" value="approve" disabled={!r.liveness_passed}>
@@ -94,7 +96,7 @@ export default async function FaceReviewsPage({
                     <button className="danger" type="submit" name="action" value="reject">
                       거절
                     </button>
-                  </form>
+                  </form>}
                 </td>
               </tr>
             ))}
@@ -124,10 +126,10 @@ export default async function FaceReviewsPage({
                 <td>{r.face_verified ? 'true' : 'false'}</td>
                 <td>{r.reference_path ? '있음' : '없음'}</td>
                 <td>
-                  <form action={runAction}>
+                  {canAct && <form action={runAction}>
                     <input type="hidden" name="rowId" value={r.face_verification_id} />
                     <button type="submit" name="action" value="repair">복구</button>
-                  </form>
+                  </form>}
                 </td>
               </tr>
             ))}
@@ -146,7 +148,7 @@ export default async function FaceReviewsPage({
             {audits.map((a) => (
               <tr key={a.id}>
                 <td>{new Date(a.created_at).toLocaleString('ko-KR')}</td>
-                <td>{a.actor}</td>
+                <td>{actorLabel(a.actor, adminNames)}</td>
                 <td>{nickname.get(a.user_id) ?? shortId(a.user_id)}</td>
                 <td>
                   <span className={`badge ${a.action === 'reject' ? 'danger' : ''}`}>

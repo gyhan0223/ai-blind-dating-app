@@ -59,8 +59,8 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0031 순서대로 — 0015~0031 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절, 0027 은 docs/matching-policy.md 12절,
-#   0028 삭제 작업 상태(#13) · 0029 얼굴 세션별 자산/정리 큐(#11) · 0030 얼굴 정보 처리 동의(#12) · 0031 관리자 로그인 제한(#27) — docs/data-retention.md · docs/face-consent.md · docs/security.md)
+# 마이그레이션 적용 (0001 → 0033 순서대로 — 0015~0033 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절, 0027 은 docs/matching-policy.md 12절,
+#   0028 삭제 작업 상태(#13) · 0029 얼굴 세션별 자산/정리 큐(#11) · 0030 얼굴 정보 처리 동의(#12) · 0031 관리자 로그인 제한(#27) · 0032 본인확인 세션(#6) · 0033 관리자 계정/MFA/역할(#27, docs/admin-auth.md) — docs/data-retention.md · docs/face-consent.md · docs/security.md · docs/identity-verification.md)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -173,21 +173,25 @@ release 빌드에는 버튼이 없고, **production 에는 dev-login 을 배포�
 
 ```bash
 cd apps/admin
-cp .env.example .env.local   # service role key + 관리자 비밀번호
+cp .env.example .env.local   # SUPABASE_URL · service role key · anon key · ADMIN_SESSION_SECRET
 npm install
-npm run dev                  # http://localhost:3100
+# 첫 owner 생성 (서버 전용 — 활성 owner 가 없을 때만. 비밀번호는 프롬프트로)
+SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... node scripts/admin-bootstrap.mjs create-owner --email you@example.com --name "운영자"
+npm run dev                  # http://localhost:3100 → 로그인 → 인증 앱(TOTP) 등록
 ```
 
-대시보드(핵심 퍼널 9단계 전환율) · 사용자 정지/해제 · 신고 처리 · 얼굴 검토 · 삭제 요청 · 서버 오류 · 퍼널 · **폐쇄 베타(게이트·cohort·초대코드·대기자 입장, #26)** · **감사 로그(#27)**.
-로그인 때 입력한 처리자 이름이 모든 조치의 감사 기록에 남는다. 세션은 서명된 12시간 토큰이고 로그인 5회 실패 시 15분 잠긴다 (`docs/security.md`).
+대시보드(핵심 퍼널 9단계 전환율) · 사용자 정지/해제 · 신고 처리 · 얼굴 검토 · 삭제 요청 · 서버 오류 · 퍼널 · **폐쇄 베타(게이트·cohort·초대코드·대기자 입장, #26)** · **감사 로그** · **관리자 계정(owner/viewer, #27)** · **내 계정(비밀번호·MFA 재등록)**.
+관리자는 개인 계정(이메일+비밀번호) + 인증 앱 MFA 로 로그인하며, 역할(owner/viewer)은 서버가 매 요청 DB 에서 판정한다. 감사 기록의 처리자는 계정 id. 세션은 DB 행 + 서명 쿠키(12시간), 비밀번호·MFA 각 5회 실패 시 15분 잠금 (`docs/admin-auth.md` · `docs/security.md` 4절).
 
 ## 검증 (로컬)
 
 ```bash
 # DB 스키마 + 시드 + RLS 테스트 (Docker 없이 로컬 Postgres 로)
 cd supabase/tests && bash run_local_check.sh
-# 서버 순수 로직 selftest 전부 (env·identity·security·observability·notifications·matching·face·purge·consent·send-sms)
+# 서버 순수 로직 selftest 전부 (env·identity·verify-identity 흐름·security·observability·notifications·matching·face·purge·consent·send-sms)
 bash scripts/server-selftests.sh
+# 본인확인 흐름 (#6 — Provider/DB/Auth/시계 주입: 가입·재인증·복구·동시 가입·탈퇴 복구/재가입·차단 우회·미성년·취소/실패/만료·타인 세션·재전송·부분 실패·PII 비노출)
+cd supabase/functions/_shared/identity && node --experimental-strip-types verifyIdentitySelftest.ts
 # 삭제 작업(#13)·얼굴 자산 정리(#11) — Storage/Didit/auth 를 adapter mock 으로 실패·재시도·동시성·페이지 제한 재현 (실제 Provider 검증 아님)
 cd supabase/functions/_shared/purge && node --experimental-strip-types selftest.ts
 # 얼굴 정보 처리 동의 문서 — 서버 정책과 앱 사본 일치·production 준비 상태 (#12)
@@ -238,8 +242,10 @@ cd apps/mobile && node --experimental-strip-types scripts/chat-core-selftest.mjs
 cd apps/mobile && node --experimental-strip-types scripts/preferences-core-selftest.mjs
 # Edge 남용 방지·베타 강제 판정 (#27/#26 — fail-closed: RPC 오류는 허용이 아니라 거부)
 cd supabase/functions/_shared/security && node --experimental-strip-types selftest.ts
-# 관리자 세션 토큰·로그인 잠금 (#27 — 서명·만료·변조 거부 · 5회 실패 잠금)
-cd apps/admin && node --experimental-strip-types scripts/admin-session-selftest.mjs
+# 관리자 세션 토큰·로그인 잠금 · 계정/MFA/역할/세션 흐름 (#27 — 서명·만료·변조 거부 · 5회 실패 잠금 · 비관리자/role 위조/MFA 미완료 차단 · 강등/비활성화 즉시 반영 · 구 로그인 게이트)
+cd apps/admin && npm run selftest
+# 관리자 브라우저 번들 secret 검사 (#27 — next build 뒤 .next/static)
+cd apps/admin && npm run bundle:check:selfcheck && npm run build && npm run bundle:check
 # DB: 권한 회귀 (#27 — RLS 전수 · SECURITY DEFINER allowlist · 뷰 비공개 · anon 0행 · 추천 변경 범위 · 신고 상한) — security_tests.sql
 #     프로필 수정 (#25 — 성별/출생연도 잠금 · preferences_save 원자성 · 변경 이벤트 컬럼명만) — profile_edit_tests.sql
 #     폐쇄 베타 (#26 — 게이트 · 초대코드 · 대기 · 운영자 입장 · 정원 · 공개 전환) — beta_tests.sql   (모두 run_local_check.sh 에 포함)
@@ -323,7 +329,9 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 ```
 
 - **1인 1계정 3중 방어**: ① 가입 전 hash 조회(UX 분기) ② insert 시 unique 위반
-  catch(동시 가입 race) ③ **DB `UNIQUE(identity_key_hash)`** — 최종 방어선.
+  catch(동시 가입 race) · relink 0행 갱신도 실패로 처리 ③ **DB `UNIQUE(identity_key_hash)`** — 최종 방어선.
+- **본인확인 세션은 서버가 소유** (#6, `identity_verification_sessions` 0032): requestId 는 서버 세션 id 이고 confirm/recover 는 JWT 사용자 소유·만료 전·미사용 세션에서만 진행한다.
+  recover 는 confirm 이 남긴 서버 검증 결과만 쓴다. 흐름·시나리오별 검증 계층·staging 절차: `docs/identity-verification.md`.
 - **`user_identities` 는 서버 전용**: RLS 정책이 하나도 없어 클라이언트는 접근 불가.
   identity 해시는 어떤 API 응답에도 포함되지 않음. HMAC 은 Edge Function 에서만 수행
   (secret 은 서버 환경변수, 클라이언트 번들 미포함).

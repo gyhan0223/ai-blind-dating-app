@@ -31,6 +31,13 @@ if [[ "${WITH_IDENTITY_TESTS:-1}" == "1" && -f identity_tests.sql ]]; then
   $PSQL -d "$DB_NAME" -f identity_tests.sql
 fi
 
+if [[ "${WITH_IDENTITY_SESSION_TESTS:-1}" == "1" && -f identity_sessions_tests.sql ]]; then
+  echo "running identity session tests (#6 — 세션 서버 전용 · 소유자/만료/lease 조건부 점유 · 상태 전이 가드 · relink 0행 · cascade · prune)"
+  $PSQL -d "$DB_NAME" -f identity_sessions_tests.sql
+  echo "running identity concurrency tests (#6 — 두 연결: 같은 identity 동시 insert 1행 · relink 경쟁 0행 · 세션 동시 claim 1행)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash identity_concurrency_test.sh
+fi
+
 if [[ "${WITH_SMS_RATE_LIMIT_TESTS:-1}" == "1" && -f sms_rate_limit_tests.sql ]]; then
   echo "running sms rate limit tests"
   $PSQL -d "$DB_NAME" -f sms_rate_limit_tests.sql
@@ -103,6 +110,13 @@ if [[ "${WITH_ADMIN_LOGIN_GUARD_TESTS:-1}" == "1" && -f admin_login_guard_tests.
   $PSQL -d "$DB_NAME" -f admin_login_guard_tests.sql
   echo "running admin login guard concurrency tests (#27 — 동시 실패 합산 · 잠금 일관)"
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash admin_login_guard_concurrency_test.sh
+fi
+
+if [[ "${WITH_ADMIN_ACCOUNTS_TESTS:-1}" == "1" && -f admin_accounts_tests.sql ]]; then
+  echo "running admin accounts tests (#27 — 관리자 계정 앱 사용자 행 없음 · bootstrap 1회 · owner/viewer · 마지막 owner 보호 · 세션 DB 검증(강등/비활성화/취소 즉시 반영) · 구 로그인 게이트 · 서버 전용)"
+  $PSQL -d "$DB_NAME" -f admin_accounts_tests.sql
+  echo "running admin accounts concurrency tests (#27 — 두 owner 동시 강등 → 활성 owner 1명 유지)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash admin_accounts_concurrency_test.sh
 fi
 
 if [[ "${WITH_PUSH_TESTS:-1}" == "1" && -f push_tests.sql ]]; then
