@@ -107,7 +107,7 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
   코어의 insert 가 충돌해도 빈 응답 대신 오늘 저장된 행을 다시 읽어 돌려준다. 검증: `recommendation_runs_tests.sql` · `recommendation_claim_concurrency_test.sh` · selftest.
 - **후보 부족 재시도 주기 (#23)**: `exhausted` 로 끝난 뒤 1시간 안의 재요청은 후보를 다시 훑지 않고 같은 답을 돌려준다(`skip`, 실행 기록의 `cap_reached` 를 함께 돌려준다).
   앱은 전체 탐색을 끝낸 경우 "오늘은 소개할 분이 없어요 — 필수 조건을 동의 없이 넓히지 않는다" 를, 탐색 상한에 걸린 경우(`cap_reached: true`) "아직 다 살펴보지 못했어요" 를 보여 준다
-  (12절). 앱의 "다시 확인" 은 같은 요청을 다시 보낼 뿐이라 이 주기를 우회하지 않는다. 배치도 같은 규칙으로 건너뛴다.
+  (12절). 앱의 "다시 확인" 은 같은 요청을 다시 보낼 뿐이라 이 주기를 우회하지 않는다. 배치는 같은 규칙을 50분 창으로 적용해 매시간 한 번 다시 훑는다 (10절).
 
 ## 8. 추천 이유는 공개된 사실만
 
@@ -132,16 +132,29 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 - pending 추천: 보존하되 반환 시 6절 재검증을 거친다. accepted/skipped/매치·채팅·좋아요: 보존.
 - 새 계산은 배포 시점 이후 생성되는 추천부터 적용된다. 과거 결과까지 외모와 무관했다고 주장하지 않는다.
 
-## 10. 스케줄러 (#22) — `daily-recommendation-batch`
+## 10. 스케줄러 (#22) — `daily-recommendation-batch` · 후보 부족 자동 재확인 (매시간 폴링)
 
-- service role 로만 호출되는 Edge Function. `recommendation_batch_targets(오늘)` 로 "자격 있고 오늘 추천이 없고 진행 중/최근 exhausted 가 아닌" 사용자를
-  id 순으로 최대 `max_users`(기본 100) 명 읽어 사용자별 claim → 코어 → finish 를 돈다. `next_after` 를 돌려주고 다음 호출이 이어간다.
-  같은 날 몇 번을 호출해도 새 행이 생기지 않는다. 앱의 `daily-recommendation` 과 같은 잠금을 쓰므로 둘이 겹쳐도 하루 한 명이다.
-- 스케줄 등록 예 (Supabase pg_cron + pg_net, service role key 는 Vault 에 두고 SQL 에 직접 쓰지 않는다):
+- service role 로만 호출되는 Edge Function. `recommendation_batch_targets(오늘, 커서, 인원, 재확인 창)` 로 "자격 있고 대화 자리가 남고 오늘 추천이 없고
+  진행 중/오늘 ok·slots_full/재확인 창 안의 exhausted 가 아닌" 사용자를 id 순으로 최대 `max_users`(기본 100) 명 읽어 사용자별 claim → 코어 → finish 를 돈다.
+  `next_after` 를 돌려주고 다음 호출이 이어간다. 같은 날 몇 번을 호출해도 새 행이 생기지 않는다. 앱의 `daily-recommendation` 과 같은 잠금을 쓰므로 둘이 겹쳐도 하루 한 명이다.
+- **후보 부족 사용자 자동 재확인 (#22/#23, 0032)**: 후보 없음(`exhausted`)은 그날 소개 완료가 아니다. 배치가 KST 09:00~21:45 사이 매시간 돌면서
+  창이 지난 후보 부족 사용자를 **앱을 열지 않아도** 다시 훑고, 적격 후보가 생기면 소개를 저장한다. 밤(22시~아침 9시)에는 돌지 않아 새벽 알림이 없다.
+  - 재확인 창은 배치 50분(`BATCH_RETRY_AFTER_SECONDS`, `_shared/matching/batchRetryWindow.ts`) / 앱 1시간(DB 기본). 매시간 :00 cron 과 정확히 1시간 창을
+    함께 쓰면 09:00:05 에 끝난 사용자가 10:00:00 에는 "1시간 안" 이라 빠져 두 시간에 한 번이 되므로 배치만 창을 짧게 잡는다.
+    같은 값을 `recommendation_batch_targets` 와 `recommendation_run_claim(p_retry_after_seconds)` 에 넘겨 대상 선정과 실행권 판정이 어긋나지 않는다.
+    앱의 "다시 확인" 은 기본 1시간 창이라 서버 주기를 우회하지 않는다 (7절).
+  - 비용은 "기다리는 사용자 수" 에 비례한다: 오늘 소개를 받은 사용자·자리 없는 사용자는 SQL 에서 걸러져 배치가 건드리지 않는다. 후보 부족 사용자 1명당
+    하루 최대 13번(09~21시) 재확인, 한 번에 조회 10여 개 + 후보 최대 500명 평가. 초기 규모에서는 무시할 수준이며 실행 결과는 `recommendation_runs` 로 관측한다 (12절).
+  - 알림 (#17): 소개가 실제로 저장될 때만 `recommendations` insert 트리거가 `notification_events.daily_recommendation` 1건(dedupe `recommendation:<user>:<date>`)을
+    넣는다. 후보 부족을 반복 확인하는 동안에는 이벤트가 없고, 배치·앱 요청·재시도가 겹쳐도 소개·알림은 1건이다. 배치는 알림을 직접 만들지 않는다.
+  - 대화 3개로 중단된 사용자(`slots_full`, 자리 없음)는 후보 부족과 구분되며 그날은 다시 훑지 않는다 (#24 정책 그대로).
+  - 요청 body `retry_after_seconds`(5분~24시간, 그 밖은 기본 50분) 로 수동 실행·점검 시 창을 바꿀 수 있다. 응답에 적용된 값이 `retry_after_seconds` 로 돌아온다.
+- 스케줄 등록 (Supabase pg_cron + pg_net, service role key 는 Vault 에 두고 SQL 에 직접 쓰지 않는다):
 
   ```sql
-  -- 매일 KST 09:00~09:45 15분 간격 = UTC 00:00~00:45 (한 번에 100명씩, 4회면 400명. 더 크면 간격/횟수 조정)
-  select cron.schedule('daily-recommendation-batch', '*/15 0 * * *', $$
+  -- KST 09:00~21:45 매시간 재확인, 15분 간격 호출은 같은 시간대의 페이지 이어가기 (한 번에 100명씩 → 한 시간에 400명까지. 더 크면 max_users/간격 조정)
+  -- = UTC 00:00~12:45. 예전 아침 전용 등록('*/15 0 * * *')이 있으면 먼저 지운다: select cron.unschedule('daily-recommendation-batch');
+  select cron.schedule('daily-recommendation-batch', '0,15,30,45 0-12 * * *', $$
     select net.http_post(
       url := 'https://<project-ref>.supabase.co/functions/v1/daily-recommendation-batch',
       headers := jsonb_build_object('Content-Type', 'application/json',
@@ -150,10 +163,15 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
   $$);
   select cron.schedule('recommendation-runs-prune', '0 18 * * *', $$ select public.recommendation_runs_prune(interval '30 days') $$);
   ```
-- 배치가 아직 안 돌았어도 앱을 열면 `daily-recommendation` 이 바로 생성한다. 배치는 "아침에 미리 준비" 용이다 (Push 는 #17).
-- 배포: `0017_recommendation_runs.sql` → `supabase functions deploy daily-recommendation daily-recommendation-batch` → cron 등록.
-  0017 은 `recommendations` 의 unique 제약을 바꾸므로 seed 의 `on conflict (user_id, candidate_id, for_date)` 와 같이 배포한다.
+  15분 간격 호출이 같은 사용자를 두 번 훑지 않는 이유: exhausted 뒤 50분 창 안(:15/:30/:45)에는 대상에서 빠지고, 다음 :00 에 다시 대상이 된다.
+- 배치가 아직 안 돌았어도 앱을 열면 `daily-recommendation` 이 바로 생성한다. 배치는 "아침에 미리 준비" 와 "후보 부족 사용자 재확인" 두 역할이다 (Push 는 #17).
+- 배포: `0032_recommendation_batch_hourly.sql`(`recommendation_batch_targets` 시그니처 확장 — 0026 조건 유지) → `supabase functions deploy daily-recommendation-batch`
+  → cron 재등록(위). 0032 이전 DB 에 새 배치를 배포하면 `p_retry_after_seconds` 인자를 몰라 `lookup_failed` 500 이므로 순서를 지킨다.
+  (최초 배포는 `0017_recommendation_runs.sql` → `supabase functions deploy daily-recommendation daily-recommendation-batch` → cron 등록.
+  0017 은 `recommendations` 의 unique 제약을 바꾸므로 seed 의 `on conflict (user_id, candidate_id, for_date)` 와 같이 배포한다.)
   관측 컬럼·통계 함수(#23)는 `0027_recommendation_observability.sql` — 배포 순서는 12절.
+- 검증: `recommendation_runs_tests.sql` 7b/7c(창·slots_full·클라이언트 호출 불가), `recommendation_db_test.mjs` 9)(후보 없음 → 55분 뒤 재확인 → 후보 생김 → 앱 미접속 중 소개 저장 → 알림 outbox 1건, 겹침 시 1건 유지),
+  matching selftest(창 정책·claim 인자). 실제 프로젝트 cron 등록·1회 수동 실행·실기기 푸시 수신은 미수행 (`docs/release-checklist.md`).
 
 ## 11. 선호·프로필 수정의 반영 시점 (#25)
 
@@ -213,7 +231,7 @@ DB 함수 `recommendation_pool_stats(p_window_days)` · `recommendation_run_stat
 **기간 내 전체 실행 기준** (`recommendation_run_stats`, 단위: 실행 행 = 사용자·날짜당 최종 결과 / 추천 행): `runs · runs_ok · runs_exhausted_complete · runs_exhausted_cap · runs_slots_full · runs_failed · runs_other`,
 `recommendations_created · strategy_high_confidence/exploration/fallback · basis_scored/conditions_only/unmeasured`, `window_from · window_to`. 생성·전략 건수는 저장된 추천 행에서 센다 — HTTP 요청 수가 아니다.
 
-**측정 한계**: 하루에 exhausted → (1시간 뒤) ok 처럼 결과가 바뀌면 같은 행이 덮어써져 최종 결과만 남는다(`attempts` 로 재시도 횟수는 남는다). 최근 실행이 없는 사용자는 후보 규모를 모른다(미측정). 상한 도달 사용자의 후보 수는 하한이다.
+**측정 한계**: 하루에 exhausted → (배치 재확인 뒤) ok 처럼 결과가 바뀌면 같은 행이 덮어써져 최종 결과만 남는다(`attempts` 로 재확인 횟수는 남는다). 최근 실행이 없는 사용자는 후보 규모를 모른다(미측정). 상한 도달 사용자의 후보 수는 하한이다.
 익명화된 요청자는 프로필이 없어 세그먼트 집계에서 빠진다. 30명 미만 세그먼트로 결론을 내지 않는다.
 
 ### 12.4 홈 대기 화면 (`apps/mobile/src/app/(tabs)/index.tsx`)
@@ -223,7 +241,7 @@ DB 함수 `recommendation_pool_stats(p_window_days)` · `recommendation_run_stat
 | HTTP 5xx / 네트워크 오류 | "추천을 불러오지 못했어요 — 소개할 분이 없다는 뜻은 아니에요" + 다시 시도 (후보 부족 문구로 바꾸지 않는다) |
 | `in_progress` | "오늘 소개할 분을 준비하고 있어요" + 다시 확인 |
 | `slots_full` | "진행 중인 대화가 3개예요" + 대화 목록 |
-| `exhausted` (완전 탐색) | "오늘은 소개할 분이 없어요 — 필수 조건을 동의 없이 넓히지 않는다, 다시 찾는 건 1시간에 한 번" + 다시 확인 + 선호 조건 보기(다음 소개부터 반영) |
+| `exhausted` (완전 탐색) | "오늘은 소개할 분이 없어요 — 필수 조건을 동의 없이 넓히지 않는다, 다시 찾는 건 1시간에 한 번" + 다시 확인 + 선호 조건 보기(다음 소개부터 반영). 앱을 닫아도 서버 배치가 매시간 다시 찾는다 (10절) |
 | `exhausted` + `cap_reached` | "아직 다 살펴보지 못했어요 — 조건에 맞는 분이 없다고 단정하지 않는다" + 같은 버튼 |
 | 오늘 추천을 이미 수락/넘김 | "오늘의 소개를 확인했어요" |
 

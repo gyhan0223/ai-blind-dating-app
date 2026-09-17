@@ -15,7 +15,7 @@
 | 토큰 등록 | 앱 `lib/push.ts` `registerPushToken` → RPC `push_token_register` (홈 진입 시 1회 권한 요청, 거부하면 다시 묻지 않음) |
 | 토큰 해제 | 로그아웃·탈퇴 전 `unregisterPushToken`(본인 행 delete), `delete-account` 가 service role 로 전부 삭제, 발송 실패(DeviceNotRegistered) 시 `enabled=false` |
 | 설정 | `notification_preferences` (종류별 on/off, 행 없으면 모두 on) — 내 정보 화면 스위치 |
-| outbox | `notification_events` kind: `new_message` · `mutual_meetup_interest` · `daily_recommendation`(하루 1건) · `match_created`. dedupe_key 로 중복 없음 |
+| outbox | `notification_events` kind: `new_message` · `mutual_meetup_interest` · `daily_recommendation`(하루 1건 — 앱 요청이든 #22 배치 재확인이든 **실제 소개가 저장될 때만**, 후보 부족 반복 확인은 이벤트 없음) · `match_created`. dedupe_key 로 중복 없음 |
 | 발송기 | `supabase/functions/send-push` — `_shared/notifications/pushCore.ts`(순수 로직, selftest 19건) |
 | 딥링크 | data `{kind, match_id?, conversation_id?}` → new_message → 채팅방, mutual → 만남 화면, match_created → 대화 목록, daily → 홈 |
 

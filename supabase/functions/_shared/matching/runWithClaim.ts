@@ -126,13 +126,23 @@ export async function runDailyRecommendationWithClaim(
   };
 }
 
-/** supabase-js(service role) 로 claim/finish RPC 를 호출하는 구현 */
-export function supabaseClaimClient(db: {
-  rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
-}): ClaimClient {
+/**
+ * supabase-js(service role) 로 claim/finish RPC 를 호출하는 구현.
+ *  - opts.retryAfterSeconds: exhausted 뒤 다시 훑기까지의 창을 DB 기본(1시간) 대신 지정한다.
+ *    배치(daily-recommendation-batch)가 매시간 cron 보다 짧은 창(50분)을 넘겨 매시간 정확히 한 번 재확인한다 (#22).
+ *    앱(daily-recommendation)은 넘기지 않아 DB 기본값 그대로다.
+ */
+export function supabaseClaimClient(
+  db: { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }> },
+  opts: { retryAfterSeconds?: number } = {},
+): ClaimClient {
+  const retryArgs =
+    typeof opts.retryAfterSeconds === 'number' && Number.isFinite(opts.retryAfterSeconds) && opts.retryAfterSeconds > 0
+      ? { p_retry_after_seconds: Math.floor(opts.retryAfterSeconds) }
+      : {};
   return {
     async claim(userId, forDate) {
-      const { data, error } = await db.rpc('recommendation_run_claim', { p_user_id: userId, p_for_date: forDate });
+      const { data, error } = await db.rpc('recommendation_run_claim', { p_user_id: userId, p_for_date: forDate, ...retryArgs });
       if (error) throw new Error(`recommendation_run_claim: ${error.message}`);
       const obj = (data ?? {}) as { claim?: string; result?: string; cap_reached?: boolean };
       if (obj.claim !== 'claimed' && obj.claim !== 'busy' && obj.claim !== 'skip') {

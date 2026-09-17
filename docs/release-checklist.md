@@ -145,6 +145,10 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#22/#23) 마이그레이션 `0017_recommendation_runs.sql` 이 적용되어 있고(`recommendation_runs`, `recommendation_run_claim/finish`, `recommendation_batch_targets`, recommendations unique 변경),
       `daily-recommendation` · `daily-recommendation-batch` 가 재배포되어 있으며 pg_cron 에 배치 스케줄이 등록되어 있다 (`select * from cron.job`)
 - [ ] (#22) 같은 계정으로 `daily-recommendation` 을 동시에 두 번 호출해도 오늘 `recommendations` 행이 1건이다. `daily-recommendation-batch` 를 사용자 JWT 로 호출하면 401 이다
+- [ ] (#22 매시간 폴링) 마이그레이션 `0032_recommendation_batch_hourly.sql` 적용(`recommendation_batch_targets` 4인자) → `daily-recommendation-batch` 재배포 → cron 을 `'0,15,30,45 0-12 * * *'`(KST 09:00~21:45) 로 재등록
+      (`select jobname, schedule from cron.job where jobname = 'daily-recommendation-batch'`, 예전 `'*/15 0 * * *'` 는 unschedule). 응답에 `retry_after_seconds: 3000` 이 온다
+- [ ] (#22/#23/#17) 후보 없는 테스트 계정: 앱을 닫은 채 `recommendation_runs.finished_at` 을 55분 전으로 바꾸고 후보를 만든 뒤 배치 1회 수동 호출 → 오늘 `recommendations` 1건 ·
+      `notification_events.daily_recommendation` 1건 → (cron `send-push`) 실기기 푸시 수신 → 탭하면 홈의 오늘의 소개. 후보를 만들지 않고 호출하면 행·이벤트가 늘지 않는다 — **실제 프로젝트·실기기 미수행**
 - [ ] (#23) 마이그레이션 `0027_recommendation_observability.sql` 적용 (`recommendation_runs.eligible_count/recommendation_id/strategy/basis/error_stage`, `recommendation_run_finish` 8인자,
       `recommendations_created_event` 트리거, `recommendation_pool_stats`/`recommendation_run_stats`). 적용 뒤 `select count(*) from analytics_events where event_type='recommendation_created'` = `select count(*) from recommendations`
 - [ ] (#23) `daily-recommendation` · `daily-recommendation-batch` 재배포 뒤 오늘 실행 행에 `eligible_count` 가 채워진다: `select result, cap_reached, eligible_count from recommendation_runs where for_date = (now() at time zone 'Asia/Seoul')::date`

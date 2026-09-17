@@ -19,7 +19,8 @@ import {
 } from './MatchingEngine.ts';
 import { buildPublicAnswerCards, composeIntro, normalizeRelationshipGoal } from './publicPrompts.ts';
 import { accountEligible, addDays, CARD_FIELDS, CONVERSATION_SLOT_LIMIT, excludedByRecommendationHistory, MAX_CANDIDATES_SCANNED, RECOMMENDATION_COOLDOWN_DAYS, runDailyRecommendation } from './recommend.ts';
-import { runDailyRecommendationWithClaim, type ClaimClient } from './runWithClaim.ts';
+import { BATCH_RETRY_AFTER_SECONDS, MAX_RETRY_AFTER_SECONDS, MIN_RETRY_AFTER_SECONDS, resolveRetryAfterSeconds } from './batchRetryWindow.ts';
+import { runDailyRecommendationWithClaim, supabaseClaimClient, type ClaimClient } from './runWithClaim.ts';
 import { loadSnapshots } from './snapshot.ts';
 import { buildStarterCache, GENERAL_QUESTIONS, generateStarterQuestions, parseStarterCache, STARTER_MAX, STARTER_MIN } from './starterQuestions.ts';
 import type { QuestionnaireResponse, UserSnapshot } from './types.ts';
@@ -866,6 +867,31 @@ await (async () => {
     // loadSnapshots 실패는 lookup_failed(requester_snapshot) 로 잡힌다 — 예외 전파 경로는 claim 자체가 throw 할 때
     const w8 = await runDailyRecommendationWithClaim(dsThrow, mk(['claimed']), RUN, { retries: 0 });
     check('#23 스냅샷 조회 실패 → finish(lookup_failed, requester_snapshot)', w8.kind === 'lookup_failed' && calls.join() === 'claim:claimed,finish:lookup_failed:0:false:null:null:requester_snapshot');
+  }
+
+  // #22 매시간 폴링 — 배치 재확인 창 정책 · claim RPC 인자
+  {
+    check('#22 배치 기본 창은 cron 간격(1시간)보다 짧다 (50분)', BATCH_RETRY_AFTER_SECONDS === 3000 && BATCH_RETRY_AFTER_SECONDS < 3600);
+    check('#22 override 없음/비숫자/범위 밖 → 기본 창', [undefined, null, '', 'abc', NaN, 0, 60, MIN_RETRY_AFTER_SECONDS - 1, MAX_RETRY_AFTER_SECONDS + 1, -5].every((v) => resolveRetryAfterSeconds(v) === BATCH_RETRY_AFTER_SECONDS));
+    check('#22 override 범위 안 → 그대로 (정수화)', resolveRetryAfterSeconds(MIN_RETRY_AFTER_SECONDS) === MIN_RETRY_AFTER_SECONDS && resolveRetryAfterSeconds(MAX_RETRY_AFTER_SECONDS) === MAX_RETRY_AFTER_SECONDS && resolveRetryAfterSeconds(1800.9) === 1800 && resolveRetryAfterSeconds('900') === 900);
+
+    const rpcCalls: { fn: string; args: Record<string, unknown> }[] = [];
+    const fakeDb = {
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ fn, args });
+        return { data: fn === 'recommendation_run_claim' ? { claim: 'skip', result: 'exhausted', cap_reached: false } : null, error: null };
+      },
+    };
+    const FOR_DATE = '2026-09-17';
+    await supabaseClaimClient(fakeDb).claim(ME, FOR_DATE);
+    check('#22 앱(기본) claim 은 p_retry_after_seconds 를 넘기지 않는다 (DB 기본 1시간)', rpcCalls.length === 1 && !('p_retry_after_seconds' in rpcCalls[0].args));
+    rpcCalls.length = 0;
+    await supabaseClaimClient(fakeDb, { retryAfterSeconds: BATCH_RETRY_AFTER_SECONDS }).claim(ME, FOR_DATE);
+    check('#22 배치 claim 은 p_retry_after_seconds=3000 을 넘긴다', rpcCalls.length === 1 && rpcCalls[0].args.p_retry_after_seconds === 3000 && rpcCalls[0].args.p_user_id === ME && rpcCalls[0].args.p_for_date === FOR_DATE);
+    rpcCalls.length = 0;
+    await supabaseClaimClient(fakeDb, { retryAfterSeconds: 0 }).claim(ME, FOR_DATE);
+    await supabaseClaimClient(fakeDb, { retryAfterSeconds: Number.NaN }).claim(ME, FOR_DATE);
+    check('#22 0/NaN 창은 무시하고 DB 기본을 쓴다', rpcCalls.length === 2 && rpcCalls.every((c) => !('p_retry_after_seconds' in c.args)));
   }
 
   // loadSnapshots: 얼굴 벡터·외모 이벤트 없이 스냅샷 생성
