@@ -1,6 +1,6 @@
 import React from 'react';
 import { requireAdmin } from '@/lib/adminAuth';
-import { AUDIT_ACTION_LABEL, type AuditRow } from '@/lib/audit';
+import { actorLabel, AUDIT_ACTION_LABEL, type AuditRow, loadAdminNames } from '@/lib/audit';
 import { adminClient } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
@@ -15,9 +15,10 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
   const db = adminClient();
   let query = db.from('admin_audit_log').select('*').order('created_at', { ascending: false }).limit(300);
   if (q) query = query.or(`actor.ilike.%${q.replace(/[%,]/g, '')}%,action.ilike.%${q.replace(/[%,]/g, '')}%,target_id.ilike.%${q.replace(/[%,]/g, '')}%`);
-  const [{ data: rows }, { data: moderation }] = await Promise.all([
+  const [{ data: rows }, { data: moderation }, names] = await Promise.all([
     query,
     db.from('moderation_actions').select('id, user_id, action, reason, actor, created_at, expires_at').order('created_at', { ascending: false }).limit(100),
+    loadAdminNames(),
   ]);
   const audit = (rows ?? []) as AuditRow[];
   const mod = (moderation ?? []) as ModerationRow[];
@@ -26,7 +27,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
     <div>
       <h1>감사 로그</h1>
       <p className="muted">
-        관리자 웹의 모든 변경 조치와 로그인 이력입니다. 처리자는 로그인 때 입력한 이름, 대상은 id 만 기록합니다 (연락처·원문 없음).
+        관리자 웹의 모든 변경 조치와 로그인 이력입니다. 처리자는 인증된 관리자 계정 id(불변)로 기록되고 이름은 보조 표시입니다. 대상은 id 만 (연락처·원문 없음). 예전 공유 로그인 기록은 입력했던 이름 그대로 남아 있습니다.
       </p>
       <form method="get" style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
         <input type="text" name="q" placeholder="처리자 · 조치 · 대상 id" defaultValue={q} />
@@ -44,7 +45,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
             {audit.map((r) => (
               <tr key={r.id}>
                 <td>{new Date(r.created_at).toLocaleString('ko-KR')}</td>
-                <td>{r.actor}</td>
+                <td>{actorLabel(r.actor, names)}</td>
                 <td>
                   <span className={`badge ${r.action.includes('failed') || r.action.includes('locked') ? 'danger' : ''}`}>
                     {AUDIT_ACTION_LABEL[r.action] ?? r.action}
@@ -73,7 +74,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
             {mod.map((m) => (
               <tr key={m.id}>
                 <td>{new Date(m.created_at).toLocaleString('ko-KR')}</td>
-                <td>{m.actor}</td>
+                <td>{actorLabel(m.actor, names)}</td>
                 <td><span className="badge">{m.action}</span></td>
                 <td className="muted" style={{ fontSize: 12 }}>{m.user_id.slice(0, 8)}</td>
                 <td style={{ maxWidth: 260 }}>{m.reason ?? '—'}</td>

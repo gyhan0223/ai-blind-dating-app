@@ -25,6 +25,7 @@ create table if not exists auth.users (
   email              text unique,
   phone              text unique,
   phone_confirmed_at timestamptz,
+  raw_app_meta_data  jsonb not null default '{}'::jsonb, -- 서버(service role)만 쓰는 app_metadata (0033 관리자 계정 표식)
   created_at         timestamptz not null default now()
 );
 

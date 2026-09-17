@@ -112,6 +112,13 @@ if [[ "${WITH_ADMIN_LOGIN_GUARD_TESTS:-1}" == "1" && -f admin_login_guard_tests.
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash admin_login_guard_concurrency_test.sh
 fi
 
+if [[ "${WITH_ADMIN_ACCOUNTS_TESTS:-1}" == "1" && -f admin_accounts_tests.sql ]]; then
+  echo "running admin accounts tests (#27 — 관리자 계정 앱 사용자 행 없음 · bootstrap 1회 · owner/viewer · 마지막 owner 보호 · 세션 DB 검증(강등/비활성화/취소 즉시 반영) · 구 로그인 게이트 · 서버 전용)"
+  $PSQL -d "$DB_NAME" -f admin_accounts_tests.sql
+  echo "running admin accounts concurrency tests (#27 — 두 owner 동시 강등 → 활성 owner 1명 유지)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash admin_accounts_concurrency_test.sh
+fi
+
 if [[ "${WITH_PUSH_TESTS:-1}" == "1" && -f push_tests.sql ]]; then
   echo "running push tests (#17 — 토큰/설정 RLS · outbox 트리거 · dequeue/mark 서버 전용)"
   $PSQL -d "$DB_NAME" -f push_tests.sql
