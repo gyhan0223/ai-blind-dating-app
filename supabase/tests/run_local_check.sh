@@ -116,6 +116,11 @@ if [[ "${WITH_RECOMMENDATION_RUNS_TESTS:-1}" == "1" && -f recommendation_runs_te
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash recommendation_claim_concurrency_test.sh
 fi
 
+if [[ "${WITH_RECOMMENDATION_BATCH_TESTS:-1}" == "1" && -f recommendation_batch_tests.sql ]]; then
+  echo "running recommendation batch tests (#22/#17 — 대상 재시도 간격(exhausted 1h·failed 15m) · sweep 커서 claim/lease/날짜 변경 · 소개 알림 참조 이전·발송 시점 재확인 · 서버 전용)"
+  $PSQL -d "$DB_NAME" -f recommendation_batch_tests.sql
+fi
+
 if [[ "${WITH_RECOMMENDATION_OBSERVABILITY_TESTS:-1}" == "1" && -f recommendation_observability_tests.sql ]]; then
   echo "running recommendation observability tests (#23 — 전략 이벤트 저장 행 기준 1회 · 적격 후보 수/상한/실패 단계 기록 · 운영 풀 통계 demo 제외·미측정·중앙값 · 클라이언트 호출 불가)"
   $PSQL -d "$DB_NAME" -f recommendation_observability_tests.sql

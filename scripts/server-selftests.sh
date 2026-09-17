@@ -23,6 +23,7 @@ run supabase/functions/_shared/security selftest.ts
 run supabase/functions/_shared/observability selftest.ts
 run supabase/functions/_shared/notifications selftest.ts
 run supabase/functions/_shared/matching selftest.ts
+run supabase/functions/_shared/matching batchSelftest.ts
 run supabase/functions/_shared/face selftest.ts
 run supabase/functions/_shared/purge selftest.ts
 run supabase/functions/_shared/consent selftest.ts
