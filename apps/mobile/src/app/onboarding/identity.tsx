@@ -4,7 +4,7 @@ import { View } from 'react-native';
 import { OnboardingHeader } from '@/components/OnboardingHeader';
 import { Button, ChipGroup, Field, InlineNotice, Screen, Text } from '@/components/ui';
 import { DEV_TOOLS_ENABLED, loadDevModules } from '@/lib/devTools';
-import { isBetaDenied, rateLimitedText, readEdgeError } from '@/lib/edge';
+import { identitySessionErrorText, isBetaDenied, rateLimitedText, readEdgeError } from '@/lib/edge';
 import { advanceOnboarding } from '@/lib/onboarding';
 import { formatPhoneKR } from '@/lib/phone';
 import { useSession } from '@/lib/session';
@@ -50,7 +50,11 @@ export default function IdentityStep() {
 
   const payload = { name: name.trim(), birthDate, carrier: carrier ?? '' };
 
-  /** 서버가 폐쇄 베타 입장 전(403)이라 거부하면 입장 화면으로, 남용 제한(429)이면 안내 문구. 그 외는 false */
+  /**
+   * 서버가 폐쇄 베타 입장 전(403)이라 거부하면 입장 화면으로, 남용 제한(429)이면 안내 문구.
+   * 본인확인 세션 오류(#6 — 세션은 서버가 소유한다): 만료·실패 횟수 초과·타인 세션은 처음(form)부터 다시, 처리 중(409)은 잠시 뒤 재시도.
+   * 그 외는 false (호출자가 기본 문구를 보여준다)
+   */
   const routeIfDenied = async (err: unknown): Promise<boolean> => {
     const e = await readEdgeError(err);
     if (isBetaDenied(e)) {
@@ -60,6 +64,16 @@ export default function IdentityStep() {
     const limited = rateLimitedText(e);
     if (limited) {
       setError(limited);
+      return true;
+    }
+    const sessionText = identitySessionErrorText(e);
+    if (sessionText) {
+      if (e.code === 'session_expired' || e.code === 'too_many_attempts' || e.code === 'invalid_session') {
+        setRequestId(null);
+        setCode('');
+        setStage('form');
+      }
+      setError(sessionText);
       return true;
     }
     return false;
@@ -85,6 +99,7 @@ export default function IdentityStep() {
   const handleConfirmOutcome = async (data: {
     verified?: boolean;
     result?: string;
+    reason?: string;
     maskedPhone?: string | null;
   } | null) => {
     if (data?.verified) {
@@ -104,6 +119,23 @@ export default function IdentityStep() {
         return;
       case 'underage':
         setError('만 19세 이상만 가입할 수 있어요.');
+        return;
+      case 'failed':
+        // 서버가 준 사유 코드만 온다 (Provider 응답 전문 없음). 끝난 세션은 처음부터 다시
+        if (data?.reason === 'too_many_attempts' || data?.reason === 'expired' || data?.reason === 'cancelled') {
+          setRequestId(null);
+          setCode('');
+          setStage('form');
+          setError(
+            data.reason === 'too_many_attempts'
+              ? '인증번호를 여러 번 틀려 이번 인증이 종료됐어요. 다시 요청해 주세요.'
+              : data.reason === 'expired'
+                ? '인증 시간이 지났어요. 다시 요청해 주세요.'
+                : '인증이 취소됐어요. 다시 요청해 주세요.',
+          );
+          return;
+        }
+        setError('인증에 실패했어요. 인증번호를 다시 확인해 주세요.');
         return;
       default:
         setError('인증에 실패했어요. 인증번호를 다시 확인해 주세요.');
@@ -169,8 +201,9 @@ export default function IdentityStep() {
   const recover = async () => {
     setLoading(true);
     setError(null);
+    // 복구는 confirm 이 서버 세션에 남긴 검증 결과로만 진행된다 — 인증번호·입력값을 다시 보내지 않는다 (#6)
     const { data, error: err } = await supabase.functions.invoke('verify-identity', {
-      body: { action: 'recover', requestId, code: code.trim(), ...payload },
+      body: { action: 'recover', requestId },
     });
     setLoading(false);
     if (err || !data?.recovered) {

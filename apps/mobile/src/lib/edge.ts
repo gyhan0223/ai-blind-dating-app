@@ -26,3 +26,30 @@ export function rateLimitedText(e: EdgeError): string | null {
   const sec = e.retryAfterSeconds ?? 60;
   return sec >= 120 ? `요청이 너무 잦아요. 약 ${Math.ceil(sec / 60)}분 뒤에 다시 시도해 주세요.` : `요청이 너무 잦아요. ${sec}초 뒤에 다시 시도해 주세요.`;
 }
+
+/**
+ * verify-identity 세션 오류 (#6) — 서버가 세션을 소유하므로 만료·오용·처리 중·연속 실패를 코드로 돌려준다.
+ * 해당 없으면 null. 문구에 서버 응답 원문·개인정보는 넣지 않는다.
+ */
+export function identitySessionErrorText(e: EdgeError): string | null {
+  switch (e.code) {
+    case 'session_expired':
+      return '인증 시간이 지났어요. 다시 요청해 주세요.';
+    case 'too_many_attempts':
+      return '인증번호를 여러 번 틀려 이번 인증이 종료됐어요. 다시 요청해 주세요.';
+    case 'invalid_session':
+      return '인증 정보를 찾을 수 없어요. 처음부터 다시 진행해 주세요.';
+    case 'session_in_progress':
+      return '인증을 처리하고 있어요. 잠시 후 다시 시도해 주세요.';
+    case 'identity_mismatch':
+      return '이 계정에 이미 다른 본인확인 정보가 연결되어 있어요. 고객센터로 문의해 주세요.';
+    case 'provider_unavailable':
+      return '본인확인 기관에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.';
+    case 'phone_login_required':
+      return '전화번호로 로그인한 계정에서만 복구할 수 있어요.';
+    case 'not_recoverable':
+      return '지금은 이 계정을 복구할 수 없어요. 고객센터로 문의해 주세요.';
+    default:
+      return null;
+  }
+}

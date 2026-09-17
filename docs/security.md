@@ -41,7 +41,7 @@ anon(미로그인) 은 어떤 테이블에서도 행을 읽지 못한다 (테스
 
 | 함수 | 호출자 | 남용 방지 |
 |---|---|---|
-| verify-identity | 사용자 JWT | 베타 입장 확인 → request 5회/10분 · confirm/recover 10회/시간 (사용자당) |
+| verify-identity | 사용자 JWT | 베타 입장 확인 → request 5회/10분 · confirm/recover 10회/시간 (사용자당). 세션은 서버 소유(0032) — JWT 사용자 결속·10분 만료·1회 사용·5회 실패 종료 (`docs/identity-verification.md`) |
 | start-face-liveness | 사용자 JWT | 베타 입장 확인 → 세션 생성 횟수는 DB RPC(`face_liveness_begin_session`) 가 시간/일 상한 |
 | daily-recommendation | 사용자 JWT | 30회/시간 · `recommendation_run_claim` 잠금 |
 | icebreaker | 사용자 JWT | 30회/시간 |
@@ -73,7 +73,7 @@ rate limit 원시 기능: `rate_limit_hit(scope, key, limit, window)` (0023, 고
 
 ## 5. 회귀 테스트가 잡는 것
 
-`security_tests.sql` (서버 전용 테이블 목록에 `account_purge_jobs` · `account_purge_job_events` · `face_asset_cleanup` · `admin_login_locks` 포함)
+`security_tests.sql` (서버 전용 테이블 목록에 `account_purge_jobs` · `account_purge_job_events` · `face_asset_cleanup` · `admin_login_locks` · `identity_verification_sessions` 포함)
 1. RLS 꺼진 public 테이블 → 실패
 2. allowlist 밖의 DEFINER 함수를 authenticated/anon 이 실행 가능 → 실패
 3. 클라이언트가 읽을 수 있는 뷰 → 실패

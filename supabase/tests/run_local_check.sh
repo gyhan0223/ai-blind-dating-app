@@ -31,6 +31,13 @@ if [[ "${WITH_IDENTITY_TESTS:-1}" == "1" && -f identity_tests.sql ]]; then
   $PSQL -d "$DB_NAME" -f identity_tests.sql
 fi
 
+if [[ "${WITH_IDENTITY_SESSION_TESTS:-1}" == "1" && -f identity_sessions_tests.sql ]]; then
+  echo "running identity session tests (#6 — 세션 서버 전용 · 소유자/만료/lease 조건부 점유 · 상태 전이 가드 · relink 0행 · cascade · prune)"
+  $PSQL -d "$DB_NAME" -f identity_sessions_tests.sql
+  echo "running identity concurrency tests (#6 — 두 연결: 같은 identity 동시 insert 1행 · relink 경쟁 0행 · 세션 동시 claim 1행)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash identity_concurrency_test.sh
+fi
+
 if [[ "${WITH_SMS_RATE_LIMIT_TESTS:-1}" == "1" && -f sms_rate_limit_tests.sql ]]; then
   echo "running sms rate limit tests"
   $PSQL -d "$DB_NAME" -f sms_rate_limit_tests.sql

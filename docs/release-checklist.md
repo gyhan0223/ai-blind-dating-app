@@ -50,6 +50,7 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       (V2 destination 이면 `event_id`/`liveness_checks[]` 가 오지 않아 승인이 되지 않는 것이 정상)
 - [ ] Didit 워크플로: Liveness 단계 **하나만** · Active `3D Action & Flash` · 최대 3회 · Face Search 1:N 켜짐 · 신분증/AML/주소/NFC 없음
       (라이브니스 노드가 여러 개면 서버가 fail-closed 로 승인하지 않는다)
+- [ ] (#6) 마이그레이션 `0032_identity_verification_sessions.sql` 이 적용되어 있고 `verify-identity` 가 재배포되어 있다 (0032 이전 DB 에 새 함수를 배포하면 request 가 500 `session_create_failed`). 앱도 같은 릴리스 창에서 (recover 가 requestId 만 보낸다)
 - [ ] (#13/#11/#12/#27) 마이그레이션 `0028_account_purge_jobs.sql` · `0029_face_session_assets.sql` · `0030_face_consents.sql` · `0031_admin_login_guard.sql` 이 적용되어 있고
       `account-purge` · `start-face-liveness` 가 재배포되어 있다 (0029 이전 DB 에 새 `start-face-liveness` 를 배포하면 승인 RPC 의 superseded 규칙이 없다; 0030 이전이면 `start` 가 503 `consent_unavailable`)
 - [ ] (#13) pg_cron 에 `account-purge` batch(일 1회) · `face-asset-cleanup`(`{"face_cleanup":true}`, 1시간) · prune 이 등록되어 있다 (`docs/data-retention.md` 4절)

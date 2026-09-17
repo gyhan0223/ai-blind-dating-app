@@ -98,8 +98,8 @@ APP_ENV ∈ { development, staging }   AND   ALLOW_DEV_LOGIN=1
 
 ## Mock provider 정책 (fail-closed)
 
-본인확인(`verify-identity`)은 현재 Mock provider 로 동작한다. Mock 은 **verificationId 를 검증하지 않고
-아무 6자리 코드나 통과시키므로** production 에서 절대 실행되면 안 된다.
+본인확인(`verify-identity`)은 현재 Mock provider 로 동작한다. Mock 은 **아무 6자리 코드나 통과시키므로** production 에서 절대 실행되면 안 된다.
+(세션 소유·만료·1회 사용은 Provider 와 무관하게 서버 세션(0032, `docs/identity-verification.md`)이 강제한다. 실제 업체는 미선정이다.)
 
 얼굴 인증은 실제 provider **Didit** 이 연동되어 있다 (`docs/face-liveness-didit.md`):
 

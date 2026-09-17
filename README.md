@@ -59,8 +59,8 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0031 순서대로 — 0015~0031 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절, 0027 은 docs/matching-policy.md 12절,
-#   0028 삭제 작업 상태(#13) · 0029 얼굴 세션별 자산/정리 큐(#11) · 0030 얼굴 정보 처리 동의(#12) · 0031 관리자 로그인 제한(#27) — docs/data-retention.md · docs/face-consent.md · docs/security.md)
+# 마이그레이션 적용 (0001 → 0032 순서대로 — 0015~0032 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절, 0027 은 docs/matching-policy.md 12절,
+#   0028 삭제 작업 상태(#13) · 0029 얼굴 세션별 자산/정리 큐(#11) · 0030 얼굴 정보 처리 동의(#12) · 0031 관리자 로그인 제한(#27) · 0032 본인확인 세션(#6) — docs/data-retention.md · docs/face-consent.md · docs/security.md · docs/identity-verification.md)
 supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
@@ -186,8 +186,10 @@ npm run dev                  # http://localhost:3100
 ```bash
 # DB 스키마 + 시드 + RLS 테스트 (Docker 없이 로컬 Postgres 로)
 cd supabase/tests && bash run_local_check.sh
-# 서버 순수 로직 selftest 전부 (env·identity·security·observability·notifications·matching·face·purge·consent·send-sms)
+# 서버 순수 로직 selftest 전부 (env·identity·verify-identity 흐름·security·observability·notifications·matching·face·purge·consent·send-sms)
 bash scripts/server-selftests.sh
+# 본인확인 흐름 (#6 — Provider/DB/Auth/시계 주입: 가입·재인증·복구·동시 가입·탈퇴 복구/재가입·차단 우회·미성년·취소/실패/만료·타인 세션·재전송·부분 실패·PII 비노출)
+cd supabase/functions/_shared/identity && node --experimental-strip-types verifyIdentitySelftest.ts
 # 삭제 작업(#13)·얼굴 자산 정리(#11) — Storage/Didit/auth 를 adapter mock 으로 실패·재시도·동시성·페이지 제한 재현 (실제 Provider 검증 아님)
 cd supabase/functions/_shared/purge && node --experimental-strip-types selftest.ts
 # 얼굴 정보 처리 동의 문서 — 서버 정책과 앱 사본 일치·production 준비 상태 (#12)
@@ -323,7 +325,9 @@ DataSource (supabaseDataSource.ts — Edge / recommendation_db_test.mjs — 로�
 ```
 
 - **1인 1계정 3중 방어**: ① 가입 전 hash 조회(UX 분기) ② insert 시 unique 위반
-  catch(동시 가입 race) ③ **DB `UNIQUE(identity_key_hash)`** — 최종 방어선.
+  catch(동시 가입 race) · relink 0행 갱신도 실패로 처리 ③ **DB `UNIQUE(identity_key_hash)`** — 최종 방어선.
+- **본인확인 세션은 서버가 소유** (#6, `identity_verification_sessions` 0032): requestId 는 서버 세션 id 이고 confirm/recover 는 JWT 사용자 소유·만료 전·미사용 세션에서만 진행한다.
+  recover 는 confirm 이 남긴 서버 검증 결과만 쓴다. 흐름·시나리오별 검증 계층·staging 절차: `docs/identity-verification.md`.
 - **`user_identities` 는 서버 전용**: RLS 정책이 하나도 없어 클라이언트는 접근 불가.
   identity 해시는 어떤 API 응답에도 포함되지 않음. HMAC 은 Edge Function 에서만 수행
   (secret 은 서버 환경변수, 클라이언트 번들 미포함).
