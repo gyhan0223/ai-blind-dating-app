@@ -152,8 +152,8 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       `daily-recommendation` · `daily-recommendation-batch` 가 재배포되어 있으며 pg_cron 에 배치 스케줄이 등록되어 있다 (`select * from cron.job`)
 - [ ] (#22) 같은 계정으로 `daily-recommendation` 을 동시에 두 번 호출해도 오늘 `recommendations` 행이 1건이다. `daily-recommendation-batch` 를 사용자 JWT 로 호출하면 401 이다
 - [ ] (#22/#17) 마이그레이션 `0034_recommendation_batch_sweep.sql`(구 `0032_recommendation_batch_sweep.sql` — 원격에 0032 로 적용된 적이 있는지 `docs/local-supabase-integration.md` 5절로 확인) 적용(`recommendation_batch_cursor` + claim/save RPC, `recommendation_batch_targets` 5인자, `notification_events.recommendation_id`, dequeue `recommendation_valid`) 뒤
-      `daily-recommendation-batch` · `send-push` 재배포. cron 은 `supabase/scripts/schedule-recommendation-cron.sql` 로 교체 — `select jobname, schedule from cron.job` 에 `daily-recommendation-batch` 가 `*/15 * * * *` 로 1건만 있다
-- [ ] (#22) 배포 뒤 30분 안에 `select updated_at, for_date, after, lease_until from recommendation_batch_cursor` 가 갱신되고 `net._http_response` 최근 행이 200 이다. 후보 없는 테스트 계정의 `recommendation_runs.attempts` 가 1시간 뒤 늘어난다
+      `daily-recommendation-batch` · `send-push` 재배포. cron 은 `supabase/scripts/schedule-recommendation-cron.sql` 로 교체 — `select jobname, schedule from cron.job` 에 `daily-recommendation-batch` 가 `*/15 0-12 * * *`(KST 09:00~21:45) 로 1건만 있다
+- [ ] (#22) 배포 뒤(KST 09~21시 사이) 30분 안에 `select updated_at, for_date, after, lease_until from recommendation_batch_cursor` 가 갱신되고 `net._http_response` 최근 행이 200 이다. 후보 없는 테스트 계정의 `recommendation_runs.attempts` 가 1시간 뒤 늘어난다
 - [ ] (#22/#17) **실기기**: 후보 없는 테스트 계정 A 가 앱을 닫아 둔 상태에서 적격 계정 B 를 온보딩·인증 → 1시간 뒤 배치가 A 에게 소개를 저장하고(`recommendations`·`notification_events` 각 1건) 휴대폰에 "오늘의 소개가 도착했어요" 가 오며 탭하면 홈에 소개가 보인다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)
 - [ ] (#23) 마이그레이션 `0027_recommendation_observability.sql` 적용 (`recommendation_runs.eligible_count/recommendation_id/strategy/basis/error_stage`, `recommendation_run_finish` 8인자,
       `recommendations_created_event` 트리거, `recommendation_pool_stats`/`recommendation_run_stats`). 적용 뒤 `select count(*) from analytics_events where event_type='recommendation_created'` = `select count(*) from recommendations`

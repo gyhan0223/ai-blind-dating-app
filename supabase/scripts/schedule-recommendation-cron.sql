@@ -8,15 +8,17 @@
 --   3) 이 파일 전체를 실행한다. **반복 실행해도 같은 이름의 작업이 중복 등록되지 않는다** — 같은 이름은 먼저 내리고 다시 올린다 (교체).
 --
 -- 스케줄
---   daily-recommendation-batch : 하루 전체 15분 간격 (UTC 기준 */15 * * * * = KST 도 동일). 후보 부족(exhausted) 사용자를 1시간 뒤부터,
+--   daily-recommendation-batch : KST 09:00~21:45 낮 시간대 15분 간격 (UTC 00:00~12:45 = '*/15 0-12 * * *'). 후보 부족(exhausted) 사용자를 1시간 뒤부터,
 --                                실패 사용자를 15분 뒤부터 다시 확인한다. 진행 위치는 서버 커서에 저장되어 호출마다 이어진다 (docs/matching-policy.md 10절).
 --                                한 호출은 time_budget_ms(기본 50초) 안에서 멈춘다. pg_net 의 timeout_milliseconds 를 그보다 길게 둔다 (기본 5초는 너무 짧다).
+--                                하루 52회 호출. 대상이 없으면 조회 몇 번으로 끝나므로 비용은 "기다리는 사용자 수" 에 비례한다.
 --   send-push                  : 1분 간격 (docs/push-notifications.md). 이미 등록돼 있으면 같은 정의로 교체된다.
 --   recommendation-runs-prune  : 매일 UTC 18:00 (KST 03:00) 30일 지난 실행 기록 정리.
 --   notification-events-prune  : 매일 UTC 18:30 (KST 03:30) 발송 완료 30일 지난 이벤트 정리.
 --
--- 운영상 변경점: 배치가 하루 전체 도니까 소개가 밤에도 만들어질 수 있고, 그러면 소개 알림도 밤에 울릴 수 있다.
---   (이 저장소에는 야간 알림 정책이 없다 — 조용한 시간대가 필요하면 별도 이슈로 정한다. 임의로 도입하지 않았다.)
+-- 운영상 변경점: 배치는 밤(KST 22:00~08:59)에 돌지 않으므로 배치가 만든 소개 알림은 밤에 울리지 않는다 (제품 결정 2026-09-18 — 낮 시간대만 재확인).
+--   앱을 직접 열어 생성되는 소개(daily-recommendation)·메시지·매치 알림은 시간대와 무관하게 기존대로다. 21:45 이후 후보 부족으로 끝난 사용자는
+--   다음 날 09:00 배치가 새 KST 날짜로 다시 확인한다 (자정을 넘기면 for_date 가 바뀌어 어차피 새 소개 대상이다).
 --
 -- 되돌리기: 맨 아래 "롤백" 절 참고.
 
@@ -36,8 +38,8 @@ where jobname in ('daily-recommendation-batch', 'send-push', 'recommendation-run
 -- ---------------------------------------------------------------------------
 -- 2) 등록
 -- ---------------------------------------------------------------------------
--- 추천 배치 — 하루 전체 15분 간격. body 는 페이지 크기·시간 예산만 (after 는 보내지 않는다: 서버 커서가 이어간다)
-select cron.schedule('daily-recommendation-batch', '*/15 * * * *', $$
+-- 추천 배치 — KST 09:00~21:45 15분 간격 (pg_cron 은 UTC: 0-12시). body 는 페이지 크기·시간 예산만 (after 는 보내지 않는다: 서버 커서가 이어간다)
+select cron.schedule('daily-recommendation-batch', '*/15 0-12 * * *', $$
   select net.http_post(
     url := 'https://<project-ref>.supabase.co/functions/v1/daily-recommendation-batch',
     headers := jsonb_build_object('Content-Type', 'application/json',
@@ -73,9 +75,10 @@ select cron.schedule('notification-events-prune', '30 18 * * *', $$ select publi
 --   select result, count(*) from public.recommendation_runs where for_date = (now() at time zone 'Asia/Seoul')::date group by 1;
 
 -- ---------------------------------------------------------------------------
--- 4) 롤백 — 배치를 예전 스케줄(KST 09:00~09:45)로 되돌리거나 완전히 내린다
+-- 4) 롤백 — 배치 시간대를 바꾸거나 완전히 내린다
 -- ---------------------------------------------------------------------------
---   -- (a) 스케줄만 되돌리기: 시간대 외에는 같은 정의. 배치 함수·커서는 그대로 두어도 안전하다 (커서는 호출마다 이어갈 뿐)
+--   -- (a) 시간대만 바꾸기: 시간대 외에는 같은 정의. 배치 함수·커서는 그대로 두어도 안전하다 (커서는 호출마다 이어갈 뿐)
+--   --     예전 아침 전용 = '*/15 0 * * *' (KST 09:00~09:45), 하루 전체 = '*/15 * * * *' (밤에도 소개·알림이 생길 수 있다)
 --   select cron.unschedule(jobid) from cron.job where jobname = 'daily-recommendation-batch';
 --   select cron.schedule('daily-recommendation-batch', '*/15 0 * * *', $$ ...위와 같은 net.http_post... $$);
 --   -- (b) 완전히 내리기 (앱의 daily-recommendation 은 계속 동작한다 — 사용자가 앱을 열면 생성된다)

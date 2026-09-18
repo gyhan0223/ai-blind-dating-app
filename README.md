@@ -86,7 +86,7 @@ supabase functions deploy start-face-liveness           # 실제 얼굴 라이�
 supabase functions deploy didit-webhook --no-verify-jwt # Didit V3 결과 웹훅 (서명 검증) — 반드시 --no-verify-jwt
 supabase functions deploy admin-face-review             # 관리자 얼굴 인증 검토 (service role 전용 — 관리자 웹이 호출)
 supabase functions deploy daily-recommendation
-supabase functions deploy daily-recommendation-batch  # 스케줄러용 (service role 전용, 하루 전체 15분 간격) — pg_cron 등록은 supabase/scripts/schedule-recommendation-cron.sql · docs/matching-policy.md 10절
+supabase functions deploy daily-recommendation-batch  # 스케줄러용 (service role 전용, KST 09:00~21:45 15분 간격) — pg_cron 등록은 supabase/scripts/schedule-recommendation-cron.sql · docs/matching-policy.md 10절
 supabase functions deploy send-push                     # Push 발송기 (service role 전용, cron 1분) — docs/push-notifications.md
 supabase functions deploy icebreaker
 
