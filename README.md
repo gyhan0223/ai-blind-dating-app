@@ -227,6 +227,8 @@ cd apps/mobile && node --experimental-strip-types scripts/otp-cooldown-selftest.
 # 온보딩 재진입 판정 테스트 (#39 — 외모 데이터 없는 완료 · 'appearance' 단계 사용자 복귀 · 인증 미완료 홈 차단)
 cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-selftest.mjs
 # DB: 인증 전 온보딩 완료 차단 트리거 · 공개 자기소개 제약 (onboarding_guard_tests.sql — 위 run_local_check.sh 에 포함)
+# DB: 앱 요청 재현 — 시드 데모 계정으로 추천 조회/열람/넘기기/수락→매치 · 대화 접근/멱등 전송/읽음/나가기 · 탈퇴/복구 · 신고/차단을
+#     사용자 JWT(RLS) 컨텍스트로 순서대로 실행 (app_flow_tests.sql — run_local_check.sh 마지막 단계)
 # 민감정보 마스킹 테스트 (#20 — 앱·서버 동일 규칙, Sentry 이벤트에서 연락처·원문 제거)
 cd apps/mobile && node --experimental-strip-types scripts/redact-selftest.mjs
 cd supabase/functions/_shared/observability && node --experimental-strip-types selftest.ts

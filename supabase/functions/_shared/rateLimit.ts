@@ -11,7 +11,8 @@ import { checkRateLimit, type RateLimitDecision, type RateLimitRpc } from './sec
 
 export function supabaseRateLimitRpc(db: SupabaseClient): RateLimitRpc {
   return (scope, key, limit, windowSeconds) =>
-    db.rpc('rate_limit_hit', { p_scope: scope, p_key: key, p_limit: limit, p_window_seconds: windowSeconds }) as Promise<{ data: unknown; error: { message: string } | null }>;
+    // supabase-js 의 rpc() 는 thenable 빌더(PostgrestFilterBuilder)라 Promise 로 직접 캐스트할 수 없다 — await 하면 같은 형태를 돌려준다
+    db.rpc('rate_limit_hit', { p_scope: scope, p_key: key, p_limit: limit, p_window_seconds: windowSeconds }) as unknown as Promise<{ data: unknown; error: { message: string } | null }>;
 }
 
 /** 거부 결정을 HTTP 응답으로 (429 + Retry-After, 또는 503) */

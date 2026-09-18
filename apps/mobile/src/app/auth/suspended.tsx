@@ -1,7 +1,8 @@
 import { router } from 'expo-router';
 import React, { useState } from 'react';
 import { View } from 'react-native';
-import { Button, Screen, Text } from '@/components/ui';
+import { Button, InlineNotice, Screen, Text } from '@/components/ui';
+import { deleteAccountErrorText, readEdgeError } from '@/lib/edge';
 import { useSession } from '@/lib/session';
 import { supabase } from '@/lib/supabase';
 import { colors, spacing } from '@/theme/tokens';
@@ -10,18 +11,30 @@ import { colors, spacing } from '@/theme/tokens';
 export default function Suspended() {
   const { appUser, signOut, refreshAppUser } = useSession();
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const status = appUser?.status ?? 'suspended';
 
   const reactivate = async () => {
     setLoading(true);
-    const { data } = await supabase.functions.invoke('delete-account', {
+    setError(null);
+    const { data, error: invokeError } = await supabase.functions.invoke('delete-account', {
       body: { action: 'reactivate' },
     });
-    setLoading(false);
     if (data?.reactivated) {
       await refreshAppUser();
+      setLoading(false);
       router.replace('/');
+      return;
     }
+    // 이미 복구된 계정(not_deleted)이면 상태만 다시 읽어 진입 게이트로 보낸다
+    const e = await readEdgeError(invokeError);
+    setLoading(false);
+    if (e.code === 'not_deleted') {
+      await refreshAppUser();
+      router.replace('/');
+      return;
+    }
+    setError(deleteAccountErrorText(e));
   };
 
   const copy =
@@ -51,6 +64,7 @@ export default function Suspended() {
         </Text>
       </View>
       <View style={{ paddingBottom: spacing.lg, gap: spacing.sm }}>
+        {error && <InlineNotice tone="danger" text={error} />}
         {status === 'deleted' && (
           <Button title="계정 복구하기" onPress={reactivate} loading={loading} />
         )}

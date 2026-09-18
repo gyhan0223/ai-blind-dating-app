@@ -182,4 +182,9 @@ if [[ "${WITH_RECOMMENDATION_DB_TEST:-1}" == "1" && -f recommendation_db_test.mj
   fi
 fi
 
+if [[ "${WITH_APP_FLOW_TESTS:-1}" == "1" && -f app_flow_tests.sql ]]; then
+  echo "running app flow tests (앱 요청 재현 — 추천 조회/넘기기/수락→매치 · 대화 전송/읽음/나가기 · 탈퇴/복구 · 신고/차단; 시드를 바꾸므로 마지막)"
+  $PSQL -d "$DB_NAME" -f app_flow_tests.sql
+fi
+
 echo "OK: schema check passed on $DB_NAME"
