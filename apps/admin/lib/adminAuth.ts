@@ -113,22 +113,30 @@ export async function loginWithEmailPassword(email: string, password: string): P
   return { ok: true, next: r.next };
 }
 
-export type EnrollView = { ok: true; qrCodeSvg: string; secret: string; uri: string } | { ok: false; reason: 'no_pending' | 'unavailable' | 'already_enrolled' };
+export type EnrollView = { ok: true; qrCodeSvg: string; secret: string; uri: string; factorId: string } | { ok: false; reason: 'no_pending' | 'unavailable' | 'already_enrolled' };
 
-/** 등록 화면 — QR·secret 은 이 응답(HTML)에만 실린다. URL·로그·감사에 넣지 않는다 */
+/**
+ * 등록 화면 — QR·secret 은 이 응답(HTML)에만 실린다. URL·로그·감사에 넣지 않는다.
+ * 서버 컴포넌트 렌더 중에 호출되므로 쿠키를 쓰지 않는다 (Next: 쿠키 변경은 서버 액션/Route Handler 에서만 — 실제 로컬 Auth 통합 테스트에서 500 으로 드러남).
+ * 발급한 factor id 는 폼의 숨은 필드로 verify 액션에 전달되고, 코어가 그 id 가 이 사용자의 미검증 factor 인지 GoTrue 에 확인한다.
+ */
 export async function startMfaEnrollment(): Promise<EnrollView> {
   const store = await cookies();
   const r = await runMfaEnrollStart(deps(), store.get(PENDING_COOKIE)?.value, '본심 Admin');
   if (!r.ok) return r;
-  await setPendingCookie(r.pending);
-  return { ok: true, qrCodeSvg: r.qrCodeSvg, secret: r.secret, uri: r.uri };
+  const { verifyToken } = await import('./adminAuthCore');
+  const t = verifyToken(sessionSecret(), r.pending, Date.now(), 'p');
+  const factorId = t && t.k === 'p' && t.fid ? t.fid : '';
+  if (!factorId) return { ok: false, reason: 'unavailable' };
+  return { ok: true, qrCodeSvg: r.qrCodeSvg, secret: r.secret, uri: r.uri, factorId };
 }
 
 export type MfaResult = { ok: true } | { ok: false; reason: 'no_pending' | 'bad_code' | 'locked' | 'unavailable' | 'not_aal2' | 'not_active'; lockedSeconds?: number };
 
-export async function verifyMfaCode(code: string): Promise<MfaResult> {
+/** @param enrollFactorId 등록 화면이 폼에 실어 보낸 factor id (등록 경로에서만 쓰인다 — 코어가 미검증 factor 인지 확인) */
+export async function verifyMfaCode(code: string, enrollFactorId?: string): Promise<MfaResult> {
   const store = await cookies();
-  const r = await runMfaVerify(deps(), store.get(PENDING_COOKIE)?.value, code);
+  const r = await runMfaVerify(deps(), store.get(PENDING_COOKIE)?.value, code, enrollFactorId);
   if (!r.ok) {
     if (r.reason === 'no_pending' || r.reason === 'not_active') await clearPendingCookie();
     return r;

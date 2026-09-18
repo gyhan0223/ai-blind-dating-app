@@ -34,7 +34,7 @@ payload 에도 본문에도 없다. 같은 대화의 여러 메시지는 발송 
 - Expo 티켓 `DeviceNotRegistered` → 토큰 비활성화, 다른 오류 → 재시도.
 - 발송 실패·skip 은 소개 생성과 무관하다 — 새 소개를 만들지 않는다. 앱을 열면 소개는 그대로 보인다.
 
-## 오늘의 소개 알림 — 생성 조건과 발송 시점 재확인 (#22/#17, 0032)
+## 오늘의 소개 알림 — 생성 조건과 발송 시점 재확인 (#22/#17, 0034)
 
 - **생성**: `recommendations` 에 `pending` 행이 insert 될 때만 (`recommendations_notify` 트리거, dedupe `recommendation:<user>:<KST 날짜>` → 하루 1건).
   앱 요청·배치(`daily-recommendation-batch`, 하루 전체 15분 간격 — `docs/matching-policy.md` 10절)·재시도 어느 경로든 같은 키라 중복이 없다.
@@ -42,7 +42,7 @@ payload 에도 본문에도 없다. 같은 대화의 여러 메시지는 발송 
 - **참조**: 이벤트의 `recommendation_id` 가 소개 행을 가리킨다. 발송 전에 그 소개가 만료되고 같은 날 새 pending 소개가 생기면 참조만 새 행으로 옮긴다 (이벤트는 여전히 1건).
   이미 발송된 뒤에는 바꾸지 않는다 (하루 1건 유지 — 두 번째 소개는 알리지 않는다).
 - **발송 시점 재확인**: `notification_events_dequeue` 가 `recommendation_valid` 를 함께 준다 = 소개가 아직 `pending` 이고 상대가 active·온보딩·본인/얼굴/성인 인증이며 두 사람 사이에 차단이 없다.
-  false 면 `buildPushBatch` 가 `recommendation_invalid` 로 닫는다 (만료·차단·제재·탈퇴·이미 확인). 0032 이전 이벤트(참조 없음)·다른 종류는 null → 기존대로.
+  false 면 `buildPushBatch` 가 `recommendation_invalid` 로 닫는다 (만료·차단·제재·탈퇴·이미 확인). 0034 이전 이벤트(참조 없음)·다른 종류는 null → 기존대로.
 - **밤 알림**: 배치가 하루 전체 돌아 소개가 밤에 만들어지면 알림도 밤에 울릴 수 있다. 이 저장소에는 조용한 시간대 정책이 없고 이번에 임의로 도입하지 않았다 — 필요하면 별도 이슈.
 - **보장 범위**: DB 이벤트 생성(하루 1건)은 트리거·unique 로 보장한다. 기기 수신은 Expo/APNs/FCM 에 달려 있고, 티켓 오류 재시도는 같은 이벤트를 다시 보낼 수 있다 — 외부 전달을 정확히 한 번이라고 주장하지 않는다.
 
@@ -74,7 +74,7 @@ payload 에도 본문에도 없다. 같은 대화의 여러 메시지는 발송 
 - 순수 로직: `cd supabase/functions/_shared/notifications && node --experimental-strip-types selftest.ts` (`recommendation_valid=false` → `recommendation_invalid`, null/true → 발송 포함)
 - DB(JWT 컨텍스트): `supabase/tests/push_tests.sql` — 토큰 본인 행만·타인 명의 insert 거부·같은 토큰 재로그인 시 이전 계정에서 이전·
   outbox 트리거(match_created 2건, daily_recommendation 하루 1건)·dequeue 잠금/재시도/expired·발송기 RPC 클라이언트 호출 불가
-- DB(0032): `supabase/tests/recommendation_batch_tests.sql` 3절 — 후보 부족 실행은 이벤트 없음 · 저장 시 1건 · 발송 전 참조 이전 · 발송 후 불변 · 발송 시점 재확인(만료/제재/차단/확인) · KST 날짜별 1건.
+- DB(0034): `supabase/tests/recommendation_batch_tests.sql` 3절 — 후보 부족 실행은 이벤트 없음 · 저장 시 1건 · 발송 전 참조 이전 · 발송 후 불변 · 발송 시점 재확인(만료/제재/차단/확인) · KST 날짜별 1건.
   `recommendation_db_test.mjs` 9절 — 배치가 만든 소개 → 이벤트 1건 → dequeue `recommendation_valid` → 발송 실패·설정 off·토큰 없음은 소개 생성과 무관.
 - **미실행**: 실기기 수신(Android 우선, iOS 는 Apple Developer 이후), 알림 탭 화면 이동, Expo Push API 실제 호출, EAS projectId 연결.
   이 항목이 끝나기 전에는 앱·문서에 "알림이 간다" 고 약속하지 않는다.

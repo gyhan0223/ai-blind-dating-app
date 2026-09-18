@@ -1,5 +1,5 @@
-import type { AdminSession } from './adminAuthCore';
-import { adminClient } from './supabaseAdmin';
+import type { AdminSession } from './adminAuthCore.ts';
+import { adminClient } from './supabaseAdmin.ts';
 
 /**
  * 관리자 감사 기록 (#27) — 모든 변경 조치는 admin_audit_record RPC(service role) 로 남긴다.

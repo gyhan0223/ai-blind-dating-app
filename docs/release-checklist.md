@@ -90,10 +90,12 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 ## Admin
 
 - [ ] `SUPABASE_SERVICE_ROLE_KEY` 가 서버 환경변수로만 존재한다 (`NEXT_PUBLIC_*` 금지, 브라우저 노출 없음)
-- [ ] (#27) 마이그레이션 `0033_admin_accounts.sql` 적용 · `SUPABASE_ANON_KEY` · `ADMIN_SESSION_SECRET`(**32자 이상**) 설정 · `node scripts/admin-bootstrap.mjs create-owner` 로 첫 owner 생성 · 그 owner 가 로그인해 인증 앱(TOTP) 등록 · `/admins` 에 owner 가 보인다 (`docs/admin-auth.md` 순서)
+- [ ] 원격 migration 이력을 사람이 확인했다: `supabase migration list --linked` 에서 `0032` 가 무엇으로 기록돼 있는지와 `recommendation_batch_cursor` 존재 여부 → `docs/local-supabase-integration.md` 5절 표대로 처리. `0032_recommendation_batch_sweep.sql` 은 `0034` 로 옮겨졌다 (같은 번호 충돌). `migration repair` 는 백업·확인 뒤에만
+- [ ] `node supabase/scripts/check-migration-versions.mjs` 가 통과한다 (버전 중복 없음) · CI `db` · `supabase-integration` job 이 초록이다 (실제 로컬 Supabase 스택에서 CLI 경로 migration 이력 + 관리자 Auth 통합)
+- [ ] (#27) 마이그레이션 `0033_admin_accounts.sql` · **`0035_admin_accounts_gotrue_metadata.sql`** 적용 (0035 없이는 GoTrue 로 만든 관리자에 `public.users` 행이 생겨 `/admins` 추가가 `app_user_not_allowed` 로 거부된다. 적용 뒤 `select count(*) from public.users u join admin_members m on m.user_id=u.id` → 0) · `SUPABASE_ANON_KEY` · `ADMIN_SESSION_SECRET`(**32자 이상**) 설정 · `node scripts/admin-bootstrap.mjs create-owner` 로 첫 owner 생성 · 그 owner 가 로그인해 인증 앱(TOTP) 등록 · `/admins` 에 owner 가 보인다 (`docs/admin-auth.md` 순서)
 - [ ] (#27) 전환이 끝났으면 `ADMIN_LEGACY_PASSWORD_LOGIN` · `ADMIN_PASSWORD` 를 지웠다. 로그인 화면에 "구 공유 비밀번호 로그인" 이 보이지 않고, 예전 쿠키로는 어떤 관리자 페이지도 열리지 않는다
-- [ ] (#27) viewer 계정으로 `/users` 의 정지 버튼·`/beta` 의 초대코드 발급·`/admins` 가 보이지 않고, 서버 액션을 직접 호출해도 대시보드로 돌아온다(`?denied=1`). 이메일·연락처·초대코드가 마스킹된다 — **실제 배포에서 미수행**
-- [ ] (#27) owner 가 자기 자신을 viewer 로 바꾸거나 비활성화하려 하면 "마지막 활성 owner" 로 거부된다. 다른 관리자를 비활성화하면 그 관리자의 열린 탭이 즉시 /login 으로 간다 — **실제 배포에서 미수행**
+- [ ] (#27) viewer 계정으로 `/users` 의 정지 버튼·`/beta` 의 초대코드 발급·`/admins` 가 보이지 않고, 서버 액션을 직접 호출해도 대시보드로 돌아온다(`?denied=1`). 이메일·연락처·초대코드가 마스킹된다 — **로컬 실제 스택(GoTrue·Next)에서 통합 테스트로 확인(2026-09-18) · 실제 배포에서 미수행**
+- [ ] (#27) owner 가 자기 자신을 viewer 로 바꾸거나 비활성화하려 하면 "마지막 활성 owner" 로 거부된다. 다른 관리자를 비활성화하면 그 관리자의 열린 탭이 즉시 /login 으로 간다 — **로컬 실제 스택에서 통합 테스트로 확인 · 실제 배포·실제 브라우저에서 미수행**
 - [ ] (#27) 관리자 웹이 신뢰할 수 있는 리버스 프록시 뒤에 있으면 `ADMIN_TRUST_PROXY_HEADERS=1`, 아니면 설정하지 않는다 (`docs/security.md` 4절)
 - [ ] (#27) 두 인스턴스(또는 재시작 전후)에서 잘못된 비밀번호를 3회 + 2회 입력하면 5회째에 잠기고, `admin_login_locks` 에 원문 IP 가 없다.
       DB 를 끊고 로그인하면 "로그인 제한을 확인할 수 없어 로그인하지 않았습니다" 가 뜬다 — **실제 배포에서 미수행**
@@ -149,7 +151,7 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#22/#23) 마이그레이션 `0017_recommendation_runs.sql` 이 적용되어 있고(`recommendation_runs`, `recommendation_run_claim/finish`, `recommendation_batch_targets`, recommendations unique 변경),
       `daily-recommendation` · `daily-recommendation-batch` 가 재배포되어 있으며 pg_cron 에 배치 스케줄이 등록되어 있다 (`select * from cron.job`)
 - [ ] (#22) 같은 계정으로 `daily-recommendation` 을 동시에 두 번 호출해도 오늘 `recommendations` 행이 1건이다. `daily-recommendation-batch` 를 사용자 JWT 로 호출하면 401 이다
-- [ ] (#22/#17) 마이그레이션 `0032_recommendation_batch_sweep.sql` 적용(`recommendation_batch_cursor` + claim/save RPC, `recommendation_batch_targets` 5인자, `notification_events.recommendation_id`, dequeue `recommendation_valid`) 뒤
+- [ ] (#22/#17) 마이그레이션 `0034_recommendation_batch_sweep.sql`(구 `0032_recommendation_batch_sweep.sql` — 원격에 0032 로 적용된 적이 있는지 `docs/local-supabase-integration.md` 5절로 확인) 적용(`recommendation_batch_cursor` + claim/save RPC, `recommendation_batch_targets` 5인자, `notification_events.recommendation_id`, dequeue `recommendation_valid`) 뒤
       `daily-recommendation-batch` · `send-push` 재배포. cron 은 `supabase/scripts/schedule-recommendation-cron.sql` 로 교체 — `select jobname, schedule from cron.job` 에 `daily-recommendation-batch` 가 `*/15 * * * *` 로 1건만 있다
 - [ ] (#22) 배포 뒤 30분 안에 `select updated_at, for_date, after, lease_until from recommendation_batch_cursor` 가 갱신되고 `net._http_response` 최근 행이 200 이다. 후보 없는 테스트 계정의 `recommendation_runs.attempts` 가 1시간 뒤 늘어난다
 - [ ] (#22/#17) **실기기**: 후보 없는 테스트 계정 A 가 앱을 닫아 둔 상태에서 적격 계정 B 를 온보딩·인증 → 1시간 뒤 배치가 A 에게 소개를 저장하고(`recommendations`·`notification_events` 각 1건) 휴대폰에 "오늘의 소개가 도착했어요" 가 오며 탭하면 홈에 소개가 보인다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)

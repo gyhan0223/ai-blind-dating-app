@@ -90,7 +90,7 @@ rate limit 원시 기능: `rate_limit_hit(scope, key, limit, window)` (0023, 고
 8. `rate_limit_hit` / `admin_audit_record` 를 사용자 JWT 로 실행 → 실패
 
 `profile_edit_tests.sql` (0024) · `beta_tests.sql` (0025) 는 각 도메인의 서버 관리 컬럼과 RPC 범위를 검증한다.
-`admin_accounts_tests.sql` · `admin_accounts_concurrency_test.sh` (0033) · `apps/admin/scripts/admin-auth-selftest.mjs` (77 검사 — 비관리자/미로그인 차단 · role 위조 · MFA 미완료 세션 · 만료/변조 · 강등/비활성화/취소 즉시 반영 · 실패 제한 · 장애 시 거부 · 재인증 · 구 로그인 게이트 · secret/코드 비노출).
+`admin_accounts_tests.sql`(7절: GoTrue createUser 의 metadata 적용 순서 재현 — 0035) · `admin_accounts_concurrency_test.sh` (0033) · `apps/admin/scripts/admin-auth-integration.mjs` (실제 로컬 GoTrue·PostgREST·Next — 155 검사, `docs/local-supabase-integration.md`) · `apps/admin/scripts/admin-auth-selftest.mjs` (82 검사 — 비관리자/미로그인 차단 · role 위조 · MFA 미완료 세션 · 만료/변조 · 강등/비활성화/취소 즉시 반영 · 실패 제한 · 장애 시 거부 · 재인증 · 구 로그인 게이트 · secret/코드 비노출).
 
 ## 6. 남은 것 (이 저장소 밖 · 후속)
 

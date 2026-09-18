@@ -95,13 +95,13 @@ check('chunk', chunk([1, 2, 3, 4, 5], 2).map((c) => c.length).join() === '2,2,1'
   check('beta_admitted 발송 · 고정 문구', r.messages.length === 1 && r.messages[0].message.body === PUSH_TEXT.beta_admitted.body && Object.keys(r.messages[0].message.data).join() === 'kind');
 }
 
-// #22/#17 (0032) 오늘의 소개 — 발송 시점 재확인: 추천이 무효면 보내지 않는다. 참조 없음(null)·다른 종류는 영향 없음
+// #22/#17 (0034) 오늘의 소개 — 발송 시점 재확인: 추천이 무효면 보내지 않는다. 참조 없음(null)·다른 종류는 영향 없음
 {
   const daily = (id: number, valid: boolean | null | undefined) => ev({ id, kind: 'daily_recommendation', match_id: null, conversation_id: null, recommendation_valid: valid });
   const r = buildPushBatch([daily(1, true), daily(2, false), daily(3, null), daily(4, undefined), ev({ id: 5, recommendation_valid: false })], NOW);
   const reasons = Object.fromEntries(r.skipped.map((s) => [s.reason, s.ids]));
   check('추천 무효(false) → recommendation_invalid 로 닫힘, 발송 없음', reasons.recommendation_invalid?.join() === '2');
-  check('유효(true)·0032 이전(null/undefined) 소개 이벤트는 발송', r.messages.filter((m) => m.message.data.kind === 'daily_recommendation').map((m) => m.eventIds.join()).sort().join() === '1,3,4');
+  check('유효(true)·0034 이전(null/undefined) 소개 이벤트는 발송', r.messages.filter((m) => m.message.data.kind === 'daily_recommendation').map((m) => m.eventIds.join()).sort().join() === '1,3,4');
   check('다른 종류(new_message)는 recommendation_valid 를 보지 않는다', r.messages.some((m) => m.eventIds.join() === '5'));
   // 무효 소개는 skip 우선순위와 무관하게 발송되지 않는다 (토큰이 있어도)
   const r2 = buildPushBatch([daily(6, false)], NOW);

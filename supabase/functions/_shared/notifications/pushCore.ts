@@ -7,7 +7,7 @@
  *  * data 에는 앱이 화면을 열 때 필요한 kind·match_id·conversation_id 만 담는다 (deep link).
  *  * 같은 수신자·같은 대화의 new_message 이벤트는 한 번에 하나로 묶는다 (연타 방지). 이벤트 id 는 모두 delivered 처리.
  *  * 토큰 없음 / 설정 off / 수신자 비활성 → 발송하지 않고 skipped 로 닫는다 (재시도하지 않는다).
- *  * 오늘의 소개: 발송 시점에 추천이 이미 pending 이 아니거나(만료·확인) 상대가 무효(제재·탈퇴·차단)면 보내지 않는다 (recommendation_invalid, 0032).
+ *  * 오늘의 소개: 발송 시점에 추천이 이미 pending 이 아니거나(만료·확인) 상대가 무효(제재·탈퇴·차단)면 보내지 않는다 (recommendation_invalid, 0034_recommendation_batch_sweep).
  *    발송 실패·skip 은 소개 생성과 무관하다 — 새 소개를 만들지 않는다.
  */
 
@@ -25,8 +25,8 @@ export interface DequeuedEvent {
   pref_enabled: boolean;
   tokens: { token: string; platform: string }[];
   /**
-   * daily_recommendation 전용 (0032): 발송 시점에 이벤트가 가리키는 추천이 아직 pending 이고 상대가 유효(active·인증·차단 없음)한지.
-   * false 면 보내지 않는다 (만료·차단·제재·탈퇴·이미 확인). 0032 이전 이벤트·다른 종류는 null/undefined → 기존대로 발송.
+   * daily_recommendation 전용 (0034): 발송 시점에 이벤트가 가리키는 추천이 아직 pending 이고 상대가 유효(active·인증·차단 없음)한지.
+   * false 면 보내지 않는다 (만료·차단·제재·탈퇴·이미 확인). 0034 이전 이벤트·다른 종류는 null/undefined → 기존대로 발송.
    */
   recommendation_valid?: boolean | null;
 }

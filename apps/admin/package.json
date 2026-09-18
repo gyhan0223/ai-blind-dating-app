@@ -11,6 +11,7 @@
     "selftest": "node --experimental-strip-types scripts/admin-session-selftest.mjs && node --experimental-strip-types scripts/admin-auth-selftest.mjs",
     "bundle:check": "node scripts/check-admin-bundle.mjs",
     "bundle:check:selfcheck": "node scripts/check-admin-bundle.mjs --selfcheck",
+    "integration:auth": "node --experimental-strip-types scripts/admin-auth-integration.mjs",
     "admin:bootstrap": "node scripts/admin-bootstrap.mjs"
   },
   "dependencies": {

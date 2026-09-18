@@ -2,7 +2,7 @@
 
 관리자 웹(`apps/admin`)의 로그인이 "공유 비밀번호 + 입력한 이름" 에서 "개인 계정 + 인증 앱(TOTP) + owner/viewer 역할" 로 바뀐다.
 코드: `apps/admin/lib/adminAuthCore.ts`(흐름·판정, 순수) · `supabaseAdminAuth.ts`(GoTrue/DB 어댑터) · `adminAuth.ts`(Next 쿠키·redirect) · `adminMembers.ts`(관리자 관리) ·
-`supabase/migrations/0033_admin_accounts.sql`(membership·세션·RPC) · `scripts/admin-bootstrap.mjs`(서버 전용 bootstrap/복구).
+`supabase/migrations/0033_admin_accounts.sql`(membership·세션·RPC) · `0035_admin_accounts_gotrue_metadata.sql`(GoTrue createUser 의 metadata 적용 순서 대응 — 관리자 계정에 앱 사용자 행 없음 보장) · `scripts/admin-bootstrap.mjs`(서버 전용 bootstrap/복구).
 
 ## 1. 구조
 
@@ -41,7 +41,7 @@ TOTP 코드 ──GoTrue mfa.challenge/verify──▶ aal2 토큰 ──서버�
 ## 2. 첫 설정 (bootstrap) — 서버 전용
 
 ```bash
-# 0) DB 에 0033 적용 (run_local_check.sh 또는 supabase db push)
+# 0) DB 에 0033 + 0035 적용 (supabase db push — 0035 없이는 GoTrue 로 만든 관리자에 앱 사용자 행이 생겨 /admins 추가가 app_user_not_allowed 로 거부된다)
 # 1) 관리자 웹 환경변수: SUPABASE_URL · SUPABASE_SERVICE_ROLE_KEY · SUPABASE_ANON_KEY · ADMIN_SESSION_SECRET(32자+)
 # 2) 첫 owner — 활성 owner 가 없을 때만 성공한다. 비밀번호는 프롬프트(표시 안 됨)로 입력
 cd apps/admin
@@ -78,6 +78,7 @@ Remove-Item Env:SUPABASE_SERVICE_ROLE_KEY
 | 비밀번호 분실 | (미구현) owner 가 `/admins` 에서 새 비밀번호를 줄 수 없다 — Supabase Dashboard 에서 Auth 사용자의 비밀번호를 재설정하거나 계정을 새로 만든다. 이메일 재설정 링크는 Dashboard SMTP 설정이 필요해 이번 범위 밖 |
 
 QR·secret 은 등록 화면 HTML 에만 실린다. 화면을 새로고침하면 이전 미검증 factor 는 지워지고 새 것이 발급된다. 코드 실패 5회 → 15분 잠금.
+등록 화면은 서버 컴포넌트 렌더 중이라 쿠키를 쓰지 않는다 — 발급한 factor id 는 폼의 숨은 필드(`fid`)로 검증 액션에 전달되고, 서버가 그 id 가 이 계정의 **미검증** factor 인지 GoTrue 에 확인한 뒤에만 challenge/verify 한다 (pending 쿠키에 factor 가 있는 로그인 검증 경로에서는 폼 값을 무시한다).
 
 ## 4. 전환 순서 (구 공유 비밀번호 → 개인 계정) 와 되돌리기
 
@@ -97,7 +98,7 @@ QR·secret 은 등록 화면 HTML 에만 실린다. 화면을 새로고침하면
 로컬에서 실행한 것:
 
 ```bash
-cd apps/admin && npm run selftest          # admin-session (53) · admin-auth (77) — mock Provider/Directory
+cd apps/admin && npm run selftest          # admin-session (53) · admin-auth (82) — mock Provider/Directory
 cd supabase/tests && bash run_local_check.sh   # admin_accounts_tests.sql · admin_accounts_concurrency_test.sh (두 연결) · security_tests (서버 전용 테이블)
 cd apps/admin && npm run bundle:check:selfcheck && npm run build && npm run bundle:check
 ```
@@ -128,5 +129,19 @@ cd apps\admin; npm run bundle:check
 | 공개 정책·삭제 안내 페이지 접근 유지 | `/policy/[slug]` · `/delete-account` 는 `requireAdmin` 을 부르지 않음 (코드) · next build 가 policy 를 정적 생성 | 코드 |
 | 기존 신고·삭제·얼굴 검토·베타 운영의 owner 정상 경로 | 서버 액션은 `requireOwner` 만 추가, 도메인 RPC 호출 동일. 도메인 SQL 테스트(moderation/deletion/face/beta) 그대로 통과 | DB |
 
-**실행하지 않은 것**: 실제 Supabase Auth(GoTrue) 와의 통합 — 로컬 Supabase 를 띄우지 않았다. staging 에서 2절 → 3절 → viewer 로그인 → owner 가 viewer 비활성화 → viewer 탭 즉시 /login 을 확인해야 한다 (release checklist).
-GoTrue MFA 계약은 supabase-js 2.112 타입 정의와 공식 문서(auth-mfa)로 확인했다: `enroll` 이 unverified factor 와 `qr_code/secret/uri` 를 주고, `verify` 가 aal2 세션을 돌려주며, `getAuthenticatorAssuranceLevel(jwt)` 가 서버에서 수준을 조회한다.
+위 표는 **mock**(가짜 Provider/Directory · auth 스텁) 기준이다. 실제 GoTrue·PostgREST·실제 Next 서버를 쓰는 통합 검증은 별도 경로다:
+
+```bash
+bash supabase/tests/run_supabase_integration.sh      # Docker + Supabase CLI 2.117.0 — docs/local-supabase-integration.md
+```
+
+| | mock 경로 (`npm run selftest` · `run_local_check.sh`) | 실제 스택 경로 (`run_supabase_integration.sh` · `npm run integration:auth`) |
+|---|---|---|
+| GoTrue | 가짜 Provider (코드 `123456`) | 실제 GoTrue v2.196.0: TOTP enroll/challenge/verify · `getAuthenticatorAssuranceLevel` · admin createUser/deleteFactor |
+| DB | auth 스텁 + 실제 RPC(psql) | 실제 auth 스키마 + PostgREST(service role) 로 RPC/테이블 |
+| 관리자 웹 | 없음 (코어 함수만) | 실제 `next start`: 로그인/MFA 폼 POST · 쿠키 · 보호 페이지 · mutation 서버 액션 · 로그아웃 |
+| bootstrap | RPC 만 | 실제 `admin-bootstrap.mjs` 실행 (재-bootstrap 거부 포함) |
+| 잡아낸 것 | 판정 규칙 회귀 | **GoTrue 가 app_metadata 를 insert 뒤 update 로 넣어 관리자 계정에 앱 사용자 행이 생기던 결함(0035)** · **등록 화면의 렌더 중 쿠키 쓰기 500** (`docs/local-supabase-integration.md` 4절) |
+
+통합 테스트가 다루지 않는 것: 실제 배포 환경(리버스 프록시 · `ADMIN_TRUST_PROXY_HEADERS`) · 실제 브라우저 UI · 본인확인/SMS/Didit. release checklist 의 "실제 배포에서 미수행" 항목은 그대로 남는다.
+GoTrue MFA 계약(`enroll` → unverified factor + `qr_code/secret/uri`, `verify` → aal2 세션, `getAuthenticatorAssuranceLevel(jwt)`)은 실제 GoTrue 로 확인했다.
