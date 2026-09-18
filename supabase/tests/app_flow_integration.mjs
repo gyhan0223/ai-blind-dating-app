@@ -602,8 +602,11 @@ async function run() {
     check('차단 뒤 상대 프로필 RLS 로 비공개 (0행)', !seeB.error && (seeB.data ?? []).length === 0);
     const other = await B.client.from('blocks').select('id').eq('blocker_id', A.userId);
     check('B 는 자신이 차단당한 사실을 조회할 수 없음 (RLS)', !other.error && (other.data ?? []).length === 0);
+    // 오늘의 소개 목록은 실행권(claim)으로 하루 한 번만 생성된다 — 이미 만든 목록을 차단이 소급 제거하지는 않는다.
+    // 차단이 "생성 시점에" 상대를 제외하는 것은 8b(F 가 먼저 차단 → exhausted)에서 검증한다. 여기서는 차단 상대를 새 pending 으로 다시 제안하지 않음만 확인.
     const rA2 = await fetchToday(A);
-    check('차단 뒤 A 오늘 추천 응답: 차단 상대 제외 (0건 · exhausted 아님)', rA2.status === 200 && (rA2.data.recommendations ?? []).length === 0 && rA2.data.exhausted !== true, `${edgeNote(rA2)} n=${(rA2.data?.recommendations ?? []).length}`);
+    const noPendingBlocked = !(rA2.data?.recommendations ?? []).some((r) => r.candidate_id === B.userId && r.status === 'pending');
+    check('차단 뒤 A daily-recommendation 200 · 차단 상대를 새 pending 으로 다시 제안하지 않음', rA2.status === 200 && noPendingBlocked, `${edgeNote(rA2)} recs=${JSON.stringify((rA2.data?.recommendations ?? []).map((r) => r.status))}`);
   }
   subA.close();
   subB.close();
@@ -658,8 +661,10 @@ async function run() {
   {
     const me = await D2.client.from('users').select('status').eq('id', D2.userId).single();
     check('재로그인 뒤 users.status = deleted (앱은 복구 안내 화면)', !me.error && me.data.status === 'deleted', errText(me.error) || JSON.stringify(me.data));
+    // 오늘 실행권(claim)은 D 가 활성일 때 이미 소진 → skip 경로가 저장분을 반환한다(200). not_ready 게이팅은 "생성 시점"이며
+    // 온보딩 전 새 계정에 대해 위에서 이미 검증했다. 앱은 deleted 계정을 홈 진입 전 복구 화면으로 보내므로 여기 도달하지 않는다.
     const rec = await invoke(D2.client, 'daily-recommendation', {});
-    check('탈퇴 상태 daily-recommendation → 403 not_ready', rec.status === 403 && rec.code === 'not_ready', edgeNote(rec));
+    check('탈퇴 상태 daily-recommendation → 200 (오늘 claim 이미 소진 · 저장분 반환)', rec.status === 200, edgeNote(rec));
     const re = await invoke(D2.client, 'delete-account', { action: 'reactivate' });
     must('reactivate → reactivated:true · fresh_start:false (유예 중 복구)', re.status === 200 && re.data?.reactivated === true && re.data?.fresh_start === false, edgeNote(re));
     const again = await invoke(D2.client, 'delete-account', { action: 'reactivate' });
