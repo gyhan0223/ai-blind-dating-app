@@ -16,7 +16,7 @@
  *  * body.after 를 명시하면(null 포함) 저장된 커서 대신 거기서 시작한다 — 수동 실행용. 평소 cron 은 보내지 않는다.
  *  * 후보 부족으로 끝난 사용자는 그날 소개를 받은 것으로 치지 않는다 — 1시간 뒤 다시 대상이 되어, 앱을 열지 않아도
  *    적격 후보가 생기면 소개가 저장되고 outbox 트리거(recommendations_notify)가 알림 이벤트를 만든다 (#17 send-push).
- *  * 스케줄: 하루 전체 15분 간격 (docs/matching-policy.md 10절, supabase/scripts/schedule-recommendation-cron.sql).
+ *  * 스케줄: KST 09:00~21:45 15분 간격 — 밤에는 돌지 않는다 (docs/matching-policy.md 10절, supabase/scripts/schedule-recommendation-cron.sql).
  *    앱은 여전히 daily-recommendation 을 호출하므로 배치가 아직 안 돌았어도 열면 바로 생성된다.
  */
 import { corsHeaders, json, requireServiceRole, serviceClient } from '../_shared/http.ts';

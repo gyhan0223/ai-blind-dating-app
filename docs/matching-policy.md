@@ -133,10 +133,11 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 - pending 추천: 보존하되 반환 시 6절 재검증을 거친다. accepted/skipped/매치·채팅·좋아요: 보존.
 - 새 계산은 배포 시점 이후 생성되는 추천부터 적용된다. 과거 결과까지 외모와 무관했다고 주장하지 않는다.
 
-## 10. 스케줄러 (#22) — `daily-recommendation-batch` · 하루 전체 상시 재확인
+## 10. 스케줄러 (#22) — `daily-recommendation-batch` · 낮 시간대(KST 09~21시) 상시 재확인
 
-후보 부족으로 대기 중인 사용자는 **앱을 열지 않아도** 서버가 주기적으로 다시 확인한다. 배치는 하루 전체(15분 간격) 돌며,
-같은 사용자에 대한 재탐색 간격(exhausted 뒤 1시간)·앱 요청과의 잠금·하루 한 명 제한은 그대로다.
+후보 부족으로 대기 중인 사용자는 **앱을 열지 않아도** 서버가 주기적으로 다시 확인한다. 배치는 KST 09:00~21:45 사이 15분 간격으로 돌며
+(제품 결정 2026-09-18: 밤에는 돌리지 않는다), 같은 사용자에 대한 재탐색 간격(exhausted 뒤 1시간)·앱 요청과의 잠금·하루 한 명 제한은 그대로다.
+후보 부족 사용자 한 명은 낮 동안 사실상 매시간 한 번(1시간 간격이 지난 첫 15분 호출에서) 다시 확인된다.
 
 - service role 로만 호출되는 Edge Function. 순수 오케스트레이션은 `_shared/matching/batchSweep.ts`(`runBatchSweep`) — 시계·커서·대상 조회를 주입받아 selftest 로 검증한다.
 - **대상** `recommendation_batch_targets(오늘, after, limit, exhausted_retry=3600, failed_retry=900)`: 자격(active·온보딩·인증·성인) 있고, 오늘(KST) 추천이 없고, 진행 중 매치 3개 미만이고,
@@ -158,9 +159,9 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
   롤백(예전 시간대로 되돌리기·완전히 내리기)이 파일 끝에 있다. 요지:
 
   ```sql
-  -- 하루 전체 15분 간격 (예전: '*/15 0 * * *' = KST 09:00~09:45 만 — 대기 사용자 재확인이 되지 않았다)
+  -- KST 09:00~21:45 15분 간격 = UTC 0-12시 (예전: '*/15 0 * * *' = KST 09:00~09:45 만 — 대기 사용자 재확인이 되지 않았다)
   select cron.unschedule(jobid) from cron.job where jobname = 'daily-recommendation-batch';
-  select cron.schedule('daily-recommendation-batch', '*/15 * * * *', $$
+  select cron.schedule('daily-recommendation-batch', '*/15 0-12 * * *', $$
     select net.http_post(
       url := 'https://<project-ref>.supabase.co/functions/v1/daily-recommendation-batch',
       headers := jsonb_build_object('Content-Type', 'application/json',
@@ -170,9 +171,11 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
   $$);
   select cron.schedule('recommendation-runs-prune', '0 18 * * *', $$ select public.recommendation_runs_prune(interval '30 days') $$);
   ```
-- **운영상 영향** (15분 × 하루 96회): 호출마다 대상 조회 1회(+페이지당 1회) 와 커서 RPC 2~3회가 늘고, 대상 사용자마다 후보 스캔(최대 500명)이 돈다.
-  대상이 없으면 호출은 조회 몇 번으로 끝난다. 후보 부족 사용자 N 명은 시간당 최대 N 번 스캔된다 (앱을 열든 말든 1시간에 한 번 — 앱 재요청은 스캔을 더 만들지 않는다).
-  밤에도 소개가 만들어질 수 있으므로 **소개 알림이 밤에 울릴 수 있다** — 이 저장소에는 야간 알림 정책이 없고 이번에 임의로 도입하지 않았다(필요하면 별도 이슈).
+- **운영상 영향** (15분 × 13시간 = 하루 52회): 호출마다 대상 조회 1회(+페이지당 1회) 와 커서 RPC 2~3회가 늘고, 대상 사용자마다 후보 스캔(최대 500명)이 돈다.
+  대상이 없으면 호출은 조회 몇 번으로 끝난다. 후보 부족 사용자 N 명은 시간당 최대 N 번, 하루 최대 13번 스캔된다 (앱을 열든 말든 1시간에 한 번 — 앱 재요청은 스캔을 더 만들지 않는다).
+  초기 규모(수십~수백 명)에서는 무시할 수준이며, 한 사용자 스캔은 조회 10여 개 + 후보 최대 500명 평가다.
+- **밤 시간대**: 배치가 KST 22:00~08:59 에 돌지 않으므로 **배치가 만든 소개 알림은 밤에 울리지 않는다**. 앱을 직접 열어 생성되는 소개(`daily-recommendation`)와
+  메시지·매치·만남 알림은 시간대와 무관하게 기존대로다(조용한 시간대 정책은 별도). 21:45 이후 후보 부족으로 끝난 사용자는 자정에 KST 날짜가 바뀌므로 다음 날 09:00 배치가 새 날짜로 확인한다.
 - 배포: `0017_recommendation_runs.sql` → `0027_recommendation_observability.sql` → `0034_recommendation_batch_sweep.sql` → `supabase functions deploy daily-recommendation daily-recommendation-batch send-push` → cron 교체 (14절).
   0017 은 `recommendations` 의 unique 제약을 바꾸므로 seed 의 `on conflict (user_id, candidate_id, for_date)` 와 같이 배포한다.
 
@@ -310,7 +313,7 @@ supabase functions deploy daily-recommendation-batch
 
 | 문제 | 수정 |
 |---|---|
-| 배치 cron 예시가 KST 09:00~09:45 만 돌아 후보 부족 사용자를 1시간 뒤 다시 확인하려면 앱을 열어야 했다 | 하루 전체 15분 간격 + 등록 스크립트(`supabase/scripts/schedule-recommendation-cron.sql`, 멱등·롤백 포함). pg_net `timeout_milliseconds` 를 호출 길이보다 길게 |
+| 배치 cron 예시가 KST 09:00~09:45 만 돌아 후보 부족 사용자를 1시간 뒤 다시 확인하려면 앱을 열어야 했다 | KST 09:00~21:45 15분 간격(밤 제외 — 2026-09-18 결정) + 등록 스크립트(`supabase/scripts/schedule-recommendation-cron.sql`, 멱등·롤백 포함). pg_net `timeout_milliseconds` 를 호출 길이보다 길게 |
 | 배치가 `next_after` 를 돌려줄 뿐 다음 호출은 항상 id 처음부터 → 대상이 한 호출 용량보다 많으면 뒤쪽 사용자가 밀림 | 서버 커서(`recommendation_batch_cursor`, lease)로 호출마다 이어감. 시간 예산·최대 페이지·날짜 변경에서 안전하게 멈추고 재개 (`batchSweep.ts`) |
 | `failed` 실행이 간격 없이 매 호출 다시 대상 → 반복 실패 사용자가 앞자리를 차지 | `recommendation_batch_targets` 에 failed/not_ready 류 15분 간격 (앱 직접 요청은 기존대로 즉시) |
 | 자정 전후: 호출 시작 날짜로 자정 뒤에도 계속 만들 수 있었다 | 사용자마다 처리 직전 KST 날짜 확인, 바뀌면 즉시 중단 |
