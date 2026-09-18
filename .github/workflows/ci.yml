@@ -2,7 +2,8 @@
 #   - 서버 순수 로직 selftest (Node, 외부 호출 없음)
 #   - migration 파일 버전 중복 검사 + 로컬 Postgres(mock auth 스텁) 에 전체 마이그레이션 + SQL/동시성 테스트 (run_local_check.sh)
 #   - 관리자 웹 typecheck + 세션/로그인 제한·계정/MFA/역할 selftest + next build 브라우저 번들 secret 검사 (#27)
-#   - **실제 로컬 Supabase**(Supabase CLI 2.117.0: Postgres · GoTrue · PostgREST · Kong) 에 CLI 경로로 migration 적용/이력 검증 +
+#   - **실제 로컬 Supabase**(Supabase CLI 2.117.0: Postgres · GoTrue · PostgREST · Realtime · Edge Runtime · Kong) 에 CLI 경로로 migration 적용/이력 검증 +
+#     앱 요청 통합 테스트(로컬 테스트 계정 dev-login → 온보딩 → 추천 · 대화 · 메시지 실시간 전달 · 차단 · 탈퇴/복구 · 나가기 · 넘기기 — 앱과 같은 SDK/요청) +
 #     관리자 Auth 통합 테스트(실제 GoTrue TOTP · 어댑터 · 관리자 웹 HTTP/쿠키) — run_supabase_integration.sh (docs/local-supabase-integration.md)
 #   - 모바일 typecheck · lint · selftest · SDK 로그 검사 · **release 산출물 검사** (expo export 3플랫폼 → 개발 마커/서버 secret grep)
 # 여기서 통과해도 원격 프로젝트의 migration 이력 확인·EAS 네이티브 release 빌드·실기기 검증을 대신하지 않는다 (docs/release-checklist.md).
@@ -53,9 +54,11 @@ jobs:
         run: cd supabase/tests && DB_NAME=ci_check bash run_local_check.sh
 
   # 실제 로컬 Supabase 스택 (Docker) — 느린 경로. 환경(도커·CLI) 이 없으면 스크립트가 exit 2 로 실패한다 (skip 아님)
+  #   app 스위트: 로컬 테스트 계정(dev-login)으로 실제 서버(Edge Runtime · PostgREST · GoTrue · Realtime)에 앱 요청을 보내 추천·대화·차단·탈퇴와
+  #   메시지 실시간 전달을 검사한다 (supabase/tests/app_flow_integration.mjs). admin 스위트: 관리자 Auth.
   supabase-integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -67,9 +70,10 @@ jobs:
         with:
           version: 2.117.0
       - run: cd apps/admin && npm ci --no-audit --no-fund
-      - name: migration history via Supabase CLI + admin auth integration (real GoTrue · admin web HTTP/cookie)
+      - name: migration history via Supabase CLI + app requests against real stack (dev-login · recommendation · chat · realtime · block · delete) + admin auth integration (real GoTrue · admin web HTTP/cookie)
         env:
-          # 로컬 스택 값은 스크립트가 `supabase status` 에서 읽는다. 원격 URL/키는 어디에도 두지 않는다
+          # 로컬 스택 값은 스크립트가 `supabase status` 에서 읽는다. 원격 URL/키는 어디에도 두지 않는다.
+          # Edge Function 개발 env(APP_ENV=development · ALLOW_DEV_LOGIN=1 · mock provider)는 스크립트가 격리 workdir(.supabase-it) 에만 쓴다
           DO_NOT_TRACK: '1'
         run: bash supabase/tests/run_supabase_integration.sh
       - name: 스택 정리 (실패 시에도)
