@@ -63,6 +63,10 @@ assertLocalUrl('SUPABASE_URL', SUPABASE_URL);
 if (!ANON_KEY || !SERVICE_KEY) die('SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY 가 필요합니다');
 const KEEP = process.env.APP_IT_KEEP === '1';
 const REALTIME_TIMEOUT_MS = Number(process.env.APP_IT_REALTIME_TIMEOUT_MS ?? 15000);
+// postgres_changes 는 놓친 행을 나중에 채워 주지 않는다. 클라이언트가 SUBSCRIBED 를 받아도 서버측 WAL 커서가
+// 살짝 뒤에 살아나므로, 구독 직후 보낸 첫 메시지가 커서보다 앞서면 영영 전달되지 않는다.
+// 구독 확인 뒤 이 시간만큼 기다렸다가 전송해 WAL 구독이 확실히 살아난 뒤에 보낸다.
+const REALTIME_SETTLE_MS = Number(process.env.APP_IT_REALTIME_SETTLE_MS ?? 4000);
 
 // ---------------------------------------------------------------------------
 // SDK — 앱과 같은 @supabase/supabase-js (apps/mobile 의 node_modules 우선, 없으면 apps/admin)
@@ -430,6 +434,8 @@ async function subscribed(sub, label) {
     ok,
     `status=${last}${sub.inbox.lastError ? ' (channel error — 로컬 config.toml [realtime] enabled=true 인지)' : ''}`,
   );
+  // WAL 커서가 살아날 여유 — 이 뒤에 보낸 메시지부터 확실히 전달된다 (postgres_changes 는 놓친 행을 채우지 않는다)
+  await sleep(REALTIME_SETTLE_MS);
 }
 
 // ---------------------------------------------------------------------------
@@ -525,7 +531,7 @@ async function run() {
     must(
       `B 가 A 의 메시지를 Realtime 으로 수신 (${REALTIME_TIMEOUT_MS}ms 안)`,
       got,
-      `received=${subB.inbox.messages.length} B_connected=${rtConnected(B)} statuses=${subB.inbox.statuses.join('>')}`,
+      `received=${subB.inbox.messages.length} A_received=${subA.inbox.messages.length} B_connected=${rtConnected(B)} statuses=${subB.inbox.statuses.join('>')}`,
     );
     const evt = subB.inbox.messages.find((m) => m.id === m1.row.id);
     check('실시간 payload 에 본문·발신자·conversation_id 포함', evt.content === '안녕하세요, 반가워요!' && evt.sender_id === A.userId && evt.conversation_id === conv1);
