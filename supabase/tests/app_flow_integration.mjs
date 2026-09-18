@@ -186,8 +186,14 @@ async function devLogin(label, suffix) {
   const r = await invoke(client, 'dev-login', { phone: e164 });
   must(`${label} dev-login 200 (email/password 발급)`, r.status === 200 && r.data?.email && r.data?.password, edgeNote(r));
   const { data, error } = await client.auth.signInWithPassword({ email: r.data.email, password: r.data.password });
-  must(`${label} GoTrue 비밀번호 로그인`, !error && data?.user?.id, error ? 'sign-in error' : '');
-  return { label, client, userId: data.user.id, suffix };
+  must(`${label} GoTrue 비밀번호 로그인`, !error && data?.user?.id && data?.session?.access_token, error ? 'sign-in error' : '');
+  const token = data.session.access_token;
+  // Node 의 @supabase/supabase-js 는 Realtime 소켓에 사용자 JWT 를 자동으로 싣지 않는다.
+  // 이걸 안 하면 postgres_changes 가 anon 으로 RLS 를 평가해 messages/matches 행을 하나도 못 받는다 (앱은 세션이 있어 자동 적용됨).
+  try {
+    await client.realtime.setAuth(token);
+  } catch {}
+  return { label, client, userId: data.user.id, suffix, token };
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +364,10 @@ async function send(u, conversationId, clientMessageId, content) {
 
 /** 앱 chat.ts subscribeToConversation 과 같은 채널 — 새 메시지 INSERT · 매치 UPDATE */
 function subscribe(u, conversationId, matchId) {
+  // 구독 직전 현재 사용자 JWT 를 Realtime 에 다시 실어 준다 (재로그인·토큰 갱신 후에도 RLS 통과)
+  try {
+    if (u.token) u.client.realtime.setAuth(u.token);
+  } catch {}
   const inbox = { messages: [], matchUpdates: [], statuses: [], lastError: null };
   const waiters = [];
   const notify = () => {
