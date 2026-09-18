@@ -229,6 +229,10 @@ cd apps/mobile && node --experimental-strip-types scripts/onboarding-resume-self
 # DB: 인증 전 온보딩 완료 차단 트리거 · 공개 자기소개 제약 (onboarding_guard_tests.sql — 위 run_local_check.sh 에 포함)
 # DB: 앱 요청 재현 — 시드 데모 계정으로 추천 조회/열람/넘기기/수락→매치 · 대화 접근/멱등 전송/읽음/나가기 · 탈퇴/복구 · 신고/차단을
 #     사용자 JWT(RLS) 컨텍스트로 순서대로 실행 (app_flow_tests.sql — run_local_check.sh 마지막 단계)
+# 실제 서버: 로컬 테스트 계정(dev-login)으로 실제 로컬 스택(GoTrue · PostgREST · Realtime · Edge Runtime)에 앱과 같은 SDK 로 요청 —
+#     온보딩 → 추천 · 대화 · 메시지 실시간 전달 · 차단 · 탈퇴/복구 · 나가기 · 넘기기 (app_flow_integration.mjs — Docker 필요,
+#     run_supabase_integration.sh 의 app 스위트 · CI supabase-integration job. docs/local-supabase-integration.md)
+bash supabase/tests/run_supabase_integration.sh            # SUPABASE_IT_SUITES=app 이면 앱 스위트만
 # 민감정보 마스킹 테스트 (#20 — 앱·서버 동일 규칙, Sentry 이벤트에서 연락처·원문 제거)
 cd apps/mobile && node --experimental-strip-types scripts/redact-selftest.mjs
 cd supabase/functions/_shared/observability && node --experimental-strip-types selftest.ts
