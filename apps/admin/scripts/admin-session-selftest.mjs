@@ -1,13 +1,13 @@
 /**
- * 관리자 세션 토큰·로그인 제한 selftest (#27) — Node 로 실행 (Next 불필요).
+ * 관리자 로그인 제한·secret·세션 토큰(v2) selftest (#27) — Node 로 실행 (Next 불필요).
  *   cd apps/admin && node --experimental-strip-types scripts/admin-session-selftest.mjs
  *
  * 로그인 제한은 DB(admin_login_guard RPC)가 상태를 갖는다. 여기서는 같은 규칙의 순수 구현(applyGuardEvent)을 저장소로 삼아
  * 판정 흐름(runLoginGuard)을 검증한다 — RPC 자체는 supabase/tests/admin_login_guard_tests.sql · 동시성 스크립트가 검증한다.
+ * 계정·MFA·역할 흐름은 admin-auth-selftest.mjs.
  */
 import {
   applyGuardEvent,
-  issueSessionToken,
   LOGIN_LOCK_SECONDS,
   LOGIN_MAX_FAILURES,
   loginGuardKey,
@@ -16,9 +16,8 @@ import {
   resolveClientIp,
   runLoginGuard,
   sanitizeActor,
-  SESSION_TTL_SECONDS,
-  verifySessionToken,
 } from '../lib/adminSessionCore.ts';
+import { ADMIN_SESSION_TTL_SECONDS as SESSION_TTL_SECONDS, sessionToken, verifyToken } from '../lib/adminAuthCore.ts';
 
 let passed = 0;
 let failed = 0;
@@ -32,26 +31,33 @@ function check(name, ok) {
 
 const secret = 'test-secret-0123456789';
 const now = 1_800_000_000_000;
-const tok = issueSessionToken(secret, '운영자A', now);
+const tok = sessionToken(secret, 'ad000000-0000-4000-8000-000000000001', now);
 
 check('토큰 형식 p.sig', tok.split('.').length === 2);
-const v = verifySessionToken(secret, tok, now + 1000);
-check('검증 성공 + actor', v !== null && v.actor === '운영자A');
+const v = verifyToken(secret, tok, now + 1000);
+check('검증 성공 + 세션 id', v !== null && v.k === 's' && v.sid === 'ad000000-0000-4000-8000-000000000001');
 check('만료 = iat + 12h', v !== null && v.exp - v.iat === SESSION_TTL_SECONDS);
-check('만료 뒤 무효', verifySessionToken(secret, tok, now + (SESSION_TTL_SECONDS + 1) * 1000) === null);
-check('다른 secret 무효', verifySessionToken('other-secret', tok, now) === null);
-check('서명 변조 무효', verifySessionToken(secret, tok.slice(0, -2) + 'zz', now) === null);
+check('만료 뒤 무효', verifyToken(secret, tok, now + (SESSION_TTL_SECONDS + 1) * 1000) === null);
+check('다른 secret 무효', verifyToken('other-secret', tok, now) === null);
+check('서명 변조 무효', verifyToken(secret, tok.slice(0, -2) + 'zz', now) === null);
 {
   const [p] = tok.split('.');
   const json = JSON.parse(Buffer.from(p.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString());
   json.exp += 99999;
   const forged = Buffer.from(JSON.stringify(json)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  check('payload 변조 무효', verifySessionToken(secret, `${forged}.${tok.split('.')[1]}`, now) === null);
+  check('payload 변조 무효', verifyToken(secret, `${forged}.${tok.split('.')[1]}`, now) === null);
 }
-check('빈 토큰/쓰레기 무효', verifySessionToken(secret, null, now) === null && verifySessionToken(secret, 'abc', now) === null && verifySessionToken(secret, 'a.b.c', now) === null);
-check('secret 없으면 무효', verifySessionToken('', tok, now) === null);
-check('예전 고정 sha256 쿠키는 무효', verifySessionToken(secret, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', now) === null);
-check('두 토큰은 nonce 로 다르다', issueSessionToken(secret, 'a', now) !== issueSessionToken(secret, 'a', now));
+check('빈 토큰/쓰레기 무효', verifyToken(secret, null, now) === null && verifyToken(secret, 'abc', now) === null && verifyToken(secret, 'a.b.c', now) === null);
+check('secret 없으면 무효', verifyToken('', tok, now) === null);
+check('예전 고정 sha256 쿠키는 무효', verifyToken(secret, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', now) === null);
+{
+  // 예전 v1 토큰(공유 비밀번호 세션 — {v:1, actor, ...}) 을 같은 secret 으로 서명해도 v2 검증은 거부한다
+  const { createHmac } = await import('crypto');
+  const p = Buffer.from(JSON.stringify({ v: 1, actor: '운영자A', iat: now / 1000, exp: now / 1000 + 99999, nonce: 'x' })).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const sig = createHmac('sha256', secret).update(p).digest('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  check('v1 토큰(구 세션)은 v2 검증에서 거부', verifyToken(secret, `${p}.${sig}`, now) === null);
+}
+check('두 토큰은 nonce 로 다르다', sessionToken(secret, 'a', now) !== sessionToken(secret, 'a', now));
 
 // actor 정리
 check('actor 기본값', sanitizeActor('') === 'admin' && sanitizeActor(undefined) === 'admin');
@@ -62,17 +68,17 @@ check('비밀번호 일치', passwordMatches('secret-pw', 'secret-pw'));
 check('비밀번호 불일치', !passwordMatches('secret-pX', 'secret-pw') && !passwordMatches('short', 'secret-pw') && !passwordMatches('', 'secret-pw'));
 check('기대값 없으면 항상 실패', !passwordMatches('', ''));
 
-// ── 세션 secret: production 은 명시적 값만 ──────────────────────────────
+// ── 세션 secret: production 은 명시적 값만 · development 는 서버 secret(service role key) 파생 ──────────
 {
   const long = 'x'.repeat(32);
-  check('production 명시 secret 32자+', resolveAdminSessionSecret({ nodeEnv: 'production', sessionSecret: long, password: 'pw' }).ok);
-  check('production 짧은 secret 거부', resolveAdminSessionSecret({ nodeEnv: 'production', sessionSecret: 'short-secret-16ch', password: 'pw' }).reason === 'too_short');
-  check('production 미설정 → fallback 없음', resolveAdminSessionSecret({ nodeEnv: 'production', sessionSecret: undefined, password: 'pw' }).reason === 'missing_in_production');
-  const dev = resolveAdminSessionSecret({ nodeEnv: 'development', sessionSecret: undefined, password: 'pw' });
-  check('development 비밀번호 파생 fallback', dev.ok && dev.source === 'derived_dev');
-  check('development 비밀번호도 없으면 실패', resolveAdminSessionSecret({ nodeEnv: 'development', sessionSecret: undefined, password: undefined }).reason === 'password_missing');
-  check('development 명시 secret 16자+', resolveAdminSessionSecret({ nodeEnv: 'development', sessionSecret: 'sixteen-chars-ok', password: 'pw' }).ok);
-  check('secret 결과에 값 없음', !JSON.stringify(resolveAdminSessionSecret({ nodeEnv: 'production', sessionSecret: 'hunter2-value', password: 'pw' })).includes('hunter2'));
+  check('production 명시 secret 32자+', resolveAdminSessionSecret({ nodeEnv: 'production', sessionSecret: long, devSeed: 'seed' }).ok);
+  check('production 짧은 secret 거부', resolveAdminSessionSecret({ nodeEnv: 'production', sessionSecret: 'short-secret-16ch', devSeed: 'seed' }).reason === 'too_short');
+  check('production 미설정 → fallback 없음', resolveAdminSessionSecret({ nodeEnv: 'production', sessionSecret: undefined, devSeed: 'seed' }).reason === 'missing_in_production');
+  const dev = resolveAdminSessionSecret({ nodeEnv: 'development', sessionSecret: undefined, devSeed: 'service-role-key' });
+  check('development 서버 secret 파생 fallback', dev.ok && dev.source === 'derived_dev' && !dev.secret.includes('service-role-key'));
+  check('development seed 도 없으면 실패', resolveAdminSessionSecret({ nodeEnv: 'development', sessionSecret: undefined, devSeed: undefined }).reason === 'seed_missing');
+  check('development 명시 secret 16자+', resolveAdminSessionSecret({ nodeEnv: 'development', sessionSecret: 'sixteen-chars-ok', devSeed: undefined }).ok);
+  check('secret 결과에 값 없음', !JSON.stringify(resolveAdminSessionSecret({ nodeEnv: 'production', sessionSecret: 'hunter2-value'.padEnd(32, 'x'), devSeed: 'pw' })).includes('hunter2-value-'));
 }
 
 // ── 클라이언트 키: 프록시 헤더 신뢰 경계 · HMAC ───────────────────────

@@ -50,6 +50,7 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
       (V2 destination 이면 `event_id`/`liveness_checks[]` 가 오지 않아 승인이 되지 않는 것이 정상)
 - [ ] Didit 워크플로: Liveness 단계 **하나만** · Active `3D Action & Flash` · 최대 3회 · Face Search 1:N 켜짐 · 신분증/AML/주소/NFC 없음
       (라이브니스 노드가 여러 개면 서버가 fail-closed 로 승인하지 않는다)
+- [ ] (#6) 마이그레이션 `0032_identity_verification_sessions.sql` 이 적용되어 있고 `verify-identity` 가 재배포되어 있다 (0032 이전 DB 에 새 함수를 배포하면 request 가 500 `session_create_failed`). 앱도 같은 릴리스 창에서 (recover 가 requestId 만 보낸다)
 - [ ] (#13/#11/#12/#27) 마이그레이션 `0028_account_purge_jobs.sql` · `0029_face_session_assets.sql` · `0030_face_consents.sql` · `0031_admin_login_guard.sql` 이 적용되어 있고
       `account-purge` · `start-face-liveness` 가 재배포되어 있다 (0029 이전 DB 에 새 `start-face-liveness` 를 배포하면 승인 RPC 의 superseded 규칙이 없다; 0030 이전이면 `start` 가 503 `consent_unavailable`)
 - [ ] (#13) pg_cron 에 `account-purge` batch(일 1회) · `face-asset-cleanup`(`{"face_cleanup":true}`, 1시간) · prune 이 등록되어 있다 (`docs/data-retention.md` 4절)
@@ -89,7 +90,12 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 ## Admin
 
 - [ ] `SUPABASE_SERVICE_ROLE_KEY` 가 서버 환경변수로만 존재한다 (`NEXT_PUBLIC_*` 금지, 브라우저 노출 없음)
-- [ ] `ADMIN_PASSWORD` 가 기본값(`change-me`)이 아니다 · `ADMIN_SESSION_SECRET` 이 **32자 이상** 설정되어 있다 (#27 — production 에서는 없으면 로그인 자체가 실패한다)
+- [ ] 원격 migration 이력을 사람이 확인했다: `supabase migration list --linked` 에서 `0032` 가 무엇으로 기록돼 있는지와 `recommendation_batch_cursor` 존재 여부 → `docs/local-supabase-integration.md` 5절 표대로 처리. `0032_recommendation_batch_sweep.sql` 은 `0034` 로 옮겨졌다 (같은 번호 충돌). `migration repair` 는 백업·확인 뒤에만
+- [ ] `node supabase/scripts/check-migration-versions.mjs` 가 통과한다 (버전 중복 없음) · CI `db` · `supabase-integration` job 이 초록이다 (실제 로컬 Supabase 스택에서 CLI 경로 migration 이력 + 관리자 Auth 통합)
+- [ ] (#27) 마이그레이션 `0033_admin_accounts.sql` · **`0035_admin_accounts_gotrue_metadata.sql`** 적용 (0035 없이는 GoTrue 로 만든 관리자에 `public.users` 행이 생겨 `/admins` 추가가 `app_user_not_allowed` 로 거부된다. 적용 뒤 `select count(*) from public.users u join admin_members m on m.user_id=u.id` → 0) · `SUPABASE_ANON_KEY` · `ADMIN_SESSION_SECRET`(**32자 이상**) 설정 · `node scripts/admin-bootstrap.mjs create-owner` 로 첫 owner 생성 · 그 owner 가 로그인해 인증 앱(TOTP) 등록 · `/admins` 에 owner 가 보인다 (`docs/admin-auth.md` 순서)
+- [ ] (#27) 전환이 끝났으면 `ADMIN_LEGACY_PASSWORD_LOGIN` · `ADMIN_PASSWORD` 를 지웠다. 로그인 화면에 "구 공유 비밀번호 로그인" 이 보이지 않고, 예전 쿠키로는 어떤 관리자 페이지도 열리지 않는다
+- [ ] (#27) viewer 계정으로 `/users` 의 정지 버튼·`/beta` 의 초대코드 발급·`/admins` 가 보이지 않고, 서버 액션을 직접 호출해도 대시보드로 돌아온다(`?denied=1`). 이메일·연락처·초대코드가 마스킹된다 — **로컬 실제 스택(GoTrue·Next)에서 통합 테스트로 확인(2026-09-18) · 실제 배포에서 미수행**
+- [ ] (#27) owner 가 자기 자신을 viewer 로 바꾸거나 비활성화하려 하면 "마지막 활성 owner" 로 거부된다. 다른 관리자를 비활성화하면 그 관리자의 열린 탭이 즉시 /login 으로 간다 — **로컬 실제 스택에서 통합 테스트로 확인 · 실제 배포·실제 브라우저에서 미수행**
 - [ ] (#27) 관리자 웹이 신뢰할 수 있는 리버스 프록시 뒤에 있으면 `ADMIN_TRUST_PROXY_HEADERS=1`, 아니면 설정하지 않는다 (`docs/security.md` 4절)
 - [ ] (#27) 두 인스턴스(또는 재시작 전후)에서 잘못된 비밀번호를 3회 + 2회 입력하면 5회째에 잠기고, `admin_login_locks` 에 원문 IP 가 없다.
       DB 를 끊고 로그인하면 "로그인 제한을 확인할 수 없어 로그인하지 않았습니다" 가 뜬다 — **실제 배포에서 미수행**
@@ -145,10 +151,10 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#22/#23) 마이그레이션 `0017_recommendation_runs.sql` 이 적용되어 있고(`recommendation_runs`, `recommendation_run_claim/finish`, `recommendation_batch_targets`, recommendations unique 변경),
       `daily-recommendation` · `daily-recommendation-batch` 가 재배포되어 있으며 pg_cron 에 배치 스케줄이 등록되어 있다 (`select * from cron.job`)
 - [ ] (#22) 같은 계정으로 `daily-recommendation` 을 동시에 두 번 호출해도 오늘 `recommendations` 행이 1건이다. `daily-recommendation-batch` 를 사용자 JWT 로 호출하면 401 이다
-- [ ] (#22 매시간 폴링) 마이그레이션 `0032_recommendation_batch_hourly.sql` 적용(`recommendation_batch_targets` 4인자) → `daily-recommendation-batch` 재배포 → cron 을 `'0,15,30,45 0-12 * * *'`(KST 09:00~21:45) 로 재등록
-      (`select jobname, schedule from cron.job where jobname = 'daily-recommendation-batch'`, 예전 `'*/15 0 * * *'` 는 unschedule). 응답에 `retry_after_seconds: 3000` 이 온다
-- [ ] (#22/#23/#17) 후보 없는 테스트 계정: 앱을 닫은 채 `recommendation_runs.finished_at` 을 55분 전으로 바꾸고 후보를 만든 뒤 배치 1회 수동 호출 → 오늘 `recommendations` 1건 ·
-      `notification_events.daily_recommendation` 1건 → (cron `send-push`) 실기기 푸시 수신 → 탭하면 홈의 오늘의 소개. 후보를 만들지 않고 호출하면 행·이벤트가 늘지 않는다 — **실제 프로젝트·실기기 미수행**
+- [ ] (#22/#17) 마이그레이션 `0034_recommendation_batch_sweep.sql`(구 `0032_recommendation_batch_sweep.sql` — 원격에 0032 로 적용된 적이 있는지 `docs/local-supabase-integration.md` 5절로 확인) 적용(`recommendation_batch_cursor` + claim/save RPC, `recommendation_batch_targets` 5인자, `notification_events.recommendation_id`, dequeue `recommendation_valid`) 뒤
+      `daily-recommendation-batch` · `send-push` 재배포. cron 은 `supabase/scripts/schedule-recommendation-cron.sql` 로 교체 — `select jobname, schedule from cron.job` 에 `daily-recommendation-batch` 가 `*/15 * * * *` 로 1건만 있다
+- [ ] (#22) 배포 뒤 30분 안에 `select updated_at, for_date, after, lease_until from recommendation_batch_cursor` 가 갱신되고 `net._http_response` 최근 행이 200 이다. 후보 없는 테스트 계정의 `recommendation_runs.attempts` 가 1시간 뒤 늘어난다
+- [ ] (#22/#17) **실기기**: 후보 없는 테스트 계정 A 가 앱을 닫아 둔 상태에서 적격 계정 B 를 온보딩·인증 → 1시간 뒤 배치가 A 에게 소개를 저장하고(`recommendations`·`notification_events` 각 1건) 휴대폰에 "오늘의 소개가 도착했어요" 가 오며 탭하면 홈에 소개가 보인다 — **아직 미수행** (로컬 DB·순수 로직 검증만 완료)
 - [ ] (#23) 마이그레이션 `0027_recommendation_observability.sql` 적용 (`recommendation_runs.eligible_count/recommendation_id/strategy/basis/error_stage`, `recommendation_run_finish` 8인자,
       `recommendations_created_event` 트리거, `recommendation_pool_stats`/`recommendation_run_stats`). 적용 뒤 `select count(*) from analytics_events where event_type='recommendation_created'` = `select count(*) from recommendations`
 - [ ] (#23) `daily-recommendation` · `daily-recommendation-batch` 재배포 뒤 오늘 실행 행에 `eligible_count` 가 채워진다: `select result, cap_reached, eligible_count from recommendation_runs where for_date = (now() at time zone 'Asia/Seoul')::date`
@@ -187,8 +193,8 @@ production 배포/앱 출시 전 매번 확인한다. 환경 모델·변수 목�
 - [ ] (#27) 마이그레이션 `0023_security_hardening.sql` 적용 (`rate_limit_hit`·`admin_audit_log`·추천 변경 가드·신고 상한). `verify-identity`·`icebreaker`·`delete-account`·`daily-recommendation`·`start-face-liveness` 재배포 — **0023/0025 보다 먼저 배포하면 안 된다** (rate limit·베타 RPC 가 없으면 fail-closed 로 503)
 - [ ] (#27) `bash supabase/tests/run_local_check.sh` 의 `security_tests.sql` 이 통과했다 (RLS 전수 · DEFINER allowlist · 뷰 비공개 · anon 0행). production DB 에서도 `select relname from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r' and not c.relrowsecurity` → 0행
 - [ ] (#27) 사용자 JWT 로 `recommendations` 의 `score_total`/`card` 를 update 하면 거부되고, 같은 사용자가 하루 11번째 신고를 넣으면 거부된다. `rate_limit_hit`·`admin_audit_record` 를 사용자 JWT 로 호출하면 거부된다
-- [ ] (#27) 관리자 웹: `ADMIN_SESSION_SECRET` 이 설정되어 있다 (16자+). 잘못된 비밀번호 5회 → 잠금 안내가 뜨고 `admin_audit_log` 에 `admin_login_failed/locked` 가 남는다. 정지·신고 처리·얼굴 검토·삭제 요청·베타 조치가 `/audit` 에 처리자 이름과 함께 보인다
-- [ ] (#27) 관리자 로그인 쿠키(`bonsim_admin`)가 `p.sig` 형식이고 12시간 뒤 만료된다. 예전 형식(sha256 고정값)으로는 로그인되지 않는다
+- [ ] (#27) 관리자 웹: 잘못된 비밀번호 5회 → 잠금 안내가 뜨고 `admin_audit_log` 에 `admin_login_failed/locked` 가 남는다. 틀린 인증 앱 코드 5회 → `admin_mfa_locked`. 정지·신고 처리·얼굴 검토·삭제 요청·베타 조치가 `/audit` 에 관리자 이름·id 와 함께 보인다 (actor 는 계정 id)
+- [ ] (#27) 관리자 로그인 쿠키(`bonsim_admin`)가 `p.sig` 형식이고 12시간 뒤 만료된다. 예전 형식(sha256 고정값·v1 토큰)으로는 어떤 페이지도 열리지 않는다. 비밀번호만 통과한 상태(`bonsim_admin_pending`)로 `/users` 를 열면 /login 으로 간다
 - [ ] (#25) 마이그레이션 `0024_profile_edit.sql` 적용. 온보딩 완료 계정으로 프로필 `birth_year`/`gender` update 가 거부되고, `preferences_save` 에 `appearance_importance` 를 넣으면 거부된다. 내 정보 → 소개/기본 정보/선호 조건/가치관 수정 화면이 열리고 저장 뒤 `analytics_events.profile_updated/preferences_updated` 에 컬럼 이름만 남는다 (값 없음) — **실기기 미검증**
 - [ ] (#26) 마이그레이션 `0025_beta_cohorts.sql` 적용. 관리자 `/beta` 에서 cohort 생성 → 게이트 켜기 → 새 계정으로 로그인하면 입장 화면(초대코드/대기)이 뜨고, 코드 없이 `verify-identity` 를 직접 호출하면 403 `beta_admission_required`, `profiles` insert 가 거부된다. 초대코드 입장 뒤 온보딩이 진행된다 — **실기기 미검증**
 - [ ] (#26) 대기 등록 계정에 `profiles`/`face_verifications`/`user_identities` 행이 없다. 운영자 "대기자 입장" 뒤 `notification_events.beta_admitted` 1건이 쌓이고 (cron `send-push`) 알림이 온다. 게이트를 끄면 누구나 가입되고 cohort 통계는 유지된다

@@ -13,18 +13,18 @@ export const dynamic = 'force-dynamic';
  */
 async function setReviewing(formData: FormData) {
   'use server';
-  const { requireAdmin: guard } = await import('@/lib/adminAuth');
+  const { requireOwner: guard } = await import('@/lib/adminAuth');
   const session = await guard();
   const id = String(formData.get('id'));
   const db = adminClient();
   await db.from('reports').update({ status: 'reviewing' }).eq('id', id).eq('status', 'pending');
-  await recordAdminAudit(session.actor, 'report_reviewing', 'report', id, {});
+  await recordAdminAudit(session, 'report_reviewing', 'report', id, {});
   revalidatePath('/reports');
 }
 
 async function act(formData: FormData) {
   'use server';
-  const { requireAdmin: guard } = await import('@/lib/adminAuth');
+  const { requireOwner: guard } = await import('@/lib/adminAuth');
   const session = await guard();
   const id = String(formData.get('id'));
   const action = String(formData.get('action')) as ModerationAction;
@@ -35,13 +35,14 @@ async function act(formData: FormData) {
   const { data: report } = await db.from('reports').select('id, reported_id, status').eq('id', id).maybeSingle();
   if (!report || report.status === 'actioned' || report.status === 'dismissed') return;
   const res = await moderateUser(db, { userId: report.reported_id, action, reason, reportId: id, actor: session.actor, days });
-  await recordAdminAudit(session.actor, 'report_action', 'report', id, { action, days, ok: res.ok });
+  await recordAdminAudit(session, 'report_action', 'report', id, { action, days, ok: res.ok });
   revalidatePath('/reports');
   revalidatePath('/users');
 }
 
 export default async function ReportsPage() {
-  await requireAdmin();
+  const session = await requireAdmin();
+  const canAct = session.role === 'owner';
   const db = adminClient();
   const { data: reports } = await db
     .from('reports')
@@ -112,7 +113,7 @@ export default async function ReportsPage() {
                   {r.action_taken && r.action_taken !== 'none' && <div className="muted" style={{ fontSize: 12 }}>{r.action_taken}</div>}
                 </td>
                 <td>
-                  {open && (
+                  {open && canAct && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 220 }}>
                       {r.status === 'pending' && (
                         <form action={setReviewing}>

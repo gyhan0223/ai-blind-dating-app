@@ -16,13 +16,13 @@
  *  6. reasons 는 공개 사실만, 비공개 응답을 바꿔도 reasons 불변
  *  8. (#23) 적격 후보 수(eligibleCount)·저장 id(createdIds) 관측, recommendation_created 이벤트는 저장 행 기준 1건 (재요청·재실행에도 불변),
  *     후보 없음은 eligibleCount=0 · 조회 실패는 이벤트·행 없음
- *  9. (#22 매시간 폴링) 후보 없음 → 대기 → 배치 창(50분) 뒤 재확인 대상 → 후보가 생기면 앱 미접속 상태에서 소개 저장 → 알림 outbox 1건.
- *     재확인만으로는 알림·실행 행이 늘지 않고, 앱 요청·배치가 겹쳐도 소개·알림은 1건 (실제 claim/finish/targets RPC 사용)
+ *  9. (#22/#17, 0034) 배치 sweep 전체: 후보 없음 대기 → 1시간 안 재탐색 없음 → 후보 추가 → 재시도 시점 뒤 배치가 소개 생성 → 알림 이벤트 1건,
+ *     배치 재실행·앱 요청 중첩에도 중복 없음, 발송 시점 재확인(상대 제재 → 무효), 발송 실패·설정 off·토큰 없음은 소개 생성과 무관
  */
 import { execFileSync } from 'node:child_process';
 import { computeMatch } from '../functions/_shared/matching/MatchingEngine.ts';
+import { runBatchSweep } from '../functions/_shared/matching/batchSweep.ts';
 import { runDailyRecommendation, CARD_FIELDS } from '../functions/_shared/matching/recommend.ts';
-import { BATCH_RETRY_AFTER_SECONDS } from '../functions/_shared/matching/batchRetryWindow.ts';
 import { runDailyRecommendationWithClaim } from '../functions/_shared/matching/runWithClaim.ts';
 import { loadSnapshots } from '../functions/_shared/matching/snapshot.ts';
 
@@ -347,74 +347,118 @@ check('신규 사용자에게 외모 데이터가 전혀 없다 (전제)', Numbe
 }
 
 // ---------------------------------------------------------------------------
-// 9) (#22 매시간 폴링) 후보 없음 → 대기 → 배치 재확인 → 후보 생김 → 앱 미접속 중 소개 저장 → 알림 1건
-//    실제 DB 의 recommendation_run_claim / _finish / recommendation_batch_targets 를 psql 로 호출한다 (배치 Edge 와 같은 인자).
+// 8) (#22/#17, 0034) 후보 부족 대기 → 후보 추가 → 앱 미접속 상태에서 배치가 소개 생성 → 알림 이벤트 1건 — 실제 DB 위에서 sweep 전체
+//    claim/finish/커서/대상 RPC 를 psql 로 호출하고(Edge 함수와 같은 SQL), 시간은 finished_at 을 옮겨 제어한다.
+//    풀 격리: 남→남 지향은 seed·앞 절 사용자에 없다. 대상 조회는 SQL 그대로 쓰되 이 절의 사용자만 남긴다 (seed 사용자를 배치로 훑지 않기 위해)
 // ---------------------------------------------------------------------------
+const A = '32320000-0000-4000-8000-000000000001'; // 대기 사용자
+const B = '32320000-0000-4000-8000-000000000002'; // 나중에 가입하는 적격 후보
 {
-  const RUN_X = { userId: X, today: TODAY, nowYear: NOW_YEAR, dailyLimit: 1 };
-  /** ClaimClient 의 psql 구현 — supabaseClaimClient 와 같은 RPC·인자. retryAfterSeconds 없으면 앱(기본 1시간)과 같다 */
-  const claimClient = (retryAfterSeconds) => ({
+  const POOL = new Set([A, B]);
+  const claims = {
     async claim(userId, forDate) {
-      const extra = retryAfterSeconds ? `, 90, ${Number(retryAfterSeconds) | 0}` : '';
-      const j = JSON.parse(q(`select public.recommendation_run_claim(${uuid(userId)}, ${lit(forDate)}::date${extra})`));
+      const j = JSON.parse(q(`select public.recommendation_run_claim(${uuid(userId)}, ${lit(forDate)}::date)`));
       return { claim: j.claim, result: j.result, capReached: j.cap_reached === true };
     },
     async finish(userId, forDate, result, scanned, capReached, details) {
-      q(
-        `select public.recommendation_run_finish(${uuid(userId)}, ${lit(forDate)}::date, ${lit(result)}, ${Number(scanned) | 0}, ${capReached ? 'true' : 'false'}, ` +
-          `${details?.eligible == null ? 'null' : Number(details.eligible) | 0}, ${details?.recommendationId ? uuid(details.recommendationId) : 'null'}, ${details?.errorStage ? lit(details.errorStage) : 'null'})`,
-      );
+      q(`select public.recommendation_run_finish(${uuid(userId)}, ${lit(forDate)}::date, ${lit(result)}, ${Number(scanned) | 0}, ${capReached ? 'true' : 'false'},
+           ${details?.eligible == null ? 'null' : Number(details.eligible)}, ${details?.recommendationId ? uuid(details.recommendationId) : 'null'}, ${details?.errorStage ? lit(details.errorStage) : 'null'})`);
     },
-  });
-  const batchClaims = claimClient(BATCH_RETRY_AFTER_SECONDS);
-  const appClaims = claimClient(null);
-  const batchTargets = () => qjson(`select coalesce(json_agg(t.user_id), '[]') from public.recommendation_batch_targets(${lit(TODAY)}::date, null, 100, ${BATCH_RETRY_AFTER_SECONDS}) t`);
-  const runRows = () => Number(q(`select count(*) from public.recommendation_runs where user_id = ${uuid(X)} and for_date = ${lit(TODAY)}::date`));
-  const recRows = () => Number(q(`select count(*) from public.recommendations where user_id = ${uuid(X)} and for_date = ${lit(TODAY)}::date and status <> 'expired'`));
-  const pushRows = () => Number(q(`select count(*) from public.notification_events where recipient_id = ${uuid(X)} and kind = 'daily_recommendation'`));
-  const backdate = (minutes) => q(`update public.recommendation_runs set finished_at = now() - make_interval(mins => ${Number(minutes) | 0}) where user_id = ${uuid(X)} and for_date = ${lit(TODAY)}::date`);
-  const runBatch = () => runDailyRecommendationWithClaim(ds, batchClaims, RUN_X, { retries: 0 });
+  };
+  const sweeps = [];
+  const deps = {
+    now: () => new Date(),
+    seoulToday: (now) => now.toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' }),
+    async cursorClaim(forDate) {
+      const j = JSON.parse(q(`select public.recommendation_batch_cursor_claim(${lit(forDate)}::date, 180)`));
+      return { claimed: j.claimed === true, after: typeof j.after === 'string' ? j.after : null };
+    },
+    async cursorSave(forDate, nextAfter, release) {
+      q(`select public.recommendation_batch_cursor_save(${lit(forDate)}::date, ${nextAfter ? uuid(nextAfter) : 'null'}, ${release ? 'true' : 'false'}, 180)`);
+    },
+    async targets(forDate, after, limit) {
+      const rows = qjson(`select coalesce(json_agg(t.user_id order by t.user_id), '[]') from public.recommendation_batch_targets(${lit(forDate)}::date, ${after ? uuid(after) : 'null'}, ${Number(limit) | 0}) t`);
+      return rows.filter((id) => POOL.has(id));
+    },
+    processUser: (userId, forDate, nowYear) => runDailyRecommendationWithClaim(ds, claims, { userId, today: forDate, nowYear, dailyLimit: 1 }, { retries: 0 }),
+    async reportError(e) { sweeps.push({ error: String(e) }); },
+  };
+  const sweep = async (opts = {}) => { const r = await runBatchSweep(deps, { pageSize: 100, ...opts }); sweeps.push(r); return r; };
+  const count = (sql) => Number(q(sql));
+  const recsA = () => count(`select count(*) from public.recommendations where user_id = ${uuid(A)}`);
+  const eventsA = () => count(`select count(*) from public.notification_events where recipient_id = ${uuid(A)} and kind = 'daily_recommendation'`);
+  const runA = () => qjson(`select coalesce(json_agg(json_build_object('status', status, 'result', result, 'attempts', attempts, 'eligible_count', eligible_count)), '[]') from public.recommendation_runs where user_id = ${uuid(A)} and for_date = ${lit(TODAY)}::date`)[0] ?? null;
 
-  // 시작 상태: 7) 끝 — Y1 차단, Y2 는 진행 중 매치 3개(자리 없음) → X 는 후보 없음
-  q(`delete from public.recommendations where user_id = ${uuid(X)}`);
-  q(`delete from public.recommendation_runs where user_id = ${uuid(X)}`);
-  q(`delete from public.notification_events where recipient_id = ${uuid(X)}`);
-  check('#22 후보 없는 사용자는 배치 대상이다 (오늘 실행 기록 없음)', batchTargets().includes(X));
+  q(`
+  do $$
+  begin
+    insert into auth.users (id, email) values (${uuid(A)}, 'batch-a@t22.dev') on conflict do nothing;
+    update public.users set onboarding_completed = true, onboarding_step = 'done', identity_verified = true, face_verified = true, age_verified = true where id = ${uuid(A)};
+    insert into public.profiles (user_id, nickname, birth_year, gender, seeking_gender, region_code, height_cm, job_group, smoking, drinking, hobbies, personality_keywords, relationship_goal, public_answers) values
+      (${uuid(A)}, '대기에이', 1994, 'male', 'male', 'seoul', 176, 'it', 'none', 'sometimes', array['travel'], array['calm'], 'serious', '{"day_off":["cafe"]}');
+    insert into public.private_profiles (user_id, marriage_intent, children_intent, contact_frequency, date_frequency, personal_time_need, spending_style) values (${uuid(A)}, 4, 3, 4, 3, 3, 3);
+    insert into public.preference_settings (user_id) values (${uuid(A)});
+    insert into public.push_tokens (user_id, token, platform) values (${uuid(A)}, 'ExponentPushToken[t22-aaaa]', 'android');
+    delete from public.recommendation_batch_cursor;
+  end $$;`);
 
-  // 1) 09:00 배치: 후보 없음 → exhausted. 그날 소개 완료(ok)가 아니고, 알림도 없다
-  const first = await runBatch();
-  check('#22 배치 1회차: 후보 없음 → exhausted (소개 없음)', first.kind === 'ok' && first.exhausted && first.recommendations.length === 0);
-  check('#22 exhausted 는 실행 행 1개 · 추천 행 0 · 알림 0', runRows() === 1 && recRows() === 0 && pushRows() === 0 && q(`select result from public.recommendation_runs where user_id = ${uuid(X)} and for_date = ${lit(TODAY)}::date`) === 'exhausted');
-  check('#22 방금 exhausted → 배치 창 안이라 대상 제외', !batchTargets().includes(X));
-
-  // 2) 10:00 배치 (55분 뒤): 창(50분)이 지나 다시 대상. 앱의 기본 창(1시간)으로는 아직 skip — 앱 "다시 확인" 이 서버 주기를 우회하지 않는다
-  backdate(55);
-  check('#22 55분 뒤 배치 창(50분) 경과 → 다시 대상', batchTargets().includes(X));
-  const appSkip = await runDailyRecommendationWithClaim(ds, appClaims, RUN_X, { retries: 0 });
-  check('#22 같은 시점 앱 요청은 기본 1시간 창 → skip(exhausted), 다시 훑지 않음', appSkip.kind === 'ok' && appSkip.skipped === true && appSkip.exhausted && runRows() === 1);
-  //    아직 후보 없음 → 재확인 결과도 exhausted. 실행 행·알림은 늘지 않는다 (후보 부족 반복 확인만으로 알림 없음)
-  const second = await runBatch();
-  check('#22 배치 2회차(후보 여전히 없음): exhausted · 실행 행 그대로 1 · 알림 0', second.kind === 'ok' && second.exhausted && !second.skipped && runRows() === 1 && pushRows() === 0);
-  check('#22 재확인 실행은 attempts 만 늘린다', Number(q(`select attempts from public.recommendation_runs where user_id = ${uuid(X)} and for_date = ${lit(TODAY)}::date`)) === 2);
-
-  // 3) 그 사이 Y2 의 대화 하나가 끝나 자리가 생김 (후보 추가) → 11:00 배치: 앱을 열지 않아도 소개가 저장되고 알림 outbox 1건
-  const P1 = 'aa240000-0000-4000-8000-00000000a001';
-  q(`update public.matches set status = 'closed' where user_a = least(${uuid(Y2)}, ${uuid(P1)}) and user_b = greatest(${uuid(Y2)}, ${uuid(P1)})`);
-  backdate(55);
-  check('#22 후보가 생겨도 배치가 돌기 전에는 소개·알림 없음 (알림 트리거는 저장된 소개)', recRows() === 0 && pushRows() === 0 && batchTargets().includes(X));
-  const third = await runBatch();
-  check('#22 배치 3회차: 후보 생김 → 소개 저장 (Y2)', third.kind === 'ok' && !third.exhausted && third.recommendations.length === 1 && third.recommendations[0].candidate_id === Y2 && third.createdIds.length === 1);
-  check('#22 저장된 소개 → daily_recommendation 알림 outbox 1건 (dedupe recommendation:<user>:<date>)', pushRows() === 1 && q(`select dedupe_key from public.notification_events where recipient_id = ${uuid(X)} and kind = 'daily_recommendation'`) === `recommendation:${X}:${TODAY}`);
-  check('#22 실행 행은 여전히 1개, result=ok, recommendation_id 기록', runRows() === 1 && q(`select result || ':' || (recommendation_id = ${uuid(third.createdIds[0])})::text from public.recommendation_runs where user_id = ${uuid(X)} and for_date = ${lit(TODAY)}::date`) === 'ok:true');
-  check('#22 오늘 소개가 있으면 배치 대상에서 빠진다 (하루 한 명)', !batchTargets().includes(X));
-
-  // 4) 겹침: 앱 요청·배치 재호출·창을 되돌린 뒤 재호출 — 소개·알림은 그대로 1건
-  const appAfter = await runDailyRecommendationWithClaim(ds, appClaims, RUN_X, { retries: 0 });
-  const batchAfter = await runBatch();
-  backdate(120);
-  const batchLater = await runBatch();
-  check('#22 앱·배치 재요청은 저장된 소개를 돌려줄 뿐 새로 만들지 않는다', [appAfter, batchAfter, batchLater].every((o) => o.kind === 'ok' && o.skipped === true && o.recommendations.length === 1 && o.recommendations[0].candidate_id === Y2));
-  check('#22 겹쳐도 추천 행 1 · 알림 1 · 실행 행 1', recRows() === 1 && pushRows() === 1 && runRows() === 1);
+  // (1) 후보가 없다 → 배치가 exhausted 로 기록, 추천·알림 없음. 그날 소개를 받은 것으로 치지 않는다
+  const s1 = await sweep();
+  check('#22 배치 sweep: 후보 없는 A → exhausted 1 · 생성 0 · 완료', s1.processed === 1 && s1.exhausted === 1 && s1.created === 0 && s1.sweep_completed && s1.stopped_reason === 'completed');
+  check('#22 실행 기록 exhausted(eligible 0) · 추천 행 없음 · 알림 이벤트 없음 (후보 부족 확인만으로는 알림 없음)', runA()?.result === 'exhausted' && runA()?.eligible_count === 0 && recsA() === 0 && eventsA() === 0);
+  // (2) 1시간 안 재실행: 다시 훑지 않는다 (대상에서 제외)
+  const s2 = await sweep();
+  check('#23 1시간 안의 재실행은 A 를 다시 훑지 않는다 (processed 0)', s2.processed === 0 && runA()?.attempts === 1);
+  // (3) 적격 후보 B 가 가입·인증 — 그래도 1시간 안에는 재탐색하지 않는다. 알림도 없다 (신규 가입은 알림 사유가 아니다)
+  q(`
+  do $$
+  begin
+    insert into auth.users (id, email) values (${uuid(B)}, 'batch-b@t22.dev') on conflict do nothing;
+    update public.users set onboarding_completed = true, onboarding_step = 'done', identity_verified = true, face_verified = true, age_verified = true where id = ${uuid(B)};
+    insert into public.profiles (user_id, nickname, birth_year, gender, seeking_gender, region_code, height_cm, job_group, smoking, drinking, hobbies, personality_keywords, relationship_goal, public_answers) values
+      (${uuid(B)}, '후보비', 1996, 'male', 'male', 'seoul', 178, 'office', 'none', 'sometimes', array['travel'], array['calm'], 'serious', '{"day_off":["cafe"]}');
+    insert into public.private_profiles (user_id, marriage_intent, children_intent, contact_frequency, date_frequency, personal_time_need, spending_style) values (${uuid(B)}, 4, 3, 4, 3, 3, 3);
+    insert into public.preference_settings (user_id) values (${uuid(B)});
+  end $$;`);
+  const s3 = await sweep();
+  check('#23 후보 B 추가 직후(1시간 안): A 는 여전히 건너뛴다 · B 는 처리(A 가 pending 없음 → B→A 소개 가능)', s3.processed === 1 && recsA() === 0 && eventsA() === 0);
+  // B 가 오늘 A 를 소개받았을 수 있다 (B→A). A 의 관점은 그대로 후보 부족 대기 — A 에게는 아직 소개가 없다
+  // (4) 1시간 경과(시계 제어: finished_at 을 2시간 앞으로) → 앱을 열지 않아도 배치가 A 에게 B 를 소개하고 알림 이벤트가 1건 생긴다
+  q(`update public.recommendation_runs set finished_at = finished_at - interval '2 hours' where user_id = ${uuid(A)} and for_date = ${lit(TODAY)}::date`);
+  const s4 = await sweep();
+  check('#22 재시도 시점 이후 배치: A 처리 → 소개 생성(created 1)', s4.processed === 1 && s4.created === 1 && s4.failed === 0);
+  const recA = qjson(`select coalesce(json_agg(json_build_object('id', id, 'candidate_id', candidate_id, 'status', status)), '[]') from public.recommendations where user_id = ${uuid(A)}`)[0];
+  check('#22 A 에게 B 가 pending 으로 저장 · 실행 기록 ok · attempts 2', recA?.candidate_id === B && recA?.status === 'pending' && runA()?.result === 'ok' && runA()?.attempts === 2);
+  const evA = qjson(`select coalesce(json_agg(json_build_object('id', id, 'recommendation_id', recommendation_id, 'delivered_at', delivered_at, 'dedupe_key', dedupe_key)), '[]') from public.notification_events where recipient_id = ${uuid(A)} and kind = 'daily_recommendation'`);
+  check('#17 소개 저장 → daily_recommendation 이벤트 정확히 1건 · 저장된 추천을 가리킴 · dedupe 는 사용자+KST 날짜', evA.length === 1 && evA[0].recommendation_id === recA?.id && evA[0].delivered_at === null && evA[0].dedupe_key === `recommendation:${A}:${TODAY}`);
+  check('#23 recommendation_created 분석 이벤트도 저장 행 기준 1건', count(`select count(*) from public.analytics_events where event_type = 'recommendation_created' and payload->>'recommendation_id' = ${lit(recA?.id ?? '')}`) === 1);
+  // (5) 배치 재실행·앱 요청·수동 after=null 실행이 겹쳐도 소개·이벤트가 늘지 않는다
+  const s5 = await sweep();
+  const app = await runDailyRecommendationWithClaim(ds, claims, { userId: A, today: TODAY, nowYear: NOW_YEAR, dailyLimit: 1 });
+  const s6 = await sweep({ after: null });
+  check('#22 배치 재실행(2회)·앱 요청이 겹쳐도 새 처리 없음 — 추천 1 · 알림 1 · 실행 행 1', s5.processed === 0 && s6.processed === 0 && app.kind === 'ok' && app.skipped === true && app.recommendations.length === 1 && app.recommendations[0].id === recA?.id && recsA() === 1 && eventsA() === 1 && count(`select count(*) from public.recommendation_runs where user_id = ${uuid(A)}`) === 1);
+  check('#22 커서: sweep 완료 뒤 after=null · lease 해제 · 오늘 날짜', count(`select count(*) from public.recommendation_batch_cursor where for_date = ${lit(TODAY)}::date and after is null and lease_until is null`) === 1);
+  // (6) 발송 시점 재확인 (#17): 유효 → true, 상대 제재 → false (발송기가 recommendation_invalid 로 닫는다), 발송 실패는 새 소개를 만들지 않는다
+  const dq = (sql) => qjson(`select coalesce(json_agg(json_build_object('id', d.id, 'recommendation_valid', d.recommendation_valid, 'tokens', d.tokens, 'pref_enabled', d.pref_enabled)), '[]') from public.notification_events_dequeue(500) d where d.recipient_id = ${uuid(A)}`);
+  const d1 = dq();
+  check('#17 dequeue: A 의 소개 이벤트 1건 · 토큰 1개 · 설정 on · recommendation_valid=true', d1.length === 1 && d1[0].recommendation_valid === true && d1[0].tokens.length === 1 && d1[0].pref_enabled === true);
+  q(`select public.notification_events_mark(array[]::bigint[], array[]::bigint[], null, array[${d1[0].id}]::bigint[], 'expo push http 500')`); // 발송 실패 → 재시도 대기
+  check('#17 발송 실패는 새 소개를 만들지 않는다 (추천 1 · 이벤트 1)', recsA() === 1 && eventsA() === 1);
+  q(`update public.notification_events set claimed_at = null where id = ${d1[0].id}`);
+  q(`update public.users set status = 'suspended' where id = ${uuid(B)}`);
+  const d2 = dq();
+  check('#17 상대가 제재되면 발송 시점 재확인이 false (발송기가 recommendation_invalid 로 닫는다)', d2.length === 1 && d2[0].recommendation_valid === false);
+  q(`update public.users set status = 'active' where id = ${uuid(B)}`);
+  q(`update public.notification_events set claimed_at = null, attempts = 0 where id = ${d1[0].id}`);
+  // 알림 설정 off·토큰 없음도 소개 생성과 무관 (발송기가 pref_off / no_token 으로 닫는다)
+  q(`insert into public.notification_preferences (user_id, daily_recommendation) values (${uuid(A)}, false) on conflict (user_id) do update set daily_recommendation = false`);
+  q(`delete from public.push_tokens where user_id = ${uuid(A)}`);
+  const d3 = dq();
+  check('#17 설정 off · 토큰 없음이어도 이벤트는 그대로 1건 (발송기 skip) · 소개는 그대로', d3.length === 1 && d3[0].pref_enabled === false && d3[0].tokens.length === 0 && recsA() === 1);
+  // (7) 이미 오늘 소개를 받은 사용자·대화 3개 사용자는 배치 대상이 아니다 (기존 정책 유지) — 7절의 X 는 오늘 pending 이 있다
+  const targetsNow = qjson(`select coalesce(json_agg(t.user_id), '[]') from public.recommendation_batch_targets(${lit(TODAY)}::date, null, 500) t`);
+  check('#22 오늘 소개가 있는 A 는 대상이 아니다', !targetsNow.includes(A));
+  check('#22 sweep 오류 보고 없음', !sweeps.some((s) => 'error' in s));
 }
 
 console.log(`\nrecommendation db test: ${passed} passed, ${failed} failed`);

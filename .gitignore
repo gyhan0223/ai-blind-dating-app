@@ -16,3 +16,7 @@ apps/mobile/.expo/
 apps/mobile/example/
 apps/mobile/dist/
 apps/mobile/web-build/
+
+# Supabase CLI 로컬 스택 (supabase start) 임시 파일 · 통합 테스트 격리 workdir (run_supabase_integration.sh)
+supabase/.temp/
+.supabase-it/

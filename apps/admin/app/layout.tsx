@@ -34,10 +34,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <Link href="/errors">서버 오류</Link>
             <Link href="/beta">베타</Link>
             <Link href="/audit">감사 로그</Link>
+            {session?.role === 'owner' && <Link href="/admins">관리자</Link>}
           </nav>
           {session && (
             <form action={logoutAction} className="session-box">
-              <span className="muted">{session.actor}</span>
+              <Link href="/account" className="muted">{session.displayName}</Link>
+              <span className={`badge ${session.role === 'owner' ? '' : 'muted'}`}>{session.legacy ? 'legacy' : session.role}</span>
               <button type="submit">로그아웃</button>
             </form>
           )}

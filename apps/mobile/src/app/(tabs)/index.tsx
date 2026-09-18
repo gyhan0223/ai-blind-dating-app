@@ -1,12 +1,12 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { router } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, Linking, Platform, View } from 'react-native';
 import { RecommendationCard } from '@/components/RecommendationCard';
 import { Button, Card, ChipGroup, InlineNotice, Screen, Text } from '@/components/ui';
 import { track } from '@/lib/analytics';
 import { acceptResultNotice, CONVERSATION_SLOT_LIMIT } from '@/lib/chatCore';
-import { fetchNotificationPreferences, pushPermissionStatus } from '@/lib/push';
+import { fetchNotificationPreferences, pushPermissionStatus, registerPushToken } from '@/lib/push';
 import {
   decideRecommendation,
   fetchTodayRecommendations,
@@ -27,7 +27,9 @@ import { colors, spacing } from '@/theme/tokens';
  *  * 후보 없음(exhausted)     → 전체 탐색 완료면 "조건에 맞는 분이 없어요", 탐색 상한(capReached)이면 "아직 다 살펴보지 못했어요"
  *  * 오늘 소개를 이미 확인·처리 → "오늘의 소개를 확인했어요"
  * "다시 확인" 은 같은 요청을 다시 보낼 뿐이다 — 후보 부족 뒤 1시간 안에는 서버가 다시 훑지 않는다 (재시도 제한 우회 없음).
- * 알림 안내는 기기 알림 권한이 허용돼 있고 '오늘의 소개' 알림 설정이 켜진 경우에만 보여 준다 (푸시 신규 구축은 #17).
+ * 후보 없음 대기 중에는 앱을 열지 않아도 서버 배치가 주기적으로 다시 찾는다 (#22) — 언제 소개가 생긴다고 약속하지 않는다.
+ * "소개가 준비되면 알려드릴게요" 는 기기 알림 권한이 허용돼 있고 '오늘의 소개' 알림 설정이 켜진 경우에만 보여 준다.
+ * 꺼져 있으면 내 정보 화면과 같은 동선(권한 요청 / 기기 설정 열기 / 알림 설정)으로 안내하고 알림을 보장하는 문구를 쓰지 않는다 (#17/#23).
  */
 export default function TodayScreen() {
   const queryClient = useQueryClient();
@@ -39,6 +41,25 @@ export default function TodayScreen() {
   const { data: notifPrefs } = useQuery({ queryKey: ['notification-preferences'], queryFn: fetchNotificationPreferences, retry: false });
   const { data: pushPermission } = useQuery({ queryKey: ['push-permission'], queryFn: pushPermissionStatus, retry: false });
   const recommendationPushOn = pushPermission === 'granted' && notifPrefs?.daily_recommendation === true;
+  // 알림이 꺼져 있을 때의 안내 — 이유별로 기존 동선을 재사용한다 (내 정보 화면과 동일)
+  const pushOffHint: { text: string; action: { title: string; onPress: () => void } } | null = recommendationPushOn
+    ? null
+    : pushPermission === 'undetermined'
+      ? {
+          text: '알림을 켜 두면 소개가 준비됐을 때 알려드릴 수 있어요.',
+          action: {
+            title: '알림 켜기',
+            onPress: async () => {
+              await registerPushToken({ askPermission: true });
+              queryClient.invalidateQueries({ queryKey: ['push-permission'] });
+            },
+          },
+        }
+      : pushPermission === 'denied' && Platform.OS !== 'web'
+        ? { text: '기기 설정에서 알림이 꺼져 있어요. 켜 두면 소개가 준비됐을 때 알려드릴 수 있어요.', action: { title: '기기 알림 설정 열기', onPress: () => Linking.openSettings() } }
+        : pushPermission === 'granted' && notifPrefs && notifPrefs.daily_recommendation === false
+          ? { text: "'오늘의 소개 도착' 알림이 꺼져 있어요. 켜 두면 소개가 준비됐을 때 알려드릴 수 있어요.", action: { title: '알림 설정 보기', onPress: () => router.push('/(tabs)/me') } }
+          : null;
   const [busy, setBusy] = useState(false);
   const [matchedNickname, setMatchedNickname] = useState<string | null>(null);
   const [askingSkipReason, setAskingSkipReason] = useState(false);
@@ -242,17 +263,23 @@ export default function TodayScreen() {
       {!isLoading && !isError && !pending && !matchedNickname && !data?.inProgress && !data?.slotsFull && data?.exhausted && (
         <Card>
           <Text variant="heading" style={{ marginBottom: spacing.sm }}>
-            {data.capReached ? '아직 다 살펴보지 못했어요' : '오늘은 소개할 분이 없어요'}
+            {data.capReached ? '아직 다 살펴보지 못했어요' : '아직 조건에 맞는 분이 없어요'}
           </Text>
           <Text variant="body" color={colors.sub} style={{ marginBottom: spacing.sm }}>
             {data.capReached
-              ? '오늘은 한 번에 살펴볼 수 있는 인원까지만 확인했어요. 조건에 맞는 분이 없다고 단정하지는 않아요.\n잠시 후 다시 확인해 주세요.'
-              : '지금은 필수 조건에 맞는 분이 없어요. 새로운 분이 가입하면 다시 찾아볼게요.'}
+              ? '이번에는 한 번에 살펴볼 수 있는 인원까지만 확인했어요. 조건에 맞는 분이 없다고 단정하지는 않아요.\n앱을 열지 않아도 서버가 주기적으로 다시 살펴봐요.'
+              : '지금은 필수 조건에 맞는 분이 없어요.\n앱을 열지 않아도 서버가 주기적으로 다시 찾아봐요. 조건에 맞는 분이 생기면 그때 소개해 드려요.'}
           </Text>
           <Text variant="caption" color={colors.sub} style={{ marginBottom: spacing.md }}>
             하루 한 분만 소개하는 서비스라 필수 조건(나이·지역 등)을 동의 없이 넓히지 않아요. 다시 찾는 건 1시간에 한 번이에요.
             {recommendationPushOn ? '\n알림이 켜져 있어요. 소개가 준비되면 알려드릴게요.' : ''}
           </Text>
+          {pushOffHint && (
+            <View style={{ marginBottom: spacing.md, gap: spacing.sm }}>
+              <Text variant="caption" color={colors.sub}>{pushOffHint.text}</Text>
+              <Button kind="secondary" title={pushOffHint.action.title} onPress={pushOffHint.action.onPress} />
+            </View>
+          )}
           <View style={{ gap: spacing.sm }}>
             <Button kind="secondary" title="다시 확인" onPress={() => refetch()} loading={isFetching} />
             <Button kind="ghost" title="선호 조건 보기" onPress={() => router.push('/settings/preferences')} />

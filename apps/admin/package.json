@@ -7,7 +7,12 @@
     "dev": "next dev -p 3100",
     "build": "next build",
     "start": "next start -p 3100",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "selftest": "node --experimental-strip-types scripts/admin-session-selftest.mjs && node --experimental-strip-types scripts/admin-auth-selftest.mjs",
+    "bundle:check": "node scripts/check-admin-bundle.mjs",
+    "bundle:check:selfcheck": "node scripts/check-admin-bundle.mjs --selfcheck",
+    "integration:auth": "node --experimental-strip-types scripts/admin-auth-integration.mjs",
+    "admin:bootstrap": "node scripts/admin-bootstrap.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",

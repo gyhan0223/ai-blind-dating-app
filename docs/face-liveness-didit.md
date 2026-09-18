@@ -153,7 +153,7 @@ Didit v3 는 같은 `vendor_data` 의 미완료 세션이 있으면 새 세션 �
 | `DIDIT_WEBHOOK_SECRET` | 콘솔 웹훅 secret (V3 destination) | `X-Signature-V2` 검증 |
 | `DIDIT_API_BASE_URL` (선택) | 기본 `https://verification.didit.me` | https 만. 보통 설정하지 않는다 |
 | `FACE_CONSENT_VERSION` (#12) | `_shared/consent/faceConsentPolicy.ts` 의 `version` | production 필수. 불일치·미설정·문서 draft 면 `start` 가 503 `consent_policy_not_ready` (docs/face-consent.md) |
-| `ADMIN_ACTOR_LABEL` (관리자 웹, 선택) | 기본 `admin-web` | 감사 기록 `actor` 값 |
+| (관리자 웹) 처리자 | 로그인한 관리자 계정 id (#27) | 감사 기록 `actor` 값 — `ADMIN_ACTOR_LABEL` 은 더 이상 쓰지 않는다 |
 
 ```bash
 supabase secrets set FACE_VERIFICATION_PROVIDER=didit DIDIT_API_KEY=<key> DIDIT_WORKFLOW_ID=<workflow-id> DIDIT_WEBHOOK_SECRET=<secret> --project-ref <PROJECT_REF>
@@ -193,7 +193,7 @@ supabase secrets set FACE_VERIFICATION_PROVIDER=didit DIDIT_API_KEY=<key> DIDIT_
 - **거절**: `status='rejected'`, `provider_reason='admin_rejected'`, `users.face_verified=false` 유지. 사용자는 새 세션으로 다시 시도할 수 있고
   다른 계정·중복 상세는 노출되지 않는다.
 - **복구 필요**: `face_liveness_inconsistent_rows()` (approved 인데 플래그/참조 이미지 없음) — "복구" 버튼이 같은 승인 경로를 다시 실행.
-- **감사 기록**: `face_verification_reviews` 에 처리자(`ADMIN_ACTOR_LABEL`)·시각·이전/이후 상태·비고가 승인/거절과 같은 트랜잭션으로 남는다.
+- **감사 기록**: `face_verification_reviews` 에 처리자(로그인한 관리자 계정 id, #27)·시각·이전/이후 상태·비고가 승인/거절과 같은 트랜잭션으로 남는다.
 
 `admin-face-review` 는 공개 API 가 아니다. `Authorization` 이 프로젝트의 service role key 와 상수 시간 비교로 일치할 때만 처리하며, 사용자 JWT/anon key 는 401.
 
@@ -371,7 +371,7 @@ cd apps/admin && npx tsc --noEmit
 ## 13. 남은 조건 (미완료)
 
 - Didit 콘솔 설정(Liveness-only 워크플로 · 3D Action & Flash · Face Search · **V3 웹훅 destination**) + secret 4개 등록 — 운영자
-- Supabase staging: `0014` 마이그레이션 적용, `admin-face-review` 배포, 관리자 웹 `ADMIN_ACTOR_LABEL`(선택) — 운영자
+- Supabase staging: `0014` 마이그레이션 적용, `admin-face-review` 배포, 관리자 웹 owner 계정(#27) — 운영자
 - `eas init` 으로 EAS 프로젝트 연결 후 `eas build --profile development` 실기기 체크리스트(12절) 통과 — 실제 Didit 응답 형태 1회 확인 포함
 - 개인정보처리방침 개정 — 인증 목적 생체정보 처리·국외 이전 고지 (10절 TODO) 와 동의 문서 확정(`docs/face-consent.md`) — 출시 차단
 - Didit 콘솔 데이터 보존 설정·백업 정책·세션 삭제 API 실제 응답(404 의미 포함) 확인 — 실 계정 필요 (미검증)

@@ -1,0 +1,74 @@
+# Supabase CLI 로컬 스택 설정 — `supabase start` / `supabase db push --local` / `supabase migration list --local` 용.
+# 원격 프로젝트 설정이 아니다 (`supabase link` 로 연결한 뒤 `supabase config push` 를 실행하지 않는 한 원격에 반영되지 않는다).
+# 관리자 Auth 통합 테스트(docs/local-supabase-integration.md)는 이 파일을 복사해 project_id · 포트를 바꾼 격리된 workdir 에서 돈다
+# — 개발용 스택(이 파일 그대로 `supabase start`)의 데이터는 건드리지 않는다.
+# CLI 고정 버전: 2.117.0 (.github/workflows/ci.yml · docs/local-supabase-integration.md)
+
+project_id = "bonsim"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+# 이 저장소의 마이그레이션은 Supabase 의 기존 기본 권한(새 테이블에 anon/authenticated/service_role 기본 grant)을 전제로 쓰였다
+# (supabase/tests/local_supabase_mock.sql 과 같은 조건). 2026-05 이후 새 프로젝트의 기본값(false)과 다르므로 원격 프로젝트의 실제 설정은 별도 확인 — docs/local-supabase-integration.md 6절.
+auto_expose_new_tables = true
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.pooler]
+enabled = false
+
+[db.seed]
+# seed.sql 은 개발 fixture (auth.users 직접 insert · demo 계정) — 통합 테스트 DB 에는 넣지 않는다. 필요하면 psql 로 명시 적용
+enabled = false
+
+[realtime]
+enabled = false
+
+[studio]
+enabled = false
+
+[inbucket]
+enabled = false
+
+[storage]
+enabled = false
+
+[edge_runtime]
+enabled = false
+
+[analytics]
+enabled = false
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3100"
+additional_redirect_urls = ["http://127.0.0.1:3100"]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+enable_signup = true
+enable_anonymous_sign_ins = false
+minimum_password_length = 12
+
+[auth.email]
+enable_signup = true
+double_confirm_changes = true
+# 로컬: 확인 메일 없이 즉시 사용 — 관리자 계정은 admin API(createUser, email_confirm) 로만 만든다
+enable_confirmations = false
+
+[auth.sms]
+enable_signup = false
+enable_confirmations = false
+
+[auth.mfa]
+max_enrolled_factors = 10
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true

@@ -7,6 +7,14 @@ cd "$(dirname "$0")"
 DB_NAME="${DB_NAME:-blind_dating_check}"
 PSQL="${PSQL:-psql -v ON_ERROR_STOP=1 -q}"
 
+# 마이그레이션 버전 중복 검사 — DB 를 건드리기 전에 (같은 번호가 둘이면 Supabase CLI 경로가 깨진다. psql 로는 통과하므로 여기서 잡는다)
+if command -v node >/dev/null 2>&1; then
+  node ../scripts/check-migration-versions.mjs
+else
+  echo "ERROR: node 가 필요합니다 (supabase/scripts/check-migration-versions.mjs 실행)" >&2
+  exit 1
+fi
+
 dropdb --if-exists "$DB_NAME"
 createdb "$DB_NAME"
 
@@ -29,6 +37,13 @@ fi
 if [[ "${WITH_IDENTITY_TESTS:-1}" == "1" && -f identity_tests.sql ]]; then
   echo "running identity tests"
   $PSQL -d "$DB_NAME" -f identity_tests.sql
+fi
+
+if [[ "${WITH_IDENTITY_SESSION_TESTS:-1}" == "1" && -f identity_sessions_tests.sql ]]; then
+  echo "running identity session tests (#6 — 세션 서버 전용 · 소유자/만료/lease 조건부 점유 · 상태 전이 가드 · relink 0행 · cascade · prune)"
+  $PSQL -d "$DB_NAME" -f identity_sessions_tests.sql
+  echo "running identity concurrency tests (#6 — 두 연결: 같은 identity 동시 insert 1행 · relink 경쟁 0행 · 세션 동시 claim 1행)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash identity_concurrency_test.sh
 fi
 
 if [[ "${WITH_SMS_RATE_LIMIT_TESTS:-1}" == "1" && -f sms_rate_limit_tests.sql ]]; then
@@ -105,6 +120,13 @@ if [[ "${WITH_ADMIN_LOGIN_GUARD_TESTS:-1}" == "1" && -f admin_login_guard_tests.
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash admin_login_guard_concurrency_test.sh
 fi
 
+if [[ "${WITH_ADMIN_ACCOUNTS_TESTS:-1}" == "1" && -f admin_accounts_tests.sql ]]; then
+  echo "running admin accounts tests (#27 — 관리자 계정 앱 사용자 행 없음 · bootstrap 1회 · owner/viewer · 마지막 owner 보호 · 세션 DB 검증(강등/비활성화/취소 즉시 반영) · 구 로그인 게이트 · 서버 전용)"
+  $PSQL -d "$DB_NAME" -f admin_accounts_tests.sql
+  echo "running admin accounts concurrency tests (#27 — 두 owner 동시 강등 → 활성 owner 1명 유지)"
+  DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash admin_accounts_concurrency_test.sh
+fi
+
 if [[ "${WITH_PUSH_TESTS:-1}" == "1" && -f push_tests.sql ]]; then
   echo "running push tests (#17 — 토큰/설정 RLS · outbox 트리거 · dequeue/mark 서버 전용)"
   $PSQL -d "$DB_NAME" -f push_tests.sql
@@ -114,6 +136,11 @@ if [[ "${WITH_RECOMMENDATION_RUNS_TESTS:-1}" == "1" && -f recommendation_runs_te
   echo "running recommendation runs tests (#22 — claim/busy/skip · lease 만료 재획득 · 서버 전용)"
   $PSQL -d "$DB_NAME" -f recommendation_runs_tests.sql
   DB_NAME="$DB_NAME" PSQL="$PSQL -X" bash recommendation_claim_concurrency_test.sh
+fi
+
+if [[ "${WITH_RECOMMENDATION_BATCH_TESTS:-1}" == "1" && -f recommendation_batch_tests.sql ]]; then
+  echo "running recommendation batch tests (#22/#17 — 대상 재시도 간격(exhausted 1h·failed 15m) · sweep 커서 claim/lease/날짜 변경 · 소개 알림 참조 이전·발송 시점 재확인 · 서버 전용)"
+  $PSQL -d "$DB_NAME" -f recommendation_batch_tests.sql
 fi
 
 if [[ "${WITH_RECOMMENDATION_OBSERVABILITY_TESTS:-1}" == "1" && -f recommendation_observability_tests.sql ]]; then
