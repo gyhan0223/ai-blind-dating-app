@@ -122,6 +122,14 @@ function section(title) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errText = (e) => (e ? `${e.message ?? ''} ${e.code ?? ''} ${e.details ?? ''}`.trim() : '');
+/** Realtime 소켓 연결 상태 (진단용 — 버전에 따라 메서드가 없을 수 있어 방어적으로) */
+function rtConnected(u) {
+  try {
+    return typeof u.client.realtime.isConnected === 'function' ? u.client.realtime.isConnected() : 'n/a';
+  } catch {
+    return 'err';
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 클라이언트 · Edge 호출 (앱의 supabase.ts / edge.ts 와 같은 경로)
@@ -514,7 +522,11 @@ async function run() {
   must('A send_message RPC → 저장 행', !m1.error && m1.row?.id && m1.row.sender_id === A.userId && m1.row.client_message_id === cid1, errText(m1.error));
   {
     const got = await subB.waitFor((i) => i.messages.some((m) => m.id === m1.row.id));
-    must(`B 가 A 의 메시지를 Realtime 으로 수신 (${REALTIME_TIMEOUT_MS}ms 안)`, got, `received=${subB.inbox.messages.length}`);
+    must(
+      `B 가 A 의 메시지를 Realtime 으로 수신 (${REALTIME_TIMEOUT_MS}ms 안)`,
+      got,
+      `received=${subB.inbox.messages.length} B_connected=${rtConnected(B)} statuses=${subB.inbox.statuses.join('>')}`,
+    );
     const evt = subB.inbox.messages.find((m) => m.id === m1.row.id);
     check('실시간 payload 에 본문·발신자·conversation_id 포함', evt.content === '안녕하세요, 반가워요!' && evt.sender_id === A.userId && evt.conversation_id === conv1);
     const echo = await subA.waitFor((i) => i.messages.some((m) => m.id === m1.row.id));

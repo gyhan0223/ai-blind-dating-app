@@ -210,7 +210,22 @@ fi
 # 3) [app] Edge Function 서빙 + 앱 요청 통합 테스트 — 실제 GoTrue · PostgREST · Realtime · Edge Runtime, 사용자 JWT 경로
 # ---------------------------------------------------------------------------
 if has_suite app; then
-  log "3a) Realtime publication 확인 (messages · matches 가 supabase_realtime 에 있어야 실시간 전달이 된다)"
+  # start 모드에서는 2c·2d 의 `db reset` 이 DB 를 drop/recreate 하므로, 먼저 떠 있던 Realtime 컨테이너의 WAL 복제 슬롯이
+  # 옛 DB 를 가리킨 채 끊긴다 — 채널 구독(phoenix)은 SUBSCRIBED 되지만 INSERT/UPDATE 가 하나도 흘러오지 않는다.
+  # Realtime 컨테이너를 재시작해 현재 DB 에 복제를 다시 건다 (attach 모드는 우리가 reset 하지 않으므로 불필요).
+  if [[ "$MODE" == "start" ]]; then
+    RT_CONTAINER="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i realtime | grep bonsim-it | head -1)"
+    [[ -n "$RT_CONTAINER" ]] || fail "Realtime 컨테이너를 찾지 못했습니다 (bonsim-it) — 격리 스택에 realtime 이 떠 있는지 확인"
+    log "3a) db reset 뒤 Realtime 복제 재설정 — 컨테이너 재시작 ($RT_CONTAINER)"
+    docker restart "$RT_CONTAINER" >/dev/null || fail "Realtime 컨테이너 재시작 실패 ($RT_CONTAINER)"
+    for _ in $(seq 1 30); do
+      if [[ "$(docker inspect -f '{{.State.Running}}' "$RT_CONTAINER" 2>/dev/null)" == "true" ]]; then break; fi
+      sleep 1
+    done
+    sleep 5  # 재시작 후 Postgres 재연결 · 복제 슬롯 재생성까지 여유
+  fi
+
+  log "3b) Realtime publication 확인 (messages · matches 가 supabase_realtime 에 있어야 실시간 전달이 된다)"
   PUB_TABLES=""
   if [[ "$MODE" == "start" ]]; then
     PUB_TABLES="$(docker exec -e PGPASSWORD=postgres supabase_db_bonsim-it psql -U postgres -d postgres -Atc "select coalesce(string_agg(tablename, ',' order by tablename), '') from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public'" 2>/dev/null || true)"
@@ -229,7 +244,7 @@ if has_suite app; then
     esac
   fi
 
-  log "3b) supabase functions serve (개발 env · 백그라운드)"
+  log "3c) supabase functions serve (개발 env · 백그라운드)"
   FUNCS_LOG="$IT_DIR/functions-serve.log"
   mkdir -p "$IT_DIR"
   (exec "${SUPA[@]}" "${WORKDIR_FLAG[@]}" functions serve --env-file "$FUNCS_ENV_FILE" >"$FUNCS_LOG" 2>&1) &
@@ -249,7 +264,7 @@ if has_suite app; then
     *) fail "Edge Runtime 이 ${SUPABASE_URL}/functions/v1 에서 응답하지 않습니다 (마지막 코드: ${FUNCS_CODE:-없음}, ${FUNCS_LOG})" ;;
   esac
 
-  log "3c) 앱 요청 통합 테스트 (supabase/tests/app_flow_integration.mjs)"
+  log "3d) 앱 요청 통합 테스트 (supabase/tests/app_flow_integration.mjs)"
   [[ -d "$ROOT/apps/admin/node_modules" || -d "$ROOT/apps/mobile/node_modules" ]] || fail "apps/admin 또는 apps/mobile 에 npm ci 가 필요합니다 (@supabase/supabase-js)" 2
   node "$ROOT/supabase/tests/app_flow_integration.mjs"
 
