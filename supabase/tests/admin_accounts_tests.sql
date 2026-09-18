@@ -182,4 +182,31 @@ $$;
 reset role;
 select set_config('request.jwt.claim.sub', '', false);
 
+-- 7) (0035) 실제 GoTrue createUser 순서 재현: auth.users insert(표식 없음) → 같은 트랜잭션에서 raw_app_meta_data update(bonsim_admin=true)
+--    → 관리자 계정에 public.users 행이 남지 않는다. 기존 앱 사용자(프로필 있음)에 표식이 붙어도 행은 지워지지 않는다.
+do $$
+declare
+  g1 uuid := 'ad000000-0000-4000-8000-000000000031';
+  g2 uuid := 'ad000000-0000-4000-8000-000000000032';
+  r jsonb;
+begin
+  insert into auth.users (id, email) values (g1, 'gotrue-admin@admin.test');          -- GoTrue: insert (provider 만)
+  if not exists (select 1 from public.users where id = g1) then raise exception 'FAIL precondition: insert without marker creates app row'; end if;
+  update auth.users set raw_app_meta_data = '{"provider":"email","providers":["email"],"bonsim_admin":"true"}' where id = g1; -- GoTrue: app_metadata update
+  if exists (select 1 from public.users where id = g1) then raise exception 'FAIL 0035: admin marker applied after insert must remove the fresh app user row'; end if;
+  if exists (select 1 from public.subscriptions where user_id = g1) then raise exception 'FAIL 0035: subscriptions row must cascade'; end if;
+  r := public.admin_member_add('ad000000-0000-4000-8000-000000000001', g1, 'GoTrue 생성 관리자', 'viewer');
+  if (r->>'ok')::boolean is not true then raise exception 'FAIL 0035: GoTrue-created admin must be addable: %', r; end if;
+
+  -- 기존 앱 사용자(온보딩 진행 중, 프로필 있음)에 표식을 붙여도 데이터는 보존된다 (그리고 여전히 관리자가 될 수 없다)
+  insert into auth.users (id, phone, phone_confirmed_at) values (g2, '821000009302', now());
+  insert into public.profiles (user_id, nickname, birth_year, gender, seeking_gender, region) values (g2, '앱사용자', 1995, 'male', 'female', 'seoul');
+  update auth.users set raw_app_meta_data = '{"bonsim_admin":"true"}' where id = g2;
+  if not exists (select 1 from public.users where id = g2) then raise exception 'FAIL 0035: existing app user with profile must keep its row'; end if;
+  r := public.admin_member_add('ad000000-0000-4000-8000-000000000001', g2, 'x', 'viewer');
+  if r->>'reason' is distinct from 'app_user_not_allowed' then raise exception 'FAIL 0035: marked app user still must not become admin: %', r; end if;
+  raise notice 'admin accounts 0035 (GoTrue metadata order) tests passed';
+end;
+$$;
+
 select 'ADMIN ACCOUNTS TESTS PASSED' as result;

@@ -1,4 +1,4 @@
--- 0032_recommendation_batch_sweep.sql
+-- 0034_recommendation_batch_sweep.sql (이전 파일명 0032_recommendation_batch_sweep.sql — 0032_identity_verification_sessions.sql 과 버전이 겹쳐 0034 로 옮김. 내용 동일)
 -- Issue #22 (후보 부족 사용자 서버 재확인) · #17 (소개 저장 → 알림 발송 시점 재확인) · #23 (대기 정책)
 --
 -- 문제
@@ -19,7 +19,7 @@
 --   3) notification_events.recommendation_id: 소개 알림이 가리키는 추천 행. 트리거가 같은 날 두 번째 pending 추천(첫 추천이 발송 전에
 --      만료된 경우)으로 아직 발송되지 않은 이벤트의 참조를 옮긴다 (발송된 뒤에는 바꾸지 않는다 — 하루 1건 유지).
 --      notification_events_dequeue 가 recommendation_valid(추천이 아직 pending 이고 상대가 active·인증·차단 없음)를 함께 돌려주고,
---      발송기(pushCore)는 false 면 발송하지 않고 skipped_reason='recommendation_invalid' 로 닫는다. 0032 이전 이벤트(참조 없음)는 null → 기존대로 발송.
+--      발송기(pushCore)는 false 면 발송하지 않고 skipped_reason='recommendation_invalid' 로 닫는다. 0034(구 0032) 이전 이벤트(참조 없음)는 null → 기존대로 발송.
 --   알림 생성 시점은 그대로 "추천 행 insert(pending)" 뿐이다 — 신규 가입·후보 발견·후보 부족 재확인은 알림을 만들지 않는다.
 
 -- ---------------------------------------------------------------------------
@@ -167,7 +167,7 @@ alter table public.notification_events
   add column if not exists recommendation_id uuid references public.recommendations (id) on delete set null;
 
 comment on column public.notification_events.recommendation_id is
-  'daily_recommendation 이벤트가 가리키는 추천 행 (0032). 발송 전에 같은 날 새 pending 추천이 생기면 참조를 옮긴다. 발송기는 이 행이 아직 pending 이고 상대가 유효할 때만 보낸다. 0032 이전 이벤트는 null';
+  'daily_recommendation 이벤트가 가리키는 추천 행 (0034). 발송 전에 같은 날 새 pending 추천이 생기면 참조를 옮긴다. 발송기는 이 행이 아직 pending 이고 상대가 유효할 때만 보낸다. 0034 이전 이벤트는 null';
 
 comment on column public.notification_events.skipped_reason is
   '발송하지 않고 닫은 이유: no_token | pref_off | recipient_inactive | recommendation_invalid | unknown_kind(알 수 없는 종류·6시간 지난 이벤트) | expired(5회 실패). delivered_at 은 함께 채워진다 (재처리 방지)';
@@ -254,7 +254,7 @@ begin
       select jsonb_agg(jsonb_build_object('token', t.token, 'platform', t.platform))
       from public.push_tokens t where t.user_id = c.recipient_id and t.enabled
     ), '[]'::jsonb) as tokens,
-    -- 소개 알림: 발송 시점에 추천이 아직 pending 이고 상대가 유효(active·인증·차단 없음)한지. 참조가 없는(0032 이전) 이벤트는 null
+    -- 소개 알림: 발송 시점에 추천이 아직 pending 이고 상대가 유효(active·인증·차단 없음)한지. 참조가 없는(0034 이전) 이벤트는 null
     case
       when c.kind <> 'daily_recommendation' or c.recommendation_id is null then null
       else exists (

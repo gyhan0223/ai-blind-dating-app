@@ -312,6 +312,17 @@ const verify = async (h, pending, code = GOOD_CODE) => {
   check('재시작하면 unverified factor 는 정리되고 새 factor', e2.ok && h.provider.users.get(VIEWER).factors.length === 1);
   const bad = await verify(h, e2.pending, '999999');
   check('등록 코드 틀림 → bad_code, factor 미검증', !bad.ok && bad.reason === 'bad_code' && !h.provider.users.get(VIEWER).factors[0].verified);
+  // 등록 화면(서버 컴포넌트 렌더)은 쿠키를 쓸 수 없어 factor id 를 폼으로 넘긴다 — fid 없는 pending + 폼 factor id 경로 (실제 Auth 통합에서 발견된 500 의 수정)
+  const unverifiedId = h.provider.users.get(VIEWER).factors[0].id;
+  check('fid 없는 pending + 폼 factor id 없음 → no_pending', (await runMfaVerify(h.deps, l.pending, GOOD_CODE)).reason === 'no_pending');
+  check('fid 없는 pending + 모르는 factor id → no_pending (GoTrue 호출 없음)', (await runMfaVerify(h.deps, l.pending, GOOD_CODE, 'f-not-mine')).reason === 'no_pending' && !h.provider.users.get(VIEWER).factors[0].verified);
+  const vForm = await runMfaVerify(h.deps, l.pending, GOOD_CODE, unverifiedId);
+  check('fid 없는 pending + 이 사용자의 미검증 factor id → verified + 세션', vForm.ok && vForm.role === 'viewer' && h.provider.users.get(VIEWER).factors[0].verified);
+  check('검증된 factor id 를 폼으로 넘겨도 등록 경로로 쓸 수 없다 (no_pending)', (await runMfaVerify(h.deps, l.pending, GOOD_CODE, unverifiedId)).reason === 'no_pending');
+  h.provider.users.get(VIEWER).factors[0].verified = false; // 아래 기존 흐름(쿠키 fid 경로) 계속
+  h.directory.sessions.clear();
+  const bad2 = await verify(h, e2.pending, '999999');
+  check('pending 에 fid 가 있으면 폼 값은 무시된다 (틀린 코드 → bad_code)', !bad2.ok && bad2.reason === 'bad_code' && (await runMfaVerify(h.deps, e2.pending, '999999', 'f-other')).reason === 'bad_code');
   const v = await verify(h, e2.pending);
   check('등록 코드 맞음 → factor verified + 세션 (viewer)', v.ok && v.role === 'viewer' && h.provider.users.get(VIEWER).factors[0].verified);
   const s = await resolveSession(h.deps, v.session);

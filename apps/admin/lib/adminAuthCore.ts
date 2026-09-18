@@ -295,16 +295,31 @@ export type MfaVerifyResult =
   | { ok: true; session: string; userId: string; role: AdminRole; displayName: string }
   | { ok: false; reason: 'no_pending' | 'bad_code' | 'locked' | 'unavailable' | 'not_aal2' | 'not_active'; lockedSeconds?: number };
 
-export async function runMfaVerify(deps: AdminAuthDeps, pendingCookie: string | null | undefined, code: string): Promise<MfaVerifyResult> {
+/**
+ * @param enrollFactorId 등록 화면(서버 컴포넌트 렌더)이 발급한 factor id — 렌더 중에는 쿠키를 쓸 수 없어(Next 제약) 폼의 숨은 필드로 온다.
+ *   pending 토큰에 fid 가 없을 때만 쓰며, 그 사용자의 GoTrue **미검증** factor 여야 한다 (검증된 factor · 다른 값은 no_pending).
+ *   pending 토큰에 fid 가 있으면(로그인 검증 경로) 입력값은 무시한다 — 폼 값은 어느 경우에도 등록된 factor 를 바꾸지 못한다.
+ */
+export async function runMfaVerify(deps: AdminAuthDeps, pendingCookie: string | null | undefined, code: string, enrollFactorId?: string | null): Promise<MfaVerifyResult> {
   const p = verifyToken(deps.secret, pendingCookie, deps.now(), 'p') as PendingToken | null;
-  if (!p || !p.fid) return { ok: false, reason: 'no_pending' };
+  if (!p) return { ok: false, reason: 'no_pending' };
   const cleaned = code.replace(/\s+/g, '');
   if (!/^\d{6}$/.test(cleaned)) return { ok: false, reason: 'bad_code' };
   const key = guardKey(deps.secret, 'mfa', p.sub);
   const tokens = { accessToken: p.at, refreshToken: p.rt };
 
+  let fid = p.fid;
+  if (!fid) {
+    const candidate = (enrollFactorId ?? '').trim();
+    if (!candidate) return { ok: false, reason: 'no_pending' };
+    const factors = await deps.provider.listFactors(tokens);
+    if (!factors.ok) return { ok: false, reason: 'unavailable' };
+    if (!factors.unverified.includes(candidate)) return { ok: false, reason: 'no_pending' };
+    fid = candidate;
+  }
+
   const verified = await runLoginGuardAsync(deps.directory.guard, key, async () => {
-    const r = await deps.provider.challengeAndVerify(tokens, p.fid!, cleaned);
+    const r = await deps.provider.challengeAndVerify(tokens, fid!, cleaned);
     if (r.ok) return { ok: true as const, value: r.tokens };
     if (r.reason === 'unavailable') return { ok: false as const, unavailable: true };
     return { ok: false as const, unavailable: false };

@@ -1,6 +1,6 @@
 -- recommendation_batch_tests.sql
--- Issue #22 / #17 / #23 (0032) — 배치 대상의 재시도 간격 · sweep 커서(claim/lease/save/날짜 변경) · 소개 알림의 발송 시점 재확인.
--- local_supabase_mock.sql + 전체 마이그레이션(0032 포함) 적용 후 실행한다. 시간은 finished_at/lease_until 을 직접 옮겨 제어한다 (실제 대기 없음).
+-- Issue #22 / #17 / #23 (0034_recommendation_batch_sweep — 구 0032) — 배치 대상의 재시도 간격 · sweep 커서(claim/lease/save/날짜 변경) · 소개 알림의 발송 시점 재확인.
+-- local_supabase_mock.sql + 전체 마이그레이션(0034 포함) 적용 후 실행한다. 시간은 finished_at/lease_until 을 직접 옮겨 제어한다 (실제 대기 없음).
 
 \set ON_ERROR_STOP on
 
@@ -223,7 +223,7 @@ begin
   select count(*) into n from public.notification_events where recipient_id = ua and kind = 'daily_recommendation';
   if n <> 1 then raise exception 'FAIL still one event per day after delivery, got %', n; end if;
 
-  -- 0032 이전 이벤트(참조 없음)는 null — 발송기는 기존대로 보낸다 / 다른 종류도 null
+  -- 0034 이전 이벤트(참조 없음)는 null — 발송기는 기존대로 보낸다 / 다른 종류도 null
   update public.notification_events set recommendation_id = null, delivered_at = null, claimed_at = null where id = ev;
   select d.recommendation_valid into valid from public.notification_events_dequeue(500) d where d.id = ev;
   if valid is not null then raise exception 'FAIL legacy event without reference should be null'; end if;

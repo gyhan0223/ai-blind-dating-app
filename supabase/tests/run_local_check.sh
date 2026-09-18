@@ -7,6 +7,14 @@ cd "$(dirname "$0")"
 DB_NAME="${DB_NAME:-blind_dating_check}"
 PSQL="${PSQL:-psql -v ON_ERROR_STOP=1 -q}"
 
+# 마이그레이션 버전 중복 검사 — DB 를 건드리기 전에 (같은 번호가 둘이면 Supabase CLI 경로가 깨진다. psql 로는 통과하므로 여기서 잡는다)
+if command -v node >/dev/null 2>&1; then
+  node ../scripts/check-migration-versions.mjs
+else
+  echo "ERROR: node 가 필요합니다 (supabase/scripts/check-migration-versions.mjs 실행)" >&2
+  exit 1
+fi
+
 dropdb --if-exists "$DB_NAME"
 createdb "$DB_NAME"
 

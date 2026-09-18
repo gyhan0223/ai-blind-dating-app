@@ -13,9 +13,9 @@
  *   admin.mfa.deleteFactor({ id, userId }) — 서버 전용 복구
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import type { AdminAuthProvider, AdminDirectory, AdminRole, AuthTokens, MemberInfo } from './adminAuthCore';
-import { type GuardEvent, type GuardHit, LOGIN_LOCK_SECONDS, LOGIN_MAX_FAILURES, type LoginGuardStore } from './adminSessionCore';
-import { adminClient } from './supabaseAdmin';
+import type { AdminAuthProvider, AdminDirectory, AdminRole, AuthTokens, MemberInfo } from './adminAuthCore.ts';
+import { type GuardEvent, type GuardHit, LOGIN_LOCK_SECONDS, LOGIN_MAX_FAILURES, type LoginGuardStore } from './adminSessionCore.ts';
+import { adminClient } from './supabaseAdmin.ts';
 
 function anonUrlKey(): { url: string; key: string } {
   const url = process.env.SUPABASE_URL;
@@ -255,7 +255,7 @@ export function supabaseAdminDirectory(): AdminDirectory {
     },
     guard: dbGuardStore,
     async audit(actor, action, targetType, targetId, detail) {
-      const { recordAdminAuditRaw } = await import('./audit');
+      const { recordAdminAuditRaw } = await import('./audit.ts');
       await recordAdminAuditRaw(actor, action, targetType, targetId, detail);
     },
   };

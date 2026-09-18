@@ -1,8 +1,8 @@
-import type { AdminRole, AdminSession } from './adminAuthCore';
-import { ADMIN_PASSWORD_MIN_LENGTH, isValidEmail } from './adminAuthCore';
-import { recordAdminAudit } from './audit';
-import { adminClient } from './supabaseAdmin';
-import { supabaseAdminAuthProvider } from './supabaseAdminAuth';
+import type { AdminRole, AdminSession } from './adminAuthCore.ts';
+import { ADMIN_PASSWORD_MIN_LENGTH, isValidEmail } from './adminAuthCore.ts';
+import { recordAdminAudit } from './audit.ts';
+import { adminClient } from './supabaseAdmin.ts';
+import { supabaseAdminAuthProvider } from './supabaseAdminAuth.ts';
 
 /**
  * 관리자 멤버 관리 (#27) — owner 전용. 서버 액션이 requireOwner 뒤에 부른다.

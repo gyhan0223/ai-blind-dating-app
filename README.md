@@ -59,9 +59,11 @@
 # Supabase CLI 로 새 프로젝트 연결 (또는 로컬: supabase start)
 supabase link --project-ref <your-project-ref>
 
-# 마이그레이션 적용 (0001 → 0033 순서대로 — 0015~0033 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절, 0027 은 docs/matching-policy.md 12절,
-#   0028 삭제 작업 상태(#13) · 0029 얼굴 세션별 자산/정리 큐(#11) · 0030 얼굴 정보 처리 동의(#12) · 0031 관리자 로그인 제한(#27) · 0032 본인확인 세션(#6) · 0033 관리자 계정/MFA/역할(#27, docs/admin-auth.md) — docs/data-retention.md · docs/face-consent.md · docs/security.md · docs/identity-verification.md)
-supabase db push        # 또는: psql 로 supabase/migrations/*.sql 순서 실행
+# 마이그레이션 적용 (0001 → 0035 순서대로 — 0015~0035 은 앱 배포 전에 적용, 0016 은 앱과 같은 릴리스 창에서. 0026 은 docs/conversation-policy.md 5절, 0027 은 docs/matching-policy.md 12절,
+#   0028 삭제 작업 상태(#13) · 0029 얼굴 세션별 자산/정리 큐(#11) · 0030 얼굴 정보 처리 동의(#12) · 0031 관리자 로그인 제한(#27) · 0032 본인확인 세션(#6) · 0033 관리자 계정/MFA/역할(#27, docs/admin-auth.md)
+#   · 0034 추천 배치 sweep/알림 재확인(#22/#17 — 구 0032, 번호 충돌로 이동) · 0035 관리자 계정 GoTrue metadata 순서 대응(#27) — docs/data-retention.md · docs/face-consent.md · docs/security.md · docs/identity-verification.md)
+# 원격 이력에 0032 가 어떻게 기록돼 있는지 먼저 확인한다 (docs/local-supabase-integration.md 5절). 파일명 버전 중복은 node supabase/scripts/check-migration-versions.mjs 가 잡는다.
+supabase db push        # Supabase CLI 경로 (이력 supabase_migrations.schema_migrations 에 버전당 1행). 로컬 실제 스택 검증: bash supabase/tests/run_supabase_integration.sh
 
 # 시드 (개발용 데모 사용자 12명 + 매치/대화 샘플 + banned identity fixture)
 # ⚠️ local/staging 전용 — production DB 에는 절대 실행하지 않는다 (docs/environments.md)

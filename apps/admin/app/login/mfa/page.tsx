@@ -6,7 +6,8 @@ export const dynamic = 'force-dynamic';
 
 async function verify(formData: FormData) {
   'use server';
-  const res = await verifyMfaCode(String(formData.get('code') ?? ''));
+  // fid: 등록 화면이 발급한 factor id (등록 경로에서만). 코어가 이 사용자의 미검증 factor 인지 GoTrue 에서 확인한다 — 폼 값으로 다른 factor 를 고를 수 없다
+  const res = await verifyMfaCode(String(formData.get('code') ?? ''), String(formData.get('fid') ?? ''));
   if (res.ok) redirect('/');
   if (res.reason === 'no_pending') redirect('/login?error=expired');
   if (res.reason === 'locked') redirect(`/login/mfa?error=locked&sec=${res.lockedSeconds ?? 0}`);
@@ -31,11 +32,12 @@ export default async function MfaPage({ searchParams }: { searchParams: Promise<
   const pending = await pendingState();
   if (!pending) redirect('/login?error=expired');
 
-  let enroll: { qrCodeSvg: string; secret: string; uri: string } | null = null;
+  let enroll: { qrCodeSvg: string; secret: string; uri: string; factorId: string } | null = null;
   if (!pending.hasFactor) {
+    // 렌더 중 GoTrue 에 factor 를 발급한다 (쿠키는 쓰지 않는다 — Next 는 렌더 중 쿠키 변경을 금지한다). factor id 는 아래 폼의 숨은 필드로
     const e = await startMfaEnrollment();
     if (!e.ok) redirect(e.reason === 'no_pending' ? '/login?error=expired' : '/login?error=unavailable');
-    enroll = { qrCodeSvg: e.qrCodeSvg, secret: e.secret, uri: e.uri };
+    enroll = { qrCodeSvg: e.qrCodeSvg, secret: e.secret, uri: e.uri, factorId: e.factorId };
   }
 
   return (
@@ -63,6 +65,7 @@ export default async function MfaPage({ searchParams }: { searchParams: Promise<
           </div>
         </div>
       )}
+      {enroll && <input type="hidden" name="fid" value={enroll.factorId} />}
       <input type="text" name="code" inputMode="numeric" pattern="[0-9 ]{6,7}" placeholder="6자리 코드" autoComplete="one-time-code" autoFocus required />
       {params.error === 'locked' && (
         <p className="error">코드 실패가 많아 잠시 잠겼습니다. 약 {Math.max(1, Math.ceil(Number(params.sec ?? 0) / 60))}분 뒤 다시 시도하세요.</p>

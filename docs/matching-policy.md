@@ -144,7 +144,7 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
   후보 부족은 1시간 뒤 다시 대상이 된다(그날 소개를 받은 것이 아니다). 실패 15분 간격은 배치에만 적용되고, 앱의 직접 요청은 `recommendation_run_claim` 이 실패 뒤 바로 다시 맡는다 (기존 정책).
 - **사용자별** `recommendation_run_claim` → 코어 → `recommendation_run_finish`. 앱의 `daily-recommendation` 과 같은 잠금이라 둘이 겹쳐도 하루 한 명이고, 배치는 `busy` 를 기다리지 않는다.
   같은 날 몇 번을 호출해도 새 행이 생기지 않는다.
-- **이어서 처리 (0032, `recommendation_batch_cursor`)**: 한 호출은 `max_users`(기본 100, 최대 300) 명씩 페이지를 돌고, `time_budget_ms`(기본 50초, 최대 120초)·`max_pages`(기본 20) 안에서 멈춘다.
+- **이어서 처리 (0034, `recommendation_batch_cursor`)**: 한 호출은 `max_users`(기본 100, 최대 300) 명씩 페이지를 돌고, `time_budget_ms`(기본 50초, 최대 120초)·`max_pages`(기본 20) 안에서 멈춘다.
   진행 위치(`after` = 마지막으로 처리한 user_id)는 페이지마다 서버 커서(단일 행)에 저장되고, **다음 호출이 그 자리부터 이어간다**. 끝까지 훑으면 `after=null`(다음은 처음부터).
   커서는 lease(180초)로 잠가 cron 이 겹쳐도 sweep 이 하나만 돈다(겹친 호출은 `stopped_reason='sweep_in_progress'` 로 아무것도 하지 않는다). 함수가 죽으면 lease 만료 뒤 다음 호출이 이어간다.
   응답의 `next_after` 는 관측용이며 호출자가 넘길 필요가 없다. `body.after` 를 명시하면(null 포함) 저장 커서 대신 거기서 시작한다 (수동 실행용).
@@ -173,7 +173,7 @@ MVP(#30)는 **사진 없이 대화로 먼저 알아가는 소개팅**이다. 인
 - **운영상 영향** (15분 × 하루 96회): 호출마다 대상 조회 1회(+페이지당 1회) 와 커서 RPC 2~3회가 늘고, 대상 사용자마다 후보 스캔(최대 500명)이 돈다.
   대상이 없으면 호출은 조회 몇 번으로 끝난다. 후보 부족 사용자 N 명은 시간당 최대 N 번 스캔된다 (앱을 열든 말든 1시간에 한 번 — 앱 재요청은 스캔을 더 만들지 않는다).
   밤에도 소개가 만들어질 수 있으므로 **소개 알림이 밤에 울릴 수 있다** — 이 저장소에는 야간 알림 정책이 없고 이번에 임의로 도입하지 않았다(필요하면 별도 이슈).
-- 배포: `0017_recommendation_runs.sql` → `0027_recommendation_observability.sql` → `0032_recommendation_batch_sweep.sql` → `supabase functions deploy daily-recommendation daily-recommendation-batch send-push` → cron 교체 (14절).
+- 배포: `0017_recommendation_runs.sql` → `0027_recommendation_observability.sql` → `0034_recommendation_batch_sweep.sql` → `supabase functions deploy daily-recommendation daily-recommendation-batch send-push` → cron 교체 (14절).
   0017 은 `recommendations` 의 unique 제약을 바꾸므로 seed 의 `on conflict (user_id, candidate_id, for_date)` 와 같이 배포한다.
 
 ## 11. 선호·프로필 수정의 반영 시점 (#25)
@@ -279,7 +279,7 @@ supabase functions deploy daily-recommendation-batch
 # 3) 관리자 웹 (/recommendation-pool) → 4) 앱 (cap_reached 카드·선호 조건 링크). 새 cron 등록은 없다 (배치 스케줄은 10절 그대로)
 ```
 
-(0032 배치 상시 재확인·알림 연결의 배포 순서는 14절.)
+(0034 배치 상시 재확인·알림 연결의 배포 순서는 14절.)
 
 배포 뒤 확인: `select result, count(*) from recommendation_runs where for_date = (now() at time zone 'Asia/Seoul')::date group by 1` 과 관리자 `/recommendation-pool` 의 전체 행이 같은 그림이면 된다.
 `select count(*) from analytics_events where event_type = 'recommendation_created'` 는 `select count(*) from recommendations` 와 같아야 한다.
@@ -293,15 +293,15 @@ supabase functions deploy daily-recommendation-batch
   seed 의 과거 외모 데이터를 지워도 같은 결과, 신규 무외모 사용자 추천, 인증·차단·신고·exhausted, reasons 불변, `recommendation_created` 이벤트 저장 행 기준 1건.
   `run_local_check.sh` 가 함께 실행한다.
 - `supabase/tests/recommendation_observability_tests.sql` — 이벤트 1회·DB unique, finish 관측값·5인자 호환, claim skip 의 cap_reached, 풀 통계 분류(demo 제외·미측정·중앙값·전체 행), 실행 통계, 일반 사용자 호출 불가.
-- `supabase/functions/_shared/matching/batchSelftest.ts` (#22, 0032) — sweep 오케스트레이션을 주입 시계로: 한 페이지보다 많은 대상(250명·3페이지) 전원 1회 처리, 시간 예산·최대 페이지에서 멈춘 뒤
+- `supabase/functions/_shared/matching/batchSelftest.ts` (#22, 0034) — sweep 오케스트레이션을 주입 시계로: 한 페이지보다 많은 대상(250명·3페이지) 전원 1회 처리, 시간 예산·최대 페이지에서 멈춘 뒤
   저장 커서로 이어가 누락·중복 없음, 앞쪽 사용자가 다시 대상이 돼도 뒤쪽이 먼저, 사용자 한 명 실패 격리, 자정(KST) 넘김 즉시 중단, lease 중 무동작, 명시 after, 집계 매핑.
-- `supabase/tests/recommendation_batch_tests.sql` (#22/#17, 0032) — 대상의 재시도 간격(exhausted 59분/61분 경계·failed 15분·인자 조정·ok/slots_full 그날 제외·lease), 커서 claim/busy/save/완료/lease 만료/날짜 변경/단일 행,
-  소개 알림(후보 부족 실행은 이벤트 없음·저장 시 1건·발송 전 참조 이전·발송 후 불변·발송 시점 재확인: 만료/제재/차단/확인 → false, 0032 이전 → null·KST 날짜별 1건), 서버 전용.
+- `supabase/tests/recommendation_batch_tests.sql` (#22/#17, 0034) — 대상의 재시도 간격(exhausted 59분/61분 경계·failed 15분·인자 조정·ok/slots_full 그날 제외·lease), 커서 claim/busy/save/완료/lease 만료/날짜 변경/단일 행,
+  소개 알림(후보 부족 실행은 이벤트 없음·저장 시 1건·발송 전 참조 이전·발송 후 불변·발송 시점 재확인: 만료/제재/차단/확인 → false, 0034 이전 → null·KST 날짜별 1건), 서버 전용.
 - `recommendation_db_test.mjs` 9절 (#22/#17) — 실제 DB 에서 sweep 전체: 후보 없음 대기(알림 없음) → 1시간 안 재탐색 없음 → 후보 추가 → `finished_at` 을 옮겨 재시도 시점 → 앱 미접속 상태의 배치가 소개 생성 → 알림 이벤트 1건,
   배치 재실행·앱 요청 중첩에도 추천/이벤트/실행 행 각 1, dequeue 의 `recommendation_valid`, 발송 실패·설정 off·토큰 없음은 소개 생성과 무관.
 - 실제 Didit 인증·실기기·원격 Supabase(PostgREST) 경로·pg_cron 실행·Expo Push 실제 발송은 로컬에서 실행하지 않는다 — 배포 후 확인 대상 (14절).
 
-## 14. 후보 부족 대기의 서버 재확인과 알림 연결 (#22 / #17 / #23, 0032)
+## 14. 후보 부족 대기의 서버 재확인과 알림 연결 (#22 / #17 / #23, 0034 — 구 0032)
 
 확정 정책(2026-09-17): 신규 가입을 지역·연령·성별 균형·초대코드로 막지 않고, 필수 조건도 완화하지 않는다. 후보가 없으면 기다리되 **서버가 다시 확인**하고,
 **실제 소개가 저장됐을 때만** 알림을 만든다. 하루 한 명·Plus 비활성·대화 3개 제한·종료 후 다음 날 재개는 그대로다.
@@ -324,11 +324,11 @@ bash scripts/server-selftests.sh                       # matching selftest + bat
 cd supabase\tests; bash run_local_check.sh; cd ..\..    # recommendation_batch_tests.sql + recommendation_db_test.mjs 9절 포함
 cd apps\mobile; npx tsc --noEmit; npx expo lint; cd ..\..
 
-# 1) DB — 0032 (additive: 대상 함수 시그니처 확장, 커서 테이블·함수 2개, notification_events.recommendation_id, dequeue 컬럼 추가, 트리거 갱신)
+# 1) DB — 0034_recommendation_batch_sweep.sql (구 0032 — 0032_identity_verification_sessions 와 번호가 겹쳐 0034 로 옮김. additive: 대상 함수 시그니처 확장, 커서 테이블·함수 2개, notification_events.recommendation_id, dequeue 컬럼 추가, 트리거 갱신)
 supabase link --project-ref $env:SUPABASE_PROJECT_REF
 supabase db push
 
-# 2) Edge Functions — 세 함수를 같은 창에서 (배치는 커서 RPC, 발송기는 dequeue 의 새 컬럼을 쓴다. 0032 이전 DB 에 새 배치를 배포하면 커서 RPC 없음 → 500)
+# 2) Edge Functions — 세 함수를 같은 창에서 (배치는 커서 RPC, 발송기는 dequeue 의 새 컬럼을 쓴다. 0034 이전 DB 에 새 배치를 배포하면 커서 RPC 없음 → 500)
 supabase functions deploy daily-recommendation
 supabase functions deploy daily-recommendation-batch
 supabase functions deploy send-push
