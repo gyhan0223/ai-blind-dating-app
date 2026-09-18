@@ -184,27 +184,39 @@ select set_config('request.jwt.claim.sub', '', false);
 
 -- 7) (0035) 실제 GoTrue createUser 순서 재현: auth.users insert(표식 없음) → 같은 트랜잭션에서 raw_app_meta_data update(bonsim_admin=true)
 --    → 관리자 계정에 public.users 행이 남지 않는다. 기존 앱 사용자(프로필 있음)에 표식이 붙어도 행은 지워지지 않는다.
+--    행위자: 1) 블록이 정리(cascade)로 모든 멤버를 지웠으므로 여기서 owner 를 새로 bootstrap 한다 (이전엔 삭제된 o1 을 써서 forbidden 으로 실패했다).
 do $$
 declare
+  g0 uuid := 'ad000000-0000-4000-8000-000000000030';   -- 이 블록의 활성 owner (행위자)
   g1 uuid := 'ad000000-0000-4000-8000-000000000031';
   g2 uuid := 'ad000000-0000-4000-8000-000000000032';
   r jsonb;
 begin
+  if exists (select 1 from public.admin_members where role = 'owner' and status = 'active') then raise exception 'FAIL precondition: block 1 must leave no active owner'; end if;
+  insert into auth.users (id, email, raw_app_meta_data) values (g0, 'gotrue-owner@admin.test', '{"bonsim_admin":"true"}');
+  r := public.admin_member_bootstrap(g0, '0035 운영자');
+  if (r->>'ok')::boolean is not true then raise exception 'FAIL 0035 precondition: bootstrap owner: %', r; end if;
+
   insert into auth.users (id, email) values (g1, 'gotrue-admin@admin.test');          -- GoTrue: insert (provider 만)
   if not exists (select 1 from public.users where id = g1) then raise exception 'FAIL precondition: insert without marker creates app row'; end if;
   update auth.users set raw_app_meta_data = '{"provider":"email","providers":["email"],"bonsim_admin":"true"}' where id = g1; -- GoTrue: app_metadata update
   if exists (select 1 from public.users where id = g1) then raise exception 'FAIL 0035: admin marker applied after insert must remove the fresh app user row'; end if;
   if exists (select 1 from public.subscriptions where user_id = g1) then raise exception 'FAIL 0035: subscriptions row must cascade'; end if;
-  r := public.admin_member_add('ad000000-0000-4000-8000-000000000001', g1, 'GoTrue 생성 관리자', 'viewer');
+  r := public.admin_member_add(g0, g1, 'GoTrue 생성 관리자', 'viewer');
   if (r->>'ok')::boolean is not true then raise exception 'FAIL 0035: GoTrue-created admin must be addable: %', r; end if;
 
   -- 기존 앱 사용자(온보딩 진행 중, 프로필 있음)에 표식을 붙여도 데이터는 보존된다 (그리고 여전히 관리자가 될 수 없다)
   insert into auth.users (id, phone, phone_confirmed_at) values (g2, '821000009302', now());
-  insert into public.profiles (user_id, nickname, birth_year, gender, seeking_gender, region) values (g2, '앱사용자', 1995, 'male', 'female', 'seoul');
+  insert into public.profiles (user_id, nickname, birth_year, gender, seeking_gender, region_code, height_cm, job_group, smoking, drinking)
+    values (g2, '앱사용자', 1995, 'male', 'female', 'seoul', 175, 'office', 'none', 'sometimes');
   update auth.users set raw_app_meta_data = '{"bonsim_admin":"true"}' where id = g2;
   if not exists (select 1 from public.users where id = g2) then raise exception 'FAIL 0035: existing app user with profile must keep its row'; end if;
-  r := public.admin_member_add('ad000000-0000-4000-8000-000000000001', g2, 'x', 'viewer');
+  r := public.admin_member_add(g0, g2, 'x', 'viewer');
   if r->>'reason' is distinct from 'app_user_not_allowed' then raise exception 'FAIL 0035: marked app user still must not become admin: %', r; end if;
+
+  -- 정리 (cascade) — 뒤에 오는 테스트가 이 블록의 멤버·사용자에 의존하지 않게
+  delete from auth.users where id in (g0, g1, g2);
+  if exists (select 1 from public.admin_members) then raise exception 'FAIL 0035 cleanup cascade'; end if;
   raise notice 'admin accounts 0035 (GoTrue metadata order) tests passed';
 end;
 $$;
