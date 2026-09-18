@@ -79,14 +79,15 @@ export async function runDailyRecommendationWithClaim(
           .catch(() => {});
         throw e;
       }
-      const ok = outcome.kind === 'ok';
+      // 판별 유니온은 `outcome.kind === 'ok'` 식으로만 좁혀진다 (boolean 변수로 빼면 Deno/tsc 가 좁히지 못한다)
+      const okOutcome = outcome.kind === 'ok' ? outcome : null;
       const details: RunFinishDetails = {
-        eligible: ok ? outcome.eligibleCount : null,
-        recommendationId: ok ? (outcome.createdIds[0] ?? null) : null,
+        eligible: okOutcome ? okOutcome.eligibleCount : null,
+        recommendationId: okOutcome ? (okOutcome.createdIds[0] ?? null) : null,
         errorStage: outcome.kind === 'lookup_failed' ? outcome.stage : null,
       };
       await claims
-        .finish(input.userId, input.today, resultOf(outcome), ok ? outcome.scanned : 0, ok ? outcome.capReached : false, details)
+        .finish(input.userId, input.today, resultOf(outcome), okOutcome ? okOutcome.scanned : 0, okOutcome ? okOutcome.capReached : false, details)
         .catch(() => {});
       return outcome;
     }

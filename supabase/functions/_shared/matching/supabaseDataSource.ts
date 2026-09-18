@@ -29,7 +29,7 @@ export function supabaseDataSource(db: SupabaseClient): DataSource {
       return unwrap(
         await db.from('questionnaire_questions').select('id, category, axis, reverse'),
         'questionnaire_questions',
-      ) as { id: string; category: string; axis: string; reverse: boolean }[];
+      ) as unknown as { id: string; category: string; axis: string; reverse: boolean }[];
     },
     async preferenceSettings(ids) {
       // appearance_importance 는 읽지 않는다 (#40)
@@ -42,7 +42,7 @@ export function supabaseDataSource(db: SupabaseClient): DataSource {
           )
           .in('user_id', ids),
         'preference_settings',
-      ) as Row[];
+      ) as unknown as Row[];
     },
     async dealbreakers(ids) {
       return unwrap(await db.from('dealbreakers').select('user_id, kind, value').in('user_id', ids), 'dealbreakers') as {

@@ -53,3 +53,20 @@ export function identitySessionErrorText(e: EdgeError): string | null {
       return null;
   }
 }
+
+/**
+ * delete-account 오류 (#13) — 탈퇴/복구가 서버에 기록되지 않았을 때의 안내. 남용 제한(429)은 대기 시간을 함께 알린다.
+ * 문구에 서버 응답 원문은 넣지 않는다.
+ */
+export function deleteAccountErrorText(e: EdgeError): string {
+  const limited = rateLimitedText(e);
+  if (limited) return limited;
+  switch (e.code) {
+    case 'not_allowed':
+      return '이 계정은 앱에서 바로 탈퇴할 수 없어요. 고객센터로 문의해 주세요.';
+    case 'not_deleted':
+      return '탈퇴 상태가 아닌 계정이에요. 앱을 다시 열어 주세요.';
+    default:
+      return '서버와 연결하는 데 문제가 있어요. 잠시 후 다시 시도해 주세요.';
+  }
+}

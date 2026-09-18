@@ -12,8 +12,8 @@ import {
   pushPermissionStatus,
   registerPushToken,
   saveNotificationPreferences,
-  unregisterPushToken,
 } from '@/lib/push';
+import { deleteAccountErrorText, readEdgeError } from '@/lib/edge';
 import { openPolicy, POLICY_LINKS_ENABLED } from '@/lib/policyLinks';
 import { useSession } from '@/lib/session';
 import { supabase } from '@/lib/supabase';
@@ -88,9 +88,14 @@ export default function MeScreen() {
         text: '탈퇴하기',
         style: 'destructive',
         onPress: async () => {
-          await unregisterPushToken();
-          // 콘텐츠/인증/identity 보존 정책은 서버(delete-account Edge Function)가 분리 처리
-          await supabase.functions.invoke('delete-account', { body: { action: 'delete' } });
+          // 콘텐츠/인증/identity 보존 정책은 서버(delete-account Edge Function)가 분리 처리.
+          // 서버가 탈퇴를 기록하지 못했으면(남용 제한·차단 계정·네트워크) 로그아웃하지 않는다 —
+          // 계정이 그대로 남아 있는데 "탈퇴됐다" 고 오해하지 않게 한다. 기기 토큰은 서버가 탈퇴와 함께 지운다 (#17).
+          const { data, error } = await supabase.functions.invoke('delete-account', { body: { action: 'delete' } });
+          if (error || data?.deleted !== true) {
+            Alert.alert('탈퇴하지 못했어요', deleteAccountErrorText(await readEdgeError(error)));
+            return;
+          }
           await signOut();
           router.replace('/auth/welcome');
         },

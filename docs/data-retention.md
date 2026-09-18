@@ -15,7 +15,7 @@
 
 | 단계 | 구현 | 검증 |
 |---|---|---|
-| 소프트 삭제 | `delete-account` Edge (status=deleted, 트리거 `users_track_deleted_at` 가 deleted_at 기록), `can_chat_in`/`meetup_set_intent` 가 양쪽 active 요구 | `meetup_flow_tests.sql` (정지 상대), `account_deletion_tests.sql` |
+| 소프트 삭제 | `delete-account` Edge (status=deleted, 트리거 `users_track_deleted_at` 가 deleted_at 기록), `can_chat_in`/`meetup_set_intent` 가 양쪽 active 요구. status 기록이 실패하면 500(`delete_failed`)으로 응답하고 세션을 끊지 않는다 — 앱은 로그아웃하지 않고 안내만 한다 (계정이 남아 있는데 탈퇴됐다고 오해하지 않게) | `meetup_flow_tests.sql` (정지 상대), `account_deletion_tests.sql`, `app_flow_tests.sql` (탈퇴자 self_restricted · 상대 unavailable · 복구) |
 | 유예·후보 | `account_purge_candidates(grace)` — deleted_at 이 유예를 지난 계정 | 〃 |
 | 삭제 작업 상태 (#13) | `account_purge_jobs` (0028) — 사용자당 1행, 단계 storage · provider · db · auth 의 done/failed/skipped, lease, 시도 횟수, Provider 세션 스냅샷. 7절 | `account_purge_jobs_tests.sql` · `account_purge_concurrency_test.sh` · `_shared/purge/selftest.ts` |
 | 익명화 | `account_purge(user_id)` — 아래 표대로. `account-purge` Edge 의 db 단계가 호출 (storage/provider 결과와 무관하게 진행) | 〃 |
